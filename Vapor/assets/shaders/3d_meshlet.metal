@@ -624,10 +624,31 @@ struct MeshletPrePassOutput {
     float4 albedo [[color(1)]];
 };
 
-fragment MeshletPrePassOutput fragmentPrePass(MeshletVertexOut in [[stage_in]]) {
+// alphaMask (buffer 0): 1 = alpha-cutout using the shared material table (glTF
+// MASK), 0 = no material bind (hashColor albedo, no discard). The cutout MUST
+// match the main pass, otherwise the pre-pass writes depth across a leaf's
+// transparent holes and occludes whatever is behind them -> the holes render as
+// clear color (the reported plant-leaf bug).
+fragment MeshletPrePassOutput fragmentPrePass(
+    MeshletVertexOut in [[stage_in]],
+    constant uint& alphaMask [[buffer(0)]],
+    const device MaterialData* materials [[buffer(2)]],
+    const device MeshletMaterialTexs* materialTexs [[buffer(13)]]
+) {
     MeshletPrePassOutput out;
     out.normal = float4(normalize(in.worldNormal), 1.0);
-    out.albedo = float4(in.color, 1.0);
+    if (alphaMask != 0u) {
+        constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
+        MaterialData m = materials[in.materialID];
+        float4 baseColor = materialTexs[in.materialID].albedo.sample(s, in.uv);
+        float cutoff = m.emissiveFactor.a;  // .a = MASK alpha cutoff (0 = disabled)
+        if (cutoff > 0.0 && baseColor.a * m.baseColorFactor.a < cutoff) {
+            discard_fragment();
+        }
+        out.albedo = float4(baseColor.rgb * m.baseColorFactor.rgb, 1.0);
+    } else {
+        out.albedo = float4(in.color, 1.0);  // no material bind: per-meshlet color
+    }
     return out;
 }
 

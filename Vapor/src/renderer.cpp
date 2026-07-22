@@ -2401,6 +2401,18 @@ void Renderer::prePass() {
         mergedVertexBuffer.isValid() && totalInstanceCount > 0;
     if (meshletPrePass) {
         rhi->bindPipeline(meshletPrePassPipeline);
+        // Alpha-cutout inputs so the pre-pass discards a leaf's transparent holes
+        // (glTF MASK) instead of writing depth over them — without this the holes
+        // occlude the background and render as clear color. Mirrors the forward
+        // pre-pass. Metal only (Vulkan meshlet uses MeshletPrePass.frag).
+        if (backend == GraphicsBackend::Metal) {
+            Uint32 alphaMask = bindlessMaterialTable.isValid() ? 1u : 0u;
+            rhi->setFragmentBytes(&alphaMask, sizeof(alphaMask), 0);
+            if (bindlessMaterialTable.isValid()) {
+                rhi->setFragmentBuffer(2, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+                rhi->bindTextureArgumentTable(bindlessMaterialTable);
+            }
+        }
         rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);
         rhi->setVertexBuffer(3, meshletBuffer, 0, 0);
@@ -7283,41 +7295,46 @@ void Renderer::drawGraphicsImGui() {
         if (gpuDrivenMode == GpuDrivenMode::Meshlet) {
             ImGui::SliderFloat("  LOD error (px)", &meshletLodPixelError, 0.1f, 16.0f, "%.1f",
                                ImGuiSliderFlags_Logarithmic);
-            // Display mode: per-meshlet debug color vs a lambertian world-normal
-            // shade. Independent of the probes below (which always force color).
+            // Everyday toggle: full PBR (default) vs per-meshlet debug color for
+            // inspecting cluster boundaries. The probes below always force color.
             ImGui::Checkbox("  Debug color (per-meshlet)", &meshletDebugColor);
-            // Diagnostic: emit EVERY meshlet (all LOD levels stacked, heavy
-            // overdraw). If the screen stays empty with this on, the problem is
-            // raster/depth/bindings, not the cull.
-            ImGui::Checkbox("  Draw all meshlets (skip cull, debug)", &meshletDrawAll);
-            // Diagnostic: mesh stage draws one hardcoded triangle, zero buffer
-            // reads. Visible triangle => dispatch/raster fine, bindings broken.
-            ImGui::Checkbox("  Synthetic triangle (skip buffers, debug)", &meshletSyntheticTri);
-            // Diagnostic: fixed triangle colored by the real payload+meshlet
-            // read (R=vertexCount/64, G=triangleCount/128, B=mi). Yellowish =>
-            // reads OK (bug is geometry/transform); black/wild/none => read bad.
-            ImGui::Checkbox("  Data probe (color = meshlet record, debug)", &meshletProbeData);
-            // Diagnostic: fixed triangle colored by the first real vertex
-            // position. White => read OK (bug is transform/index); cyan =>
-            // zero (buffer unbound); magenta => huge/NaN (VertexData stride).
-            ImGui::Checkbox("  Vertex-read probe (color = position, debug)", &meshletProbeVertex);
-            // Diagnostic: fixed triangle colored by clip-space landing of the
-            // first vertex. White => transform OK (bug is topology/set_index);
-            // missing R = behind camera, missing G = off-screen, missing B = bad Z.
-            ImGui::Checkbox("  Transform probe (color = clip landing, debug)", &meshletProbeXform);
-            // Diagnostic: real vertex loop, hardcoded topology. Cyan tris =>
-            // vertex loop OK (bug is the index loop); blank => vertex emission.
-            ImGui::Checkbox("  Emission probe (real verts, fake topology, debug)", &meshletProbeEmit);
-            // Diagnostic: read + validate meshletTriangles(5). In-range non-degen
-            // => buffer read OK (bug is set_index); no R => indices out of range.
-            ImGui::Checkbox("  Topology probe (color = index validity, debug)", &meshletProbeTopo);
-            // One-shot GPU capture of the next frame -> .gputrace (open in Xcode).
-            // Needs the app relaunched with MTL_CAPTURE_ENABLED=1.
-            if (ImGui::Button("  Capture next frame (.gputrace)")) {
-                rhi->captureFrame("/tmp/vapor_meshlet.gputrace");
+            // Deep bring-up diagnostics (probe ladder + GPU capture) — collapsed
+            // by default so the everyday panel stays clean.
+            if (ImGui::TreeNode("  Advanced debug")) {
+                // Diagnostic: emit EVERY meshlet (all LOD levels stacked, heavy
+                // overdraw). If the screen stays empty with this on, the problem is
+                // raster/depth/bindings, not the cull.
+                ImGui::Checkbox("Draw all meshlets (skip cull)", &meshletDrawAll);
+                // Diagnostic: mesh stage draws one hardcoded triangle, zero buffer
+                // reads. Visible triangle => dispatch/raster fine, bindings broken.
+                ImGui::Checkbox("Synthetic triangle (skip buffers)", &meshletSyntheticTri);
+                // Diagnostic: fixed triangle colored by the real payload+meshlet
+                // read (R=vertexCount/64, G=triangleCount/128, B=mi). Yellowish =>
+                // reads OK (bug is geometry/transform); black/wild/none => read bad.
+                ImGui::Checkbox("Data probe (color = meshlet record)", &meshletProbeData);
+                // Diagnostic: fixed triangle colored by the first real vertex
+                // position. White => read OK (bug is transform/index); cyan =>
+                // zero (buffer unbound); magenta => huge/NaN (VertexData stride).
+                ImGui::Checkbox("Vertex-read probe (color = position)", &meshletProbeVertex);
+                // Diagnostic: fixed triangle colored by clip-space landing of the
+                // first vertex. White => transform OK (bug is topology/set_index);
+                // missing R = behind camera, missing G = off-screen, missing B = bad Z.
+                ImGui::Checkbox("Transform probe (color = clip landing)", &meshletProbeXform);
+                // Diagnostic: real vertex loop, hardcoded topology. Cyan tris =>
+                // vertex loop OK (bug is the index loop); blank => vertex emission.
+                ImGui::Checkbox("Emission probe (real verts, fake topology)", &meshletProbeEmit);
+                // Diagnostic: read + validate meshletTriangles(5). In-range non-degen
+                // => buffer read OK (bug is set_index); no R => indices out of range.
+                ImGui::Checkbox("Topology probe (color = index validity)", &meshletProbeTopo);
+                // One-shot GPU capture of the next frame -> .gputrace (open in Xcode).
+                // Needs the app relaunched with MTL_CAPTURE_ENABLED=1.
+                if (ImGui::Button("Capture next frame (.gputrace)")) {
+                    rhi->captureFrame("/tmp/vapor_meshlet.gputrace");
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(run with MTL_CAPTURE_ENABLED=1)");
+                ImGui::TreePop();
             }
-            ImGui::SameLine();
-            ImGui::TextDisabled("(run with MTL_CAPTURE_ENABLED=1)");
         }
 
         // MDI is a sub-option of the plain Indirect method (single-call
