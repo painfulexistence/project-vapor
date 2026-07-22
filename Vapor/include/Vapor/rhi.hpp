@@ -652,6 +652,13 @@ public:
     // vkCmdDrawMeshTasksEXT; Metal drawMeshThreadgroups). No-op default so
     // backends without mesh shaders still link.
     virtual void drawMeshTasks(Uint32 /*groupCountX*/, Uint32 /*groupCountY*/ = 1, Uint32 /*groupCountZ*/ = 1) {}
+    // Indirect variant: the task-grid size {x,y,z} is read from `argsBuffer` at
+    // `offset` (VkDrawMeshTasksIndirectCommandEXT == Metal's indirect
+    // drawMeshThreadgroups args: three Uint32). Written by a compute pass when
+    // the workgroup count is GPU-determined (e.g. one task group per N visible
+    // tessellation leaves) — separate a producing dispatch with computeBarrier().
+    // No-op default like drawMeshTasks.
+    virtual void drawMeshTasksIndirect(BufferHandle /*argsBuffer*/, size_t /*offset*/) {}
 
     // ========================================================================
     // Indirect Command Buffers + bindless texture tables (Metal-only for now;
@@ -717,10 +724,26 @@ public:
     // index; Vulkan: compute push constants at (binding%4)*16, 16 bytes/slot).
     virtual void setComputeBytes(const void* /*data*/, size_t /*size*/, Uint32 /*binding*/) {}
     virtual void dispatch(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) = 0;
+    // Indirect dispatch: threadgroup counts {x,y,z} are read on the GPU from
+    // `argsBuffer` at `offset` (VkDispatchIndirectCommand ==
+    // MTLDispatchThreadgroupsIndirectArguments: three Uint32). This is how a
+    // compute pass sizes a LATER compute pass without a CPU round-trip (the
+    // adaptive-tessellation update loop: leaf count from the CBT sizes the next
+    // classify dispatch). Producer and consumer must be separated by
+    // computeBarrier() on backends that need it. Default no-op so backends
+    // without it still link.
+    virtual void dispatchIndirect(BufferHandle /*argsBuffer*/, size_t /*offset*/) {}
     // Barrier so compute-shader writes to a buffer are visible to subsequent
     // compute/vertex/fragment reads (e.g. GPU particle sim -> instanced draw).
     // Default no-op: Metal's tracked hazard mode inserts these automatically.
     virtual void computeBarrier() {}
+
+    // Transition a compute-written storage texture to the layout a following
+    // fragment/compute SAMPLE expects (Vulkan: GENERAL -> SHADER_READ_ONLY_OPTIMAL)
+    // and insert the write->read dependency. Must be called OUTSIDE a render pass
+    // (barriers are illegal inside one), before the pass that samples it. Default
+    // no-op: Metal tracks the hazard automatically.
+    virtual void prepareTextureForSampling(TextureHandle /*texture*/) {}
 
     // Set the scissor rectangle for subsequent draws, in framebuffer pixels
     // (top-left origin). Only valid inside a render pass; beginRenderPass

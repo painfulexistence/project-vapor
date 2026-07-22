@@ -514,18 +514,36 @@ namespace Vapor {
         float     turbulence = 0.0f; // curl noise strength for the particle sim
     };
 
-    // Opt-in per-light volumetric fog (the expensive raymarch). One singleton per
-    // scene; VolumetricFogSystem pushes it to the renderer each frame. The cheap
-    // always-on global fog is renderer-side "Height Fog"; this is the upgrade you
-    // add only where you want light shafts. First version is a single global
-    // volume — bounds + volume-blend come later.
+    // Opt-in volumetric fog, injected into a camera-aligned froxel grid. Each
+    // enabled VolumetricFogComponent is ONE fog volume; VolumetricFogSystem
+    // gathers every one and the renderer blends overlapping volumes by weight in
+    // the grid, so a scene can layer local fog banks over a global haze. The
+    // cheap always-on global fog is renderer-side "Height Fog"; this is the
+    // froxel upgrade you add for light shafts and bounded/blended volumes.
     struct VolumetricFogComponent {
         bool  enabled = true;
+
+        // Volume shape. false = a global, unbounded exponential height-fog volume
+        // (the classic scene-wide haze). true = a local axis-aligned "fog bank"
+        // placed at the entity's world transform, with soft edges.
+        bool  bounded = false;
+        // Local half-extents of the bounded box, scaled by the entity transform
+        // (world AABB = transform.position ± halfExtent * transform.scale;
+        // rotation is ignored — the box stays axis-aligned). Bounded volumes only.
+        glm::vec3 halfExtent = glm::vec3(10.0f, 5.0f, 10.0f);
+        // Soft-edge fade distance (world units) at the box faces; 0 = hard edge.
+        // Overlapping banks cross-fade over this distance instead of popping.
+        float edgeFalloff = 2.0f;
+        // Blend weight where volumes overlap — a dense bank dominates a thin haze.
+        float blendWeight = 1.0f;
+
+        // Scattering / density (shared by global + bounded volumes).
         float density = 0.02f;
-        float heightFalloff = 0.1f;
-        float baseHeight = 0.0f;
-        float maxHeight = 100.0f;
-        float anisotropy = 0.6f;
+        float heightFalloff = 0.1f;   // exponential height density falloff (global only)
+        float baseHeight = 0.0f;      // height of densest fog (global only)
+        float maxHeight = 100.0f;     // density hard-cut above this height (global only)
+        glm::vec3 albedo = glm::vec3(1.0f);  // single-scatter tint of the medium
+        float anisotropy = 0.6f;      // Henyey-Greenstein phase g (forward/back scatter)
         float ambientIntensity = 0.3f;
         float noiseScale = 0.01f;
         float noiseIntensity = 0.5f;

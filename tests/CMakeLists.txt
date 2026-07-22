@@ -117,6 +117,19 @@ target_link_libraries(test_meshlet_builder PRIVATE
 target_compile_features(test_meshlet_builder PRIVATE cxx_std_20)
 target_compile_options(test_meshlet_builder PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── CBT/LEB tessellation core tests (pure logic, no GPU) ───────────────────────
+add_executable(test_cbt
+    cbt_test.cpp
+)
+target_include_directories(test_cbt PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+)
+target_link_libraries(test_cbt PRIVATE
+    Catch2::Catch2WithMain
+)
+target_compile_features(test_cbt PRIVATE cxx_std_20)
+target_compile_options(test_cbt PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── Backend Support tests (Metal/Vulkan window initialization) ────────────
 add_executable(test_backend_support
     backend_support_test.cpp
@@ -248,6 +261,7 @@ catch_discover_tests(test_backend_support    WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_ui_system          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ui_system>")
 catch_discover_tests(test_file_system        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_file_system>")
 catch_discover_tests(test_meshlet_builder    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_meshlet_builder>")
+catch_discover_tests(test_cbt                WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_cbt>")
 catch_discover_tests(test_particle_system    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_particle_system>")
 catch_discover_tests(test_scene_blueprint    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_blueprint>")
 catch_discover_tests(test_terrain_world      WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_terrain_world>")
