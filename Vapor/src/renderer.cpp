@@ -2255,8 +2255,19 @@ void Renderer::mainRenderPass() {
             bindMaterial(materialId);
         }
 
-        // Draw all drawables with this material
-        for (Uint32 drawableIdx : drawableIndices) {
+        // Draw all drawables with this material. On the Vulkan CPU path,
+        // consecutive drawables that share a mesh AND occupy consecutive
+        // instance slots collapse into ONE instanced draw: the vertex shader
+        // reads instances[instanceID + gl_InstanceIndex], so pushing the run's
+        // first slot and drawing instanceCount = runLen indexes the whole run.
+        // (Instance slots are assigned in visible order, so entities spawned
+        // grouped by mesh — the MicroVoxel flora — form long runs; a cull gap
+        // just splits a run.) Metal keeps per-object draws: its vertexMain
+        // takes [[base_instance]], not [[instance_id]], so every instance of a
+        // batched draw would read the same InstanceData.
+        const bool canBatchRuns = backend == GraphicsBackend::Vulkan && !useGpuDriven;
+        for (size_t di = 0; di < drawableIndices.size();) {
+            const Uint32 drawableIdx = drawableIndices[di];
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
 
@@ -2264,9 +2275,25 @@ void Renderer::mainRenderPass() {
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) {
                 fmt::print("Warning: drawable {} not found in instance ID map\n", drawableIdx);
+                ++di;
                 continue;
             }
             Uint32 correctInstanceID = it->second;
+
+            // Extend the run while the mesh matches and instance slots stay
+            // consecutive (indexed draws only — the non-indexed fallback is rare
+            // enough to keep per-object).
+            Uint32 runLen = 1;
+            if (canBatchRuns && mesh.indexBuffer.isValid()) {
+                while (di + runLen < drawableIndices.size()) {
+                    const Uint32 nextIdx = drawableIndices[di + runLen];
+                    if (frameDrawables[nextIdx].mesh != drawable.mesh) break;
+                    auto nit = drawableToInstanceID.find(nextIdx);
+                    if (nit == drawableToInstanceID.end() ||
+                        nit->second != correctInstanceID + runLen) break;
+                    ++runLen;
+                }
+            }
 
             // Bind vertex buffer (binding 3 for Metal shader)
             if (mesh.vertexBuffer.isValid()) {
@@ -2296,13 +2323,14 @@ void Renderer::mainRenderPass() {
                                              correctInstanceID * sizeof(Vapor::DrawCommand),
                                              1, sizeof(Vapor::DrawCommand));
                 } else {
-                    rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+                    rhi->drawIndexed(mesh.indexCount, runLen, 0, 0, 0);
                 }
                 mainDrawCalls++;
             } else if (mesh.vertexBuffer.isValid()) {
                 rhi->draw(mesh.vertexCount, 1, 0, 0);
                 mainDrawCalls++;
             }
+            di += runLen;
         }
     }
     }  // end !useMDI (per-object / CPU path)
@@ -2611,21 +2639,39 @@ void Renderer::prePass() {
     const bool prePullsMerged = backend == GraphicsBackend::Metal &&
                                 m_mdiInstanceLayout && mergedVertexBuffer.isValid();
     if (prePullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
-    for (Uint32 drawableIdx : visibleDrawables) {
+    // Vulkan's pre-pass vertex shader is RHIMain.vert (instances[instanceID +
+    // gl_InstanceIndex]), so the same-mesh consecutive-slot run batching the
+    // Main pass does applies here too (see mainRenderPass). Metal stays
+    // per-object ([[base_instance]] semantics).
+    const bool preBatchRuns = backend == GraphicsBackend::Vulkan;
+    for (size_t vi = 0; vi < visibleDrawables.size();) {
+        const Uint32 drawableIdx = visibleDrawables[vi];
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
         auto it = drawableToInstanceID.find(drawableIdx);
-        if (it == drawableToInstanceID.end()) continue;
+        if (it == drawableToInstanceID.end()) { ++vi; continue; }
         Uint32 iid = it->second;
+        Uint32 runLen = 1;
+        if (preBatchRuns && mesh.indexBuffer.isValid()) {
+            while (vi + runLen < visibleDrawables.size()) {
+                const Uint32 nextIdx = visibleDrawables[vi + runLen];
+                if (frameDrawables[nextIdx].mesh != drawable.mesh ||
+                    frameDrawables[nextIdx].material != drawable.material) break;
+                auto nit = drawableToInstanceID.find(nextIdx);
+                if (nit == drawableToInstanceID.end() || nit->second != iid + runLen) break;
+                ++runLen;
+            }
+        }
         bindMaterial(drawable.material);  // albedo/normal maps for the MRT frag
         if (!prePullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
         rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
         if (mesh.indexBuffer.isValid()) {
             rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            rhi->drawIndexed(mesh.indexCount, runLen, 0, 0, 0);
         } else if (mesh.vertexBuffer.isValid()) {
             rhi->draw(mesh.vertexCount, 1, 0, 0);
         }
+        vi += runLen;
     }
     rhi->endRenderPass();
 }
@@ -4068,6 +4114,7 @@ void Renderer::shadowPass() {
         // every drawable — culled ones follow the visible prefix.)
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
+            if (!drawable.castShadow) continue;
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
@@ -4120,6 +4167,7 @@ void Renderer::shadowPass() {
             rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
+            if (!drawable.castShadow) continue;
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
@@ -7800,6 +7848,7 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Render
             Drawable drawable;
             drawable.mesh = mesh->renderMeshId;
             drawable.material = mesh->renderMaterialId;
+            drawable.castShadow = meshRenderer.castShadow;
             drawable.transform = transform.worldTransform;
 
             // Transform AABB to world space

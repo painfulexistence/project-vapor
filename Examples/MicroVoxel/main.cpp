@@ -30,6 +30,7 @@
 #include "Vapor/voxel_world.hpp"
 
 #include <SDL3/SDL.h>
+#include <array>
 #include <cstring>
 #include <entt/entt.hpp>
 #include <fmt/core.h>
@@ -246,6 +247,13 @@ bool spawnFlora(entt::registry& registry,
             rng = rng * 1664525u + 1013904223u;
             return static_cast<float>(rng >> 8) * (1.0f / 16777216.0f);
         };
+        // Roll every placement first (stable RNG stream), bucketed per mesh,
+        // then create the entities MESH BY MESH: entities spawned grouped by
+        // mesh collect into consecutive drawables -> consecutive instance
+        // slots -> the renderer's per-object path collapses each group into a
+        // handful of instanced draws instead of one draw per plant.
+        struct Placement { glm::vec3 pos; float yaw; float scale; };
+        std::array<std::vector<Placement>, 3> perMesh;
         for (int i = 0; i < attempts; i++) {
             const int gx = static_cast<int>(rand01() * (dim.x - 1));
             const int gz = static_cast<int>(rand01() * (dim.z - 1));
@@ -257,17 +265,27 @@ bool spawnFlora(entt::registry& registry,
             const int top = static_cast<int>(h);
             if (top + 1 >= dim.y) continue;
             // 70% grass tufts, 30% flowers (alternating the two variants).
-            const auto& mesh = (kind < 0.7f) ? floraMeshes[0]
-                                             : floraMeshes[1 + (static_cast<int>(kind * 100.0f) & 1)];
-            auto e = registry.create();
-            auto& t = registry.emplace<Vapor::TransformComponent>(e);
-            t.position = origin + glm::vec3((gx + 0.5f) * voxelSize, (top + 1) * voxelSize,
-                                            (gz + 0.5f) * voxelSize);
-            t.rotation = glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
-            t.scale = glm::vec3(scale);
-            auto& mr = registry.emplace<Vapor::MeshRendererComponent>(e);
-            mr.meshes.push_back(mesh);
-            outEntities.push_back(e);
+            const size_t meshIdx = (kind < 0.7f) ? 0 : 1 + (static_cast<size_t>(kind * 100.0f) & 1);
+            perMesh[meshIdx].push_back({
+                origin + glm::vec3((gx + 0.5f) * voxelSize, (top + 1) * voxelSize,
+                                   (gz + 0.5f) * voxelSize),
+                yaw, scale });
+        }
+        for (size_t meshIdx = 0; meshIdx < perMesh.size(); meshIdx++) {
+            for (const Placement& pl : perMesh[meshIdx]) {
+                auto e = registry.create();
+                auto& t = registry.emplace<Vapor::TransformComponent>(e);
+                t.position = pl.pos;
+                t.rotation = glm::angleAxis(pl.yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+                t.scale = glm::vec3(pl.scale);
+                auto& mr = registry.emplace<Vapor::MeshRendererComponent>(e);
+                mr.meshes.push_back(floraMeshes[meshIdx]);
+                // Tiny cutout quads contribute almost nothing to the cascades
+                // but each one is a full caster draw x every shadow pass — the
+                // whole reason flora defaulted off. Skip the shadow passes.
+                mr.castShadow = false;
+                outEntities.push_back(e);
+            }
         }
     }
     return true;

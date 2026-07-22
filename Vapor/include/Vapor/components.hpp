@@ -45,6 +45,7 @@ namespace Vapor {
     struct MeshRendererComponent {
         std::vector<std::shared_ptr<Mesh>> meshes;
         bool visible = true;
+        bool castShadow = true;  // off = skipped by the shadow passes (see Drawable)
     };
 
     // ============================================================================

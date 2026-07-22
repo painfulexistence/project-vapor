@@ -34,6 +34,10 @@ struct Drawable {
     glm::mat4 transform;
     MeshId mesh = INVALID_MESH_ID;
     MaterialId material = INVALID_MATERIAL_ID;
+    // Shadow passes (PSSM cascades + near map) skip drawables with this off.
+    // For dense decorative geometry (the MicroVoxel demo's quad flora) the
+    // caster set shrinks by hundreds of draws per cascade.
+    bool castShadow = true;
     glm::vec3 aabbMin;
     glm::vec3 aabbMax;
     glm::vec4 color = glm::vec4(1.0f);
