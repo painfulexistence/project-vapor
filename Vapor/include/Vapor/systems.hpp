@@ -923,6 +923,11 @@ namespace Vapor {
                     p.blendMode = static_cast<Uint8>(r->blendMode);
                     p.texture   = r->texture;
                     p.size      = r->size;
+                    // Depth effects
+                    p.depthEffects = (r->depthFadeEnabled ? 0x01 : 0)
+                                   | (r->groundClampEnabled ? 0x02 : 0);
+                    p.depthFadeDistance = r->depthFadeDistance;
+                    p.groundClampOffset = r->groundClampOffset;
                 }
                 draws.push_back(p);
                 if (draws.size() >= MAX_PARTICLE_DRAWS) break;

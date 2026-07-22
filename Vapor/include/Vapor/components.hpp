@@ -404,6 +404,12 @@ namespace Vapor {
         ParticleBlendMode blendMode = ParticleBlendMode::Additive;
         uint32_t texture = 0xFFFFFFFFu; // renderer TextureId; ~0u = procedural soft disc
         float size = 0.1f;              // world-space billboard half-extent
+
+        // Depth effects (RHI layer) — per-emitter
+        bool  depthFadeEnabled   = false;   // soft fade when near scene geometry
+        float depthFadeDistance  = 0.5f;    // fade range in world units
+        bool  groundClampEnabled = false;   // clamp particles to depth surface
+        float groundClampOffset  = 0.02f;   // height above surface when clamped
     };
 
     // One-shot burst of particles at the entity's current position.

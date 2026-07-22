@@ -195,44 +195,99 @@ struct ParticleVertexOut {
     float4 position [[position]];
     float2 uv;
     float4 color;
+    float  linearDepth;  // for depth fade
+    float2 screenUV;     // for depth sampling
 };
 
+// Extended push constants for depth effects (32 bytes, matches Vulkan layout)
 struct ParticlePushConstants {
     float particleSize;
-    float useTexture;   // > 0.5: sample the per-emitter texture; else procedural disc
-    float _pad2;
-    float _pad3;
+    float useTexture;         // > 0.5: sample the per-emitter texture; else procedural disc
+    float depthFadeEnabled;   // > 0.5: apply depth fade
+    float depthFadeDistance;
+    float groundClampEnabled; // > 0.5: clamp to depth surface
+    float groundClampOffset;  // height above surface
+    float _pad0;
+    float _pad1;
 };
+
+float linearizeDepthMetal(float d, float nearPlane, float farPlane) {
+    return nearPlane * farPlane / (farPlane - d * (farPlane - nearPlane));
+}
+
+float3 reconstructWorldPositionMetal(float2 screenUV, float depth, float4x4 invProj, float4x4 invView) {
+    float2 ndc = screenUV * 2.0 - 1.0;
+    // Metal uses reverse-Z, so depth 1.0 is near, 0.0 is far
+    float4 clipPos = float4(ndc.x, -ndc.y, depth, 1.0);
+    float4 viewPos = invProj * clipPos;
+    viewPos /= viewPos.w;
+    float4 worldPos = invView * viewPos;
+    return worldPos.xyz;
+}
 
 vertex ParticleVertexOut particleVertex(
     uint vertexID   [[vertex_id]],
     uint instanceID [[instance_id]],
     constant CameraData&              camera        [[buffer(0)]],
     constant ParticlePushConstants&   pushConstants [[buffer(1)]],
-    device const Particle*            particles     [[buffer(2)]]
+    device const Particle*            particles     [[buffer(2)]],
+    depth2d<float>                    sceneDepth    [[texture(1)]]
 ) {
     Particle p = particles[instanceID];
+    float3 worldPos = p.posLifetime.xyz;
+
+    // Ground clamping: project particle to screen, sample depth, clamp to surface
+    if (pushConstants.groundClampEnabled > 0.5) {
+        float4 clipPos = camera.proj * camera.view * float4(worldPos, 1.0);
+        if (clipPos.w > 0.0) {
+            float2 ndc = clipPos.xy / clipPos.w;
+            // Metal NDC Y is flipped vs clip space
+            float2 screenUV = float2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+
+            // Only clamp if on screen
+            if (screenUV.x >= 0.0 && screenUV.x <= 1.0 &&
+                screenUV.y >= 0.0 && screenUV.y <= 1.0) {
+                constexpr sampler depthSampler(filter::linear, address::clamp_to_edge);
+                float sceneDepthSample = sceneDepth.sample(depthSampler, screenUV);
+                float3 surfacePos = reconstructWorldPositionMetal(
+                    screenUV, sceneDepthSample, camera.invProj, camera.invView);
+
+                if (worldPos.y < surfacePos.y + pushConstants.groundClampOffset) {
+                    worldPos.y = surfacePos.y + pushConstants.groundClampOffset;
+                }
+            }
+        }
+    }
 
     float3 cameraRight = float3(camera.view[0][0], camera.view[1][0], camera.view[2][0]);
     float3 cameraUp    = float3(camera.view[0][1], camera.view[1][1], camera.view[2][1]);
 
     float2 quadPos  = quadVertices[vertexID];
     float  size     = pushConstants.particleSize;
-    float3 worldPos = p.posLifetime.xyz  // position is the xyz of posLifetime
-                    + cameraRight * quadPos.x * size
-                    + cameraUp    * quadPos.y * size;
+    float3 billboardPos = worldPos
+                        + cameraRight * quadPos.x * size
+                        + cameraUp    * quadPos.y * size;
+
+    float4 viewPos = camera.view * float4(billboardPos, 1.0);
+    float4 clipPos = camera.proj * viewPos;
 
     ParticleVertexOut out;
-    out.position = camera.proj * camera.view * float4(worldPos, 1.0);
-    out.uv       = quadUVs[vertexID];
-    out.color    = p.color;
+    out.position    = clipPos;
+    out.uv          = quadUVs[vertexID];
+    out.color       = p.color;
+    out.linearDepth = -viewPos.z; // negated because view Z is negative forward
+    // Compute screen UV for depth sampling
+    float2 ndc = clipPos.xy / clipPos.w;
+    out.screenUV = float2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
     return out;
 }
 
 fragment float4 particleFragment(
     ParticleVertexOut               in              [[stage_in]],
     constant ParticlePushConstants& pc              [[buffer(0)]],
+    constant CameraData&            camera          [[buffer(1)]],
     texture2d<float>                particleTexture [[texture(0)]],
+    depth2d<float>                  sceneDepth      [[texture(1)]],
     sampler                         particleSampler [[sampler(0)]]
 ) {
     float4 outColor;
@@ -249,6 +304,18 @@ fragment float4 particleFragment(
 
         outColor = float4(in.color.rgb * (alpha + glow * 0.5), in.color.a * alpha);
     }
+
+    // Depth fade: soft fade when particle is close to scene geometry
+    if (pc.depthFadeEnabled > 0.5 && pc.depthFadeDistance > 0.0) {
+        constexpr sampler depthSampler(filter::linear, address::clamp_to_edge);
+        float sceneDepthSample = sceneDepth.sample(depthSampler, in.screenUV);
+        float sceneLinearDepth = linearizeDepthMetal(sceneDepthSample, camera.near, camera.far);
+        float depthDiff = sceneLinearDepth - in.linearDepth;
+
+        float depthFade = saturate(depthDiff / pc.depthFadeDistance);
+        outColor.a *= depthFade;
+    }
+
     if (outColor.a < 0.01) discard_fragment();
     return outColor;
 }
