@@ -267,6 +267,11 @@ namespace Vapor {
         float fogDensityMul    = 1.0f;      // multiplies VolumetricFogComponent density
         float windMul          = 1.0f;      // multiplies WindFieldComponent strength
         float iblDim           = 1.0f;      // scales the baked environment (IBL) ambience
+        // Multiplies the renderer's cloud sunLightScale: storm decks read darker
+        // than their self-shadowing alone provides (6-step light march). Cloud
+        // albedo itself is near-white in reality — darkness is extinction, and
+        // this is the artistic stand-in for the part the march can't afford.
+        float cloudSunMul      = 1.0f;
     };
 
     inline WeatherParams weatherParamsFor(WeatherState s) {
@@ -275,12 +280,12 @@ namespace Vapor {
             // ambient 0.001); storms raise coverage/density, drop the ceiling
             // and flatten toward stratus. Ambient stays in the tuned ~0.001-0.01
             // range — it is a full-sky glow, not a per-cloud fill.
-            //                     coverage density type   bottom   top      ambient sunDim fogMul windMul iblDim
-            case WeatherState::Cloudy:       return { 0.45f, 0.35f, 0.40f, 1600.0f, 10000.0f, 0.002f, 0.80f, 1.2f, 1.3f, 0.85f };
-            case WeatherState::Overcast:     return { 0.75f, 0.50f, 0.20f, 1000.0f,  6000.0f, 0.004f, 0.40f, 1.6f, 1.6f, 0.50f };
-            case WeatherState::Rain:         return { 0.85f, 0.65f, 0.15f,  800.0f,  5000.0f, 0.003f, 0.25f, 2.2f, 2.0f, 0.40f };
-            case WeatherState::Thunderstorm: return { 0.95f, 0.85f, 0.10f,  600.0f,  4500.0f, 0.002f, 0.12f, 2.5f, 3.0f, 0.25f };
-            case WeatherState::Snow:         return { 0.70f, 0.45f, 0.30f, 1100.0f,  6000.0f, 0.006f, 0.45f, 1.8f, 1.2f, 0.60f };
+            //                     coverage density type   bottom   top      ambient sunDim fogMul windMul iblDim cloudSun
+            case WeatherState::Cloudy:       return { 0.45f, 0.35f, 0.40f, 1600.0f, 10000.0f, 0.002f, 0.80f, 1.2f, 1.3f, 0.85f, 0.85f };
+            case WeatherState::Overcast:     return { 0.75f, 0.50f, 0.20f, 1000.0f,  6000.0f, 0.004f, 0.40f, 1.6f, 1.6f, 0.50f, 0.55f };
+            case WeatherState::Rain:         return { 0.85f, 0.65f, 0.15f,  800.0f,  5000.0f, 0.003f, 0.25f, 2.2f, 2.0f, 0.40f, 0.45f };
+            case WeatherState::Thunderstorm: return { 0.95f, 0.85f, 0.10f,  600.0f,  4500.0f, 0.002f, 0.12f, 2.5f, 3.0f, 0.25f, 0.30f };
+            case WeatherState::Snow:         return { 0.70f, 0.45f, 0.30f, 1100.0f,  6000.0f, 0.006f, 0.45f, 1.8f, 1.2f, 0.60f, 0.70f };
             case WeatherState::Clear:
             default:                         return {};
         }
@@ -299,6 +304,7 @@ namespace Vapor {
         r.fogDensityMul    = L(a.fogDensityMul,    b.fogDensityMul);
         r.windMul          = L(a.windMul,          b.windMul);
         r.iblDim           = L(a.iblDim,           b.iblDim);
+        r.cloudSunMul      = L(a.cloudSunMul,      b.cloudSunMul);
         return r;
     }
 

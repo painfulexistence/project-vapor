@@ -503,6 +503,7 @@ namespace Vapor {
                     clouds.layerBottom      = p.cloudLayerBottom;
                     clouds.layerTop         = p.cloudLayerTop;
                     clouds.ambientIntensity = p.cloudAmbient + flashGlow;
+                    clouds.sunScale         = p.cloudSunMul;
                     renderer->setClouds(clouds);
                 }
 

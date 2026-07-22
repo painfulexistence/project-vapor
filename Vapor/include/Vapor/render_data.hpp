@@ -404,6 +404,9 @@ struct CloudsRenderData {
     float layerBottom = 2000.0f;  // meters
     float layerTop = 12000.0f;
     float ambientIntensity = 0.001f;
+    // Multiplies the renderer's panel-tuned sunLightScale (never replaces it):
+    // weather darkens the deck beyond what self-shadowing provides.
+    float sunScale = 1.0f;
 };
 
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
