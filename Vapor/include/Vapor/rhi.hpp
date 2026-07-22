@@ -722,6 +722,13 @@ public:
     // Default no-op: Metal's tracked hazard mode inserts these automatically.
     virtual void computeBarrier() {}
 
+    // Transition a compute-written storage texture to the layout a following
+    // fragment/compute SAMPLE expects (Vulkan: GENERAL -> SHADER_READ_ONLY_OPTIMAL)
+    // and insert the write->read dependency. Must be called OUTSIDE a render pass
+    // (barriers are illegal inside one), before the pass that samples it. Default
+    // no-op: Metal tracks the hazard automatically.
+    virtual void prepareTextureForSampling(TextureHandle /*texture*/) {}
+
     // Set the scissor rectangle for subsequent draws, in framebuffer pixels
     // (top-left origin). Only valid inside a render pass; beginRenderPass
     // resets it to the full render area. Used by UI clipping (RmlUI).

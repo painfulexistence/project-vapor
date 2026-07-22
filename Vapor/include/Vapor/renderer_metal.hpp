@@ -506,6 +506,7 @@ public:
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
+    void setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) override;
     void requestIBLUpdate() override { iblNeedsUpdate = true; }
 
     // ===== Font Rendering API =====
@@ -771,10 +772,17 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> fogApplyPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> fogSimplePipeline;
     std::vector<NS::SharedPtr<MTL::Buffer>> volumetricFogDataBuffers;
-    NS::SharedPtr<MTL::Texture> fogFroxelGrid;// 3D froxel data texture
-    NS::SharedPtr<MTL::Texture> fogIntegratedVolume;// 3D integrated scattering
+    std::vector<NS::SharedPtr<MTL::Buffer>> fogVolumeBuffers;// per-frame VolumetricFogVolumeGPU[kMaxFogVolumes]
+    NS::SharedPtr<MTL::Texture> fogFroxelGrid;// 3D froxel data texture (in-scatter.rgb, extinction)
+    NS::SharedPtr<MTL::Texture> fogIntegratedVolume;// 3D integrated scattering (accum.rgb, transmittance)
     bool volumetricFogEnabled = true;
+    // Froxel grid path (inject/integrate compute + cheap composite) vs the
+    // simpleFogFragment raymarch fallback. Froxel is the default optimization.
+    bool fogUseFroxel = true;
     VolumetricFogData volumetricFogSettings;
+    // Fog volumes resolved from the ECS each frame by setVolumetricFogVolumes;
+    // uploaded into fogVolumeBuffers and injected into the froxel grid.
+    std::vector<VolumetricFogVolumeData> volumetricFogVolumes;
 
     // Volumetric Cloud resources
     NS::SharedPtr<MTL::RenderPipelineState> cloudRenderPipeline;

@@ -317,7 +317,7 @@ public:
     void setParticleVisible(bool visible) override { particleVisible = visible; }
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
-    void setVolumetricFog(const VolumetricFogRenderData& fog) override;
+    void setVolumetricFogVolumes(const std::vector<VolumetricFogVolumeData>& volumes) override;
     void setClouds(const CloudsRenderData& clouds) override;
     void setIBLIntensity(float intensity) override;
     // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
@@ -704,13 +704,29 @@ private:
     LightScatteringRenderData lightScatteringSettings;
     PipelineHandle volumetricFogPipeline;
     TextureHandle tempColorRT;  // ping-pong target for fog (swapped with colorRT)
-    // Volumetric fog (the expensive raymarch) is now opt-in and ECS-driven:
-    // setVolumetricFog() copies a VolumetricFogComponent's tunables into
-    // fogSettings and flips m_volumetricFogActive. Off until a component pushes it.
+    // Volumetric fog (the raymarch) is opt-in and ECS-driven: setVolumetricFogVolumes()
+    // stores the scene's fog volumes and gates the pass on whether any exist.
     bool volumetricFogEnabled = false;
-    // Persistent fog tunables. volumetricFogPass() copies this and overwrites the
-    // per-frame fields (invViewProj/camera/sun).
+    // Persistent fog tunables (mirror of the first/global volume). volumetricFogPass()
+    // copies this and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
+    // ECS-resolved fog volumes (global + bounded AABB banks), uploaded to
+    // fogVolumeBuffer each frame and blended in the froxel grid.
+    std::vector<VolumetricFogVolumeData> volumetricFogVolumes;
+    BufferHandle fogVolumeBuffer;  // GPU array of VolumetricFogVolumeGPU
+    // Froxel volumetric fog: inject -> integrate (compute) -> composite, on both
+    // backends (Metal reuses the 3d_volumetric_fog.metal kernels, Vulkan the
+    // Froxel*.comp twins). The fullscreen raymarch is the fallback.
+    bool fogUseFroxel = true;
+    BufferHandle fogFroxelGlobalsBuffer;        // VolumetricFogData layout (froxel kernels)
+    TextureHandle fogFroxelGridTexture;         // 3D: in-scatter.rgb + extinction (storage+sampled)
+    TextureHandle fogIntegratedVolumeTexture;   // 3D: accumulated scattering.rgb + transmittance
+    ComputePipelineHandle fogFroxelInjectPipeline;
+    ComputePipelineHandle fogFroxelIntegratePipeline;
+    ShaderHandle fogFroxelInjectShader;
+    ShaderHandle fogFroxelIntegrateShader;
+    PipelineHandle fogFroxelCompositePipeline;  // fullscreen, samples the integrated volume
+    ShaderHandle fogFroxelCompositeShader;      // Vulkan composite frag (Metal builds its own)
     // Cheap analytic exponential height fog (the pre-raymarch "Height Fog"):
     // a single per-pixel evaluation, no shadows/lights. On by default — it is the
     // common-case global fog; the raymarch above is the opt-in upgrade.

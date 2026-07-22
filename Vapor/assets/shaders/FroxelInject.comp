@@ -1,0 +1,295 @@
+#version 450
+// Froxel fog injection (Vulkan RHI). GLSL twin of froxelInjection in
+// 3d_volumetric_fog.metal: one invocation per froxel — blend every fog volume
+// (additive density, density-weighted albedo/phase-g/ambient), light the medium
+// (sun + one PSSM cascade tap for shafts, tile-culled points, spots, rects),
+// and store (in-scatter.rgb, extinction) into the 3D froxel grid.
+//
+// RHI compute bindings: set 0 = storage buffers (setComputeBuffer), set 1 =
+// storage image (setComputeTexture), set 2 = sampled texture
+// (setComputeSampledTexture), push constants = setComputeBytes at (binding%4)*16.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+const uint FROXEL_SIZE_X = 160u;
+const uint FROXEL_SIZE_Y = 90u;
+const uint FROXEL_SIZE_Z = 64u;
+const uint MAX_FOG_VOLUMES = 16u;
+const float INV_4PI = 0.07957747;
+
+// ── std430 struct twins (must match the C++/MSL layouts) ─────────────────────
+struct FogVolume {
+    vec4 boundsMin;      // xyz min; w = bounded flag
+    vec4 boundsMax;      // xyz max; w = edgeFalloff
+    vec4 densityParams;  // density, heightFalloff, baseHeight, maxHeight
+    vec4 albedoBlend;    // albedo.rgb, blendWeight
+    vec4 phaseNoise;     // anisotropy, ambientIntensity, noiseScale, noiseIntensity
+    vec4 wind;           // windSpeed, ...
+};
+struct PointLight {
+    vec3 position; float _p1;
+    vec3 color;    float _p2;
+    float intensity; float radius; vec2 _p3;
+};
+struct SpotLight {
+    vec3 position; float _p0;
+    vec3 direction; float _p1;
+    vec3 color; float _p2;
+    float radius; float cosInner; float cosOuter; float intensity;
+};
+struct RectLight {
+    vec3 position; float halfWidth;
+    vec3 rright;   float halfHeight;
+    vec3 up;       float intensity;
+    vec3 color;    uint useVideoTexture;
+};
+// Cluster layout must match graphics.hpp / VolumetricFog.frag exactly — the
+// spot/rect tails set the array STRIDE, so getting them wrong reads the wrong
+// cluster for tileIdx > 0. This froxel still loops-all spots/rects (like the
+// raymarch fog), so it only reads lightCount/lightIndices, but the full struct
+// is required for correct indexing.
+const uint MAX_LIGHTS_PER_TILE   = 256u;
+const uint MAX_SPOTS_PER_CLUSTER = 64u;
+const uint MAX_RECTS_PER_CLUSTER = 32u;
+struct Cluster {
+    vec4 mn;
+    vec4 mx;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_TILE];
+    uint spotCount;
+    uint spotIndices[MAX_SPOTS_PER_CLUSTER];
+    uint rectCount;
+    uint rectIndices[MAX_RECTS_PER_CLUSTER];
+};
+struct CameraData {
+    mat4 proj; mat4 view; mat4 invProj; mat4 invView;
+    float nearPlane; float farPlane; vec2 _cpad;
+    vec3 position; float _cpad2;
+    vec4 frustumPlanes[6];
+};
+
+// Froxel globals — VolumetricFogData std430 twin (288 bytes; explicit pads mirror
+// the C++ vec3+pad = 16-byte slots).
+layout(std430, set = 0, binding = 0) readonly buffer GlobalsBuf {
+    mat4 invViewProj;
+    mat4 prevViewProj;
+    vec3 cameraPosition; float _gp1;
+    vec3 sunDirection;   float _gp2;
+    vec3 sunColor;       float _gp3;
+    float sunIntensity;
+    float fogDensity;
+    float fogHeightFalloff;
+    float fogBaseHeight;
+    float fogMaxHeight;
+    float scatteringCoeff;
+    float extinctionCoeff;
+    float anisotropy;
+    float ambientIntensity;
+    float nearPlane;
+    float farPlane;
+    uint  volumeCount;
+    vec2  screenSize;
+    vec2  _gp5;
+    uint  frameIndex;
+    float temporalBlend;
+    float noiseScale;
+    float noiseIntensity;
+    float windSpeed;
+    float gtime;
+    vec2  _gp6;
+    vec3  windDirection; float _gp7;
+};
+layout(std430, set = 0, binding = 1) readonly buffer CameraBuf { CameraData cam; };
+layout(std430, set = 0, binding = 2) readonly buffer PSSMBuf {
+    mat4 shadowLightSpaceMatrices[3];
+    vec4 cascadeSplits;
+    float shadowBlendRange;
+};
+layout(std430, set = 0, binding = 3) readonly buffer PointLightBuf { PointLight pointLights[]; };
+layout(std430, set = 0, binding = 4) readonly buffer ClusterBuf { Cluster tiles[]; };
+layout(std430, set = 0, binding = 5) readonly buffer SpotLightBuf { SpotLight spotLights[]; };
+layout(std430, set = 0, binding = 6) readonly buffer RectLightBuf { RectLight rectLights[]; };
+// binding 7 (not 8): Vulkan compute has only 8 storage-buffer slots (0-7) and the
+// light params ride a push constant, not a descriptor — so b7 is free here. The
+// Metal kernel keeps volumes at [[buffer(8)]] (its b7 is the light-params bytes).
+layout(std430, set = 0, binding = 7) readonly buffer FogVolumeBuf { FogVolume fogVolumes[]; };
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D froxelGrid;
+layout(set = 2, binding = 1) uniform sampler2DArray pssmShadowMaps;
+// x=cullGridX y=cullGridY z=spotCount w=rectCount (setComputeBytes(...,7) -> offset 48)
+layout(push_constant) uniform PC { layout(offset = 48) uvec4 fogLightParams; };
+
+float phaseHG(float cosTheta, float g) {
+    float g2 = g * g;
+    float d = 1.0 + g2 - 2.0 * g * cosTheta;
+    return INV_4PI * (1.0 - g2) / pow(d, 1.5);
+}
+
+// Value-noise fBm (GLSL twin of the shared Metal helpers).
+float fHash13(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float fValueNoise3D(vec3 p) {
+    vec3 pi = floor(p);
+    vec3 pf = fract(p);
+    vec3 w = pf * pf * (3.0 - 2.0 * pf);
+    return mix(
+        mix(mix(fHash13(pi + vec3(0,0,0)), fHash13(pi + vec3(1,0,0)), w.x),
+            mix(fHash13(pi + vec3(0,1,0)), fHash13(pi + vec3(1,1,0)), w.x), w.y),
+        mix(mix(fHash13(pi + vec3(0,0,1)), fHash13(pi + vec3(1,0,1)), w.x),
+            mix(fHash13(pi + vec3(0,1,1)), fHash13(pi + vec3(1,1,1)), w.x), w.y),
+        w.z);
+}
+float fFbm3D(vec3 p) {
+    float value = 0.0, amplitude = 0.5, frequency = 1.0;
+    for (int i = 0; i < 4; i++) {
+        value += amplitude * fValueNoise3D(p * frequency);
+        amplitude *= 0.5; frequency *= 2.0;
+    }
+    return value;
+}
+
+// World-space center of a froxel (planar view-depth slice), reconstructed with
+// the camera's own invProj/invView (matches VolumetricFog.frag's NDC).
+vec3 froxelToWorld(vec3 uvw) {
+    float viewDepth = nearPlane * pow(farPlane / nearPlane, uvw.z);
+    vec2 ndc = vec2(uvw.x * 2.0 - 1.0, 1.0 - uvw.y * 2.0);
+    vec4 viewH = cam.invProj * vec4(ndc, 1.0, 1.0);
+    vec3 viewRay = viewH.xyz / viewH.w;
+    vec3 viewPos = viewRay * (viewDepth / max(-viewRay.z, 1e-4));
+    return (cam.invView * vec4(viewPos, 1.0)).xyz;
+}
+
+float evalVolumeDensity(FogVolume v, vec3 p) {
+    float density = v.densityParams.x;
+    float base;
+    if (v.boundsMin.w < 0.5) {
+        // Global exponential height fog.
+        if (p.y > v.densityParams.w) return 0.0;
+        base = density * exp(-max(0.0, p.y - v.densityParams.z) * max(v.densityParams.y, 1e-4));
+    } else {
+        vec3 bmin = v.boundsMin.xyz;
+        vec3 bmax = v.boundsMax.xyz;
+        if (any(lessThan(p, bmin)) || any(greaterThan(p, bmax))) return 0.0;
+        vec3 dmn = p - bmin;
+        vec3 dmx = bmax - p;
+        float edge = min(min(min(dmn.x, dmn.y), dmn.z), min(min(dmx.x, dmx.y), dmx.z));
+        base = density * clamp(edge / max(v.boundsMax.w, 1e-4), 0.0, 1.0);
+    }
+    if (base <= 0.0) return 0.0;
+    float nScale = v.phaseNoise.z;
+    if (nScale > 0.0) {
+        vec3 np = p * nScale + windDirection * (gtime * v.wind.x);
+        float n = fFbm3D(np) * 0.5 + 0.5;
+        base *= (1.0 + (n - 0.5) * v.phaseNoise.w * 2.0);
+    }
+    return max(0.0, base);
+}
+
+void main() {
+    uvec3 gid = gl_GlobalInvocationID;
+    if (gid.x >= FROXEL_SIZE_X || gid.y >= FROXEL_SIZE_Y || gid.z >= FROXEL_SIZE_Z) return;
+
+    vec3 uvw = (vec3(gid) + 0.5) / vec3(FROXEL_SIZE_X, FROXEL_SIZE_Y, FROXEL_SIZE_Z);
+    vec3 worldPos = froxelToWorld(uvw);
+
+    // Volume blend.
+    float totalDensity = 0.0;
+    vec3  wAlbedo = vec3(0.0);
+    float wG = 0.0, wAmbient = 0.0, wSum = 0.0;
+    uint count = min(volumeCount, MAX_FOG_VOLUMES);
+    for (uint vi = 0u; vi < count; ++vi) {
+        float d = evalVolumeDensity(fogVolumes[vi], worldPos);
+        if (d <= 0.0) continue;
+        float w = d * max(fogVolumes[vi].albedoBlend.w, 0.0);
+        totalDensity += d;
+        wAlbedo  += fogVolumes[vi].albedoBlend.xyz * w;
+        wG       += fogVolumes[vi].phaseNoise.x * w;
+        wAmbient += fogVolumes[vi].phaseNoise.y * w;
+        wSum     += w;
+    }
+    if (totalDensity < 1e-5 || wSum <= 0.0) {
+        imageStore(froxelGrid, ivec3(gid), vec4(0.0));
+        return;
+    }
+    vec3  albedo  = wAlbedo / wSum;
+    float g       = wG / wSum;
+    float ambient = wAmbient / wSum;
+
+    vec3 rayDir = normalize(worldPos - cameraPosition);
+
+    // Tile-culled light list (y-up cull convention, like VolumetricFog.frag).
+    uint tileX = min(uint(uvw.x * float(fogLightParams.x)), fogLightParams.x - 1u);
+    uint tileY = min(uint((1.0 - uvw.y) * float(fogLightParams.y)), fogLightParams.y - 1u);
+    uint tileIdx = tileX + tileY * fogLightParams.x;
+    uint tileLights = min(tiles[tileIdx].lightCount, 16u);
+
+    vec3 L = vec3(0.0);
+
+    // Sun with a one-tap PSSM cascade (manual compare — no derivatives in compute).
+    {
+        float sunPhase = phaseHG(dot(rayDir, sunDirection), g);
+        float viewDepth = abs((cam.view * vec4(worldPos, 1.0)).z);
+        int ci = 0;
+        if      (viewDepth > cascadeSplits.z) ci = 2;
+        else if (viewDepth > cascadeSplits.y) ci = 1;
+        vec4 lp = shadowLightSpaceMatrices[ci] * vec4(worldPos, 1.0);
+        vec3 proj = lp.xyz / lp.w;
+        vec2 sUV = proj.xy * 0.5 + 0.5;
+        float sunVis = 1.0;
+        if (sUV.x >= 0.0 && sUV.x <= 1.0 && sUV.y >= 0.0 && sUV.y <= 1.0 && proj.z <= 1.0) {
+            float sd = textureLod(pssmShadowMaps, vec3(sUV, float(ci)), 0.0).r;
+            sunVis = (proj.z - 0.002) <= sd ? 1.0 : 0.0;
+        }
+        L += sunColor * sunIntensity * sunPhase * sunVis;
+    }
+
+    // Tile-culled point lights.
+    for (uint i = 0u; i < tileLights; ++i) {
+        PointLight pl = pointLights[tiles[tileIdx].lightIndices[i]];
+        vec3 toL = pl.position - worldPos;
+        float d2 = max(dot(toL, toL), 1e-4);
+        float dd = sqrt(d2);
+        if (dd >= pl.radius) continue;
+        float atten = (1.0 - smoothstep(pl.radius * 0.8, pl.radius, dd)) / d2;
+        L += pl.color * pl.intensity * atten * phaseHG(dot(rayDir, toL / dd), g);
+    }
+
+    // Spot cones.
+    for (uint i = 0u; i < fogLightParams.z; ++i) {
+        SpotLight sl = spotLights[i];
+        vec3 toL = sl.position - worldPos;
+        float d2 = max(dot(toL, toL), 1e-4);
+        float dd = sqrt(d2);
+        if (dd >= sl.radius) continue;
+        vec3 ldir = toL / dd;
+        float cone = clamp((dot(-ldir, sl.direction) - sl.cosOuter)
+                               / max(sl.cosInner - sl.cosOuter, 1e-4), 0.0, 1.0);
+        if (cone <= 0.0) continue;
+        float atten = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, dd)) / d2 * cone * cone;
+        L += sl.color * sl.intensity * atten * phaseHG(dot(rayDir, ldir), g);
+    }
+
+    // Rect area lights (closest-point-on-quad attenuation).
+    for (uint i = 0u; i < fogLightParams.w; ++i) {
+        RectLight rl = rectLights[i];
+        vec3 rel = worldPos - rl.position;
+        float pu = clamp(dot(rel, rl.rright), -rl.halfWidth,  rl.halfWidth);
+        float pv = clamp(dot(rel, rl.up),     -rl.halfHeight, rl.halfHeight);
+        vec3 closest = rl.position + rl.rright * pu + rl.up * pv;
+        float area = 4.0 * rl.halfWidth * rl.halfHeight;
+        float range = 8.0 * max(rl.halfWidth, rl.halfHeight);
+        vec3 toL = closest - worldPos;
+        float d2 = max(dot(toL, toL), 1e-4);
+        float dd = sqrt(d2);
+        if (dd >= range) continue;
+        float atten = (1.0 - smoothstep(range * 0.8, range, dd)) / d2 * area;
+        L += rl.color * rl.intensity * atten * phaseHG(dot(rayDir, toL / dd), g);
+    }
+
+    L += vec3(0.5, 0.6, 0.7) * ambient;
+
+    vec3 inScatter = albedo * totalDensity * L;
+    imageStore(froxelGrid, ivec3(gid), vec4(inScatter, totalDensity));
+}
