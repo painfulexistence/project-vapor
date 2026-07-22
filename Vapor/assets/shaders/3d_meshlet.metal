@@ -142,6 +142,23 @@ struct MeshletVertexOut {
     float4 position [[position]];
     float3 color;
     float3 worldNormal;  // for the depth+normal pre-pass MRT (real path only)
+    float2 uv;           // material-table sampling (real path only)
+    uint   materialID [[flat]];  // bindless material-table index (real path only)
+};
+
+// One entry per material in the shared bindless table (SAME layout as
+// 3d_pbr_normal_mapped.metal's MaterialTexs — the renderer binds the identical
+// bindlessMaterialTable buffer, created at fragment buffer(13) with 6 texture
+// slots per material, indexed by materialID). Only `albedo` is read for now;
+// the rest are declared so the argument-buffer layout matches the table the
+// encoder wrote (a truncated struct would misread later slots).
+struct MeshletMaterialTexs {
+    texture2d<float, access::sample> albedo    [[id(0)]];
+    texture2d<float, access::sample> normal    [[id(1)]];
+    texture2d<float, access::sample> metallic  [[id(2)]];
+    texture2d<float, access::sample> roughness [[id(3)]];
+    texture2d<float, access::sample> occlusion [[id(4)]];
+    texture2d<float, access::sample> emissive  [[id(5)]];
 };
 
 // Per-primitive output. The working reference (metal-by-example/
@@ -414,6 +431,10 @@ static float3 hashColor(uint x) {
         vout.position = viewProj * (model * float4(float3(vertices[vi].position), 1.0));
         vout.color = color;
         vout.worldNormal = normalMatrix * float3(vertices[vi].normal.xyz);
+        vout.uv = float2(vertices[vi].uv);
+        // Same materialID the PBR path reads (instances[iid].materialID). Constant
+        // across the meshlet's instance, so [[flat]] on the varying.
+        vout.materialID = instances[params.instanceID].materialID;
         output.set_vertex(tid, vout);
     }
     if (tid < m.triangleCount) {
@@ -436,15 +457,33 @@ static float3 hashColor(uint x) {
 }
 
 fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
-                             constant uint& debugColor [[buffer(0)]]) {
-    // debugColor: 1 = per-meshlet hashColor (bring-up default / probes),
-    // 0 = lambertian from the interpolated world normal (a real-geometry shade;
-    // full PBR material binding for the meshlet path is a follow-up).
-    if (debugColor != 0u) return float4(in.color, 1.0);
+                             constant uint& shadeMode [[buffer(0)]],
+                             // Shared bindless material table (buffer 13), same
+                             // handle the Bindless-MDI PBR fragment consumes.
+                             // Only dereferenced in shadeMode 2, so it may be
+                             // unbound in modes 0/1 (probes / no-bindless caps).
+                             const device MeshletMaterialTexs* materialTexs [[buffer(13)]]) {
+    // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes),
+    // 0 = lambertian from the interpolated world normal (no material bind —
+    //     used when bindless textures are unavailable),
+    // 2 = textured albedo from the shared bindless material table (Step 1 of
+    //     wiring real PBR onto the meshlet path; normal/metallic/roughness +
+    //     analytic lights + IBL are the follow-up).
+    if (shadeMode == 1u) return float4(in.color, 1.0);
+
+    // Cheap fixed-light lambertian term shared by modes 0 and 2 (a stand-in
+    // until the full analytic-light + IBL shade lands).
     float3 N = normalize(in.worldNormal);
     float3 L = normalize(float3(0.4, 0.7, 0.5));
     float ndl = max(dot(N, L), 0.0);
-    return float4(float3(0.8) * (0.12 + 0.88 * ndl), 1.0);
+    float shade = 0.12 + 0.88 * ndl;
+
+    if (shadeMode == 2u) {
+        constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
+        float3 albedo = materialTexs[in.materialID].albedo.sample(s, in.uv).rgb;
+        return float4(albedo * shade, 1.0);
+    }
+    return float4(float3(0.8) * shade, 1.0);
 }
 
 // MRT output for the meshlet depth pre-pass (mirrors 3d_depth_only.metal's

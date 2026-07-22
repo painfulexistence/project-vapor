@@ -1529,8 +1529,9 @@ void Renderer::updateBuffers() {
     if (mdi || gpuDrivenMeshlet()) ensureMergedGeometry();
     // Upload meshlet buffers (self-gates on mesh-shader support + dirty).
     ensureMeshletBuffers();
-    // Bindless material table for the Bindless MDI mode (self-gates on dirty + caps).
-    if (bindlessMDI) ensureBindlessMaterialTable();
+    // Bindless material table: shared by Bindless MDI and the meshlet path (its
+    // fragment samples the same table by materialID). Self-gates on dirty + caps.
+    if (bindlessMDI || gpuDrivenMeshlet()) ensureBindlessMaterialTable();
     m_materialRanges.clear();
 
     auto appendInstance = [&](Uint32 drawableIdx) {
@@ -1886,9 +1887,11 @@ void Renderer::mainRenderPass() {
                              totalInstanceCount > 0;
 
     // Meshlet path (task/mesh shaders): per-cluster cull + LOD selection on the
-    // GPU, one drawMeshTasks per instance. Draws per-meshlet debug colors for
-    // now (PBR parity is a follow-up). Falls back to the paths below if the
-    // pipeline or any meshlet buffer is missing.
+    // GPU, one drawMeshTasks per instance. Fragment shades textured albedo from
+    // the shared bindless material table (Step 1 of PBR parity — normal/metallic/
+    // roughness + analytic lights + IBL are the follow-up); the "Debug color" UI
+    // toggle switches to per-meshlet hashColor. Falls back to the paths below if
+    // the pipeline or any meshlet buffer is missing.
     const bool useMeshlet = gpuDrivenMeshlet() && meshletPipeline.isValid() &&
                             meshletBuffer.isValid() && meshletBoundsBuffer.isValid() &&
                             meshletVertexBuffer.isValid() && meshletTriangleBuffer.isValid() &&
@@ -1900,16 +1903,21 @@ void Renderer::mainRenderPass() {
     lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useBindless ? "BindlessMDI" : useMDI ? "MDI"
                             : useGpuDriven ? "Indirect" : "CPU";
     if (useMeshlet) {
-        // Fragment shading mode for the whole meshlet block (fragment buffer 0 /
-        // Vulkan push-constant offset 64): 1 = per-meshlet debug hashColor,
-        // 0 = lambertian from the interpolated world normal. Probes/synthetic/
-        // draw-all force debug so their hardcoded colors always show. Set once —
-        // it persists on the encoder across the pipeline binds below.
+        // Fragment shade mode for the whole meshlet block (fragment buffer 0 /
+        // Vulkan push-constant offset 64):
+        //   1 = per-meshlet debug hashColor (probes/synthetic/draw-all/UI toggle),
+        //   2 = textured albedo from the shared bindless material table,
+        //   0 = lambertian fallback (no material bind — bindless caps absent).
+        // Probes/synthetic/draw-all force hashColor so their hardcoded colors
+        // always show. Set once — it persists on the encoder across the binds
+        // below. The material table (buffer 13) is bound just after the pipeline.
         const bool forceMeshletDebugColor =
             meshletDrawAll || meshletSyntheticTri || meshletProbeData || meshletProbeVertex ||
             meshletProbeXform || meshletProbeEmit || meshletProbeTopo;
-        Uint32 meshletFragDebug = (meshletDebugColor || forceMeshletDebugColor) ? 1u : 0u;
-        rhi->setFragmentBytes(&meshletFragDebug, sizeof(meshletFragDebug), 0);
+        Uint32 meshletShadeMode = (meshletDebugColor || forceMeshletDebugColor) ? 1u
+                                : bindlessMaterialTable.isValid()               ? 2u
+                                : 0u;
+        rhi->setFragmentBytes(&meshletShadeMode, sizeof(meshletShadeMode), 0);
         // Lowest-level probe first (Metal): mesh-ONLY pipeline, zero inputs,
         // green triangle on the left. See meshletSyntheticPipeline.
         if (meshletSyntheticTri && meshletSyntheticPipeline.isValid()) {
@@ -1923,6 +1931,14 @@ void Renderer::mainRenderPass() {
                               meshletProbeTopo) &&
                              meshletPipelineNoDepth.isValid();
         rhi->bindPipeline(noDepth ? meshletPipelineNoDepth : meshletPipeline);
+        // Shared bindless material table at fragment buffer(13) — the meshlet
+        // fragment samples albedo by materialID in shadeMode 2 (same table the
+        // Bindless-MDI PBR fragment uses). Bound whenever valid; modes 0/1 don't
+        // dereference it. Metal only: the Vulkan meshlet fragment has no such
+        // table (and the path is inactive on MoltenVK anyway).
+        if (backend == GraphicsBackend::Metal && bindlessMaterialTable.isValid()) {
+            rhi->bindTextureArgumentTable(bindlessMaterialTable);
+        }
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
         rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);
