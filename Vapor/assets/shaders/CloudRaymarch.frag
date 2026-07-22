@@ -293,26 +293,35 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     tRange.y = min(tRange.y, maxDist);
 
     float rayLength = tRange.y - tRange.x;
-    float stepSize = rayLength / float(primarySteps);
-    float t = tRange.x + stepSize * blueNoise;
 
     vec3 scattering = vec3(0.0);
     float transmittance = 1.0;
     float cosTheta = dot(rayDir, sunDirection);
 
-    for (uint i = 0u; i < primarySteps && t < tRange.y; i++) {
+    // Quadratic step distribution: fine steps near the ray entry, coarse far.
+    // From the ground the entry is the cloud base (sharper bottoms); INSIDE the
+    // layer the entry is the camera (t0 = 0) — the fly-through case, where the
+    // old uniform rayLength/N gave ~km steps that mushed everything nearby.
+    // Each step integrates over its actual length dt (Beer-Lambert is
+    // length-aware, so the integral stays correct under the warp).
+    float tPrev = tRange.x;
+    for (uint i = 0u; i < primarySteps; i++) {
+        float u = (float(i) + blueNoise) / float(primarySteps);
+        float t = tRange.x + rayLength * u * u;
+        float dt = max(t - tPrev, 1e-3);
+        tPrev = t;
+
         vec3 pos = rayOrigin + rayDir * t;
         float density = sampleCloudDensity(pos, false);
         if (density > 0.001) {
             vec3 luminance = cloudLighting(pos, rayDir);
-            float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * powderStrength +
+            float powder = beerPowderEnergy(density * dt * 10.0, cosTheta) * powderStrength +
                            (1.0 - powderStrength);
-            float stepTransmittance = beerLambert(density, stepSize);
+            float stepTransmittance = beerLambert(density, dt);
             scattering += transmittance * luminance * (1.0 - stepTransmittance) * powder;
             transmittance *= stepTransmittance;
             if (transmittance < 0.01) { transmittance = 0.0; break; }
         }
-        t += stepSize;
     }
 
     // Aerial perspective: distant decks sink into the horizon haze — the

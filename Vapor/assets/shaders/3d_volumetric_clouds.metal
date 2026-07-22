@@ -327,12 +327,7 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // Clamp to max distance
     tRange.y = min(tRange.y, maxDist);
 
-    // Calculate step size
     float rayLength = tRange.y - tRange.x;
-    float stepSize = rayLength / float(data.primarySteps);
-
-    // Apply blue noise offset for temporal stability
-    float t = tRange.x + stepSize * blueNoise;
 
     // Accumulation
     float3 scattering = float3(0.0);
@@ -341,8 +336,17 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // View-sun angle for lighting
     float cosTheta = dot(rayDir, data.sunDirection);
 
-    // Ray march through clouds
-    for (uint i = 0; i < data.primarySteps && t < tRange.y; i++) {
+    // Quadratic step distribution (twin of CloudRaymarch.frag): fine steps at
+    // the ray entry — the cloud base from the ground, the CAMERA when flying
+    // inside the layer — coarse toward the exit. Each step integrates over its
+    // actual length dt, so Beer-Lambert stays correct under the warp.
+    float tPrev = tRange.x;
+    for (uint i = 0; i < data.primarySteps; i++) {
+        float u = (float(i) + blueNoise) / float(data.primarySteps);
+        float t = tRange.x + rayLength * u * u;
+        float dt = max(t - tPrev, 1e-3);
+        tPrev = t;
+
         float3 pos = rayOrigin + rayDir * t;
 
         float density = sampleCloudDensity(pos, data, false, shapeTex, detailTex, weatherTex);
@@ -352,11 +356,11 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
             float3 luminance = cloudLighting(pos, rayDir, data, shapeTex, detailTex, weatherTex);
 
             // Beer-powder effect
-            float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * data.powderStrength +
+            float powder = beerPowderEnergy(density * dt * 10.0, cosTheta) * data.powderStrength +
                           (1.0 - data.powderStrength);
 
             // Integrate
-            float stepTransmittance = beerLambert(density, stepSize);
+            float stepTransmittance = beerLambert(density, dt);
             float3 stepScattering = luminance * (1.0 - stepTransmittance) * powder;
 
             scattering += transmittance * stepScattering;
@@ -368,8 +372,6 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
                 break;
             }
         }
-
-        t += stepSize;
     }
 
     // Aerial perspective (twin of CloudRaymarch.frag): distant decks sink into
