@@ -318,6 +318,8 @@ public:
     void setSky(const SkyRenderData& sky) override;
     void setWind(const WindRenderData& wind) override;
     void setVolumetricFog(const VolumetricFogRenderData& fog) override;
+    void setClouds(const CloudsRenderData& clouds) override;
+    void setIBLIntensity(float intensity) override;
     // Sun-driven auto rebake is opt-in (m_iblAutoRebake, default off) — a moving
     // sun otherwise re-bakes the IBL constantly. The one-shot "Refresh IBL"
     // button and sky-config changes (setSky) still force a rebake directly.
@@ -767,6 +769,13 @@ private:
     glm::mat4 cloudPrevViewProj = glm::mat4(1.0f);
     bool cloudPrevViewProjValid = false;
     bool volumetricCloudsEnabled = false;  // default OFF (enable when verifying)
+    bool m_cloudsWeatherDriven = false;    // setClouds() seen — panel shows a hint
+    // Weather-driven environment dimming (setIBLIntensity). Vulkan: rides in
+    // LightCullData (set1 b5); Metal: fragment bytes at buffer(20).
+    float m_iblIntensity = 1.0f;
+    // Weather dim on the panel-tuned cloud sunLightScale (setClouds cloudDim)
+    // — applied at upload time so the panel value stays authoritative.
+    float m_cloudDim = 1.0f;
 
     // GPU particle system (self-contained orbital demo + ECS emitters).
     static constexpr Uint32 MAX_PARTICLES = 3'000'000;

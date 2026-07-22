@@ -7,7 +7,7 @@ struct Particle {
     vec3  velocity;
     float age;      // seconds since spawn
     vec3  force;
-    float _pad3;
+    float killPlaneY; // world-Y ground kill (rain); very negative = off
     vec4  color;
 };
 
@@ -48,6 +48,16 @@ void main() {
     // Semi-implicit Euler integration
     p.velocity += p.force * deltaTime;
     p.position += p.velocity * deltaTime;
+
+    // Ground kill (cheap rain/spark collision): finite-lifetime particles die
+    // the frame they cross their world-Y kill plane. Immortal particles ignore
+    // it (they could never respawn).
+    if (p.lifetime >= 0.0 && p.position.y < p.killPlaneY) {
+        p.age = p.lifetime;
+        p.color.a = 0.0;
+        particles[idx] = p;
+        return;
+    }
 
     // Boundary conditions (keep orbital demo particles in a sphere)
     if (p.lifetime < 0.0) {
