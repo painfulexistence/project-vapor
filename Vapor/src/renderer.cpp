@@ -8184,6 +8184,15 @@ void Renderer::drawGraphicsImGui() {
         ImGui::TreePop();
     }
 
+    if (ImGui::TreeNode("Terrain")) {
+        ImGui::Text("Detail layers: %s", terrainDetailAlbedoArray.isValid() ? "staged" : "none");
+        ImGui::Checkbox("Grass", &grassEnabled);
+        Uint32 grassBlades = 0;
+        for (const auto& cell : grassDraws) grassBlades += cell.count;
+        ImGui::Text("Grass cells %zu, blades %u", grassDraws.size(), grassBlades);
+        ImGui::TreePop();
+    }
+
     if (ImGui::TreeNode("MicroVoxel")) {
         ImGui::Checkbox("Enabled", &microVoxelEnabled);
         Uint64 solid = 0, dropped = 0;
