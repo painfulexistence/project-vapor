@@ -161,7 +161,7 @@ struct alignas(16) VolumetricCloudData {
     float _pad9 = 0.0f;
     // Night key light (moonDir = -sunDirection); see VolumetricCloudRenderData.
     glm::vec3 moonColor = glm::vec3(0.92f, 0.93f, 1.0f);
-    float moonLightScale = 0.15f;
+    float moonLightScale = 0.04f;
 };
 
 // ── Light Scattering (God Rays) ───────────────────────────────────────────

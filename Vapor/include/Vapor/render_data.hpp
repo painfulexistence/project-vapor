@@ -472,7 +472,7 @@ struct alignas(16) VolumetricCloudRenderData {
     // sets. Colour from the Sky/night-sky moon; moonLightScale = moon lit
     // brightness as a fraction of the sun term.
     glm::vec3 moonColor = glm::vec3(0.92f, 0.93f, 1.0f);
-    float moonLightScale = 0.15f;
+    float moonLightScale = 0.04f;
 };
 
 // IBL capture parameters (mirror of the Metal IBLCaptureData).
