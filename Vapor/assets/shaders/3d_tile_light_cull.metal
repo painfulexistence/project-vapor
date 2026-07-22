@@ -26,7 +26,8 @@ struct CameraData {
     float far;
 };
 
-bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, float2 tileMin, float2 tileMax, float2 screenSize) {
+bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, float2 projScale,
+                            float2 tileMin, float2 tileMax, float2 screenSize) {
     float4 clipPos = viewProj * float4(center, 1.0);
     // clipPos.w is the view-space forward distance (+ in front of the camera,
     // - behind). A light whose influence sphere is entirely behind the camera
@@ -41,7 +42,13 @@ bool sphereTileIntersection(float3 center, float radius, float4x4 viewProj, floa
     // screenUV.y = 1.0 - screenUV.y;
 
     float2 centerSS = screenUV * screenSize;
-    float radiusSS = radius * 2.0 * min(screenSize.x, screenSize.y) / abs(clipPos.w * 2.0); // approximation (kept)
+    // Perspective-correct projected radius: r * proj[i][i] * (screen/2) / w,
+    // taken per-axis so anisotropic projections stay correct. The old isotropic
+    // heuristic (min(screenSize) / w) underestimated the footprint at oblique
+    // angles / toward the screen edges, so tiles at a light's rim were culled
+    // while their neighbors kept it — hard tile-edge lighting seams. Mirrors
+    // the already-fixed TileLightCull.comp.
+    float2 radiusSS = radius * projScale * (screenSize * 0.5) / clipPos.w;
     // Half-tile pad against center/edge quantization (tile size = tileMax-tileMin).
     float2 pad = 0.5 * (tileMax - tileMin);
     float2 sphereMin = centerSS - radiusSS - pad;
@@ -71,9 +78,10 @@ kernel void computeMain(
     float2 tileMax = float2(gid.xy + 1) * tileSize;
 
     float4x4 viewProj = camera.proj * camera.view;
+    float2 projScale = float2(camera.proj[0][0], camera.proj[1][1]);
     for (uint i = 0; i < lightCount; i++) {
         PointLight light = pointLights[i];
-        if (sphereTileIntersection(light.position, light.radius, camera.proj * camera.view, tileMin, tileMax, screenSize) && tile.lightCount < MAX_LIGHTS_PER_TILE) {
+        if (sphereTileIntersection(light.position, light.radius, viewProj, projScale, tileMin, tileMax, screenSize) && tile.lightCount < MAX_LIGHTS_PER_TILE) {
             tile.lightIndices[tile.lightCount] = i;
             tile.lightCount++;
         }
