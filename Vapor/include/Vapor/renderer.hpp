@@ -78,7 +78,8 @@ public:
     // into the global meshlet buffers for the meshlet path (ignored if null/empty).
     MeshId registerMesh(const std::vector<Vapor::VertexData>& vertices,
                         const std::vector<Uint32>& indices,
-                        const Vapor::MeshletData* meshletData = nullptr);
+                        const Vapor::MeshletData* meshletData = nullptr,
+                        bool meshletLodEnabled = true);
 
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
@@ -1094,6 +1095,11 @@ private:
     // clusters selected sooner (fewer triangles); the task shader compares the
     // projected cluster error against this / screenHeight.
     float meshletLodPixelError = 0.1f;
+    // At model-instantiate, cluster-LOD is auto-disabled for meshes below this
+    // triangle count (it degrades normal-density / seamed authored meshes faster
+    // than it saves; it pays off on dense Nanite-class geometry). Mesh::
+    // meshletLodEnabled can still force it off above the threshold. Tunable.
+    Uint32 meshletLodMinTriangles = 100000;
     // Meshlet shading: false (default) = full PBR from the shared material table
     // (parity with the forward path); true = per-meshlet debug hashColor (for
     // inspecting meshlet boundaries). Probes/synthetic/draw-all always force the

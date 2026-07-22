@@ -729,8 +729,10 @@ void Renderer::shutdown() {
 
 MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
                                     const std::vector<Uint32>& indices,
-                                    const Vapor::MeshletData* meshletData) {
+                                    const Vapor::MeshletData* meshletData,
+                                    bool meshletLodEnabled) {
     RenderMesh mesh;
+    mesh.meshletLodEnabled = meshletLodEnabled;
 
     // Create vertex buffer
     if (!vertices.empty()) {
@@ -2062,7 +2064,10 @@ void Renderer::mainRenderPass() {
             if (it == drawableToInstanceID.end()) continue;
             const RenderMesh& mesh = meshes[frameDrawables[i].mesh];
             if (mesh.meshletCount == 0) continue;  // mesh without baked meshlets
-            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, threshold };
+            // LOD off for this mesh -> threshold 0 selects only the finest
+            // clusters (full detail). Debug thresholds (negative) are left as-is.
+            float th = (threshold >= 0.0f && !mesh.meshletLodEnabled) ? 0.0f : threshold;
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th };
             rhi->setVertexBytes(&params, sizeof(params), 8);
             rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
             mainDrawCalls++;
@@ -2475,7 +2480,10 @@ void Renderer::prePass() {
             if (it == drawableToInstanceID.end()) continue;
             const RenderMesh& mesh = meshes[frameDrawables[i].mesh];
             if (mesh.meshletCount == 0) continue;  // mesh without baked meshlets
-            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, threshold };
+            // Match the main pass's LOD choice so the depth lines up (threshold 0
+            // = finest clusters when this mesh has LOD disabled).
+            float th = mesh.meshletLodEnabled ? threshold : 0.0f;
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th };
             rhi->setVertexBytes(&params, sizeof(params), 8);
             rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
         }
@@ -6968,7 +6976,11 @@ void Renderer::stage(std::shared_ptr<RenderScene> scene) {
         // Register mesh if not already registered
         if (mesh->renderMeshId == UINT32_MAX) {
             if (!mesh->vertices.empty()) {
-                mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices, &mesh->meshletData);
+                // Fill the per-mesh LOD flag: the author's Mesh::meshletLodEnabled
+                // AND a density heuristic (LOD off for meshes too small to benefit).
+                const size_t triCount = (mesh->indices.empty() ? mesh->vertices.size() : mesh->indices.size()) / 3;
+                const bool lodOn = mesh->meshletLodEnabled && triCount >= meshletLodMinTriangles;
+                mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices, &mesh->meshletData, lodOn);
             } else if (mesh->vertexCount > 0 && mesh->indexCount > 0 &&
                        mesh->vertexOffset + mesh->vertexCount <= scene->vertices.size() &&
                        mesh->indexOffset + mesh->indexCount <= scene->indices.size()) {

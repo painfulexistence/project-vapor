@@ -348,7 +348,7 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
 namespace {
 
     constexpr char kCookMagic[4] = { 'V', 'B', 'P', '1' };
-    constexpr uint32_t kCookVersion = 1;
+    constexpr uint32_t kCookVersion = 2;  // v2: meshlet bake config (regularize + sloppy factor)
 
     uint64_t fnv1a64(const void* data, size_t n, uint64_t h) {
         const auto* p = static_cast<const uint8_t*>(data);

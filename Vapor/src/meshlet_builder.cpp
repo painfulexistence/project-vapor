@@ -34,6 +34,16 @@ void MeshletBuilder::build(Mesh& mesh) {
 
     clodConfig config = clodDefaultConfig(MAX_MESHLET_TRIANGLES);
     config.max_vertices = MAX_MESHLET_VERTICES;
+    // Appearance tuning for normal-density / seamed authored meshes (e.g. original
+    // Sponza), where geometric-error LOD degrades silhouettes faster than the
+    // error budget implies:
+    //   regularize -> more uniform triangle distribution in simplified clusters,
+    //     so features collapse less abruptly across LOD steps.
+    //   sloppy factor 2 -> 4 -> penalize sloppy-simplified clusters more, so the
+    //     runtime error cut keeps them at a finer LOD longer (they're the worst-
+    //     looking ones). No effect on clusters that avoid the sloppy fallback.
+    config.simplify_regularize = true;
+    config.simplify_error_factor_sloppy = 4.0f;
 
     MeshletData& md = mesh.meshletData;
     std::vector<clodBounds> groupSimplified;  // indexed by clod group id
