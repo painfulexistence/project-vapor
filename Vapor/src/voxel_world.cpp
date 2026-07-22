@@ -109,23 +109,26 @@ void VoxelWorld::setDefaultPalette() {
         palette[idx].transmission = transmission;
         palette[idx].ior = iorByte;
     };
-    for (int i = 9; i < 256; i++) set(static_cast<Uint8>(i), 128, 128, 128);
+    for (int i = 10; i < 256; i++) set(static_cast<Uint8>(i), 128, 128, 128);
     set(MatGrass, 64, 140, 46);
     set(MatDirt, 107, 77, 46);
     set(MatStone, 122, 122, 128);
     set(MatSnow, 235, 240, 250);
     set(MatSand, 204, 184, 122);
     set(MatOre, 242, 191, 64);
-    set(MatCrystal, 115, 191, 242, 110);  // cool cyan; emission dimmed now light passes through
+    set(MatCrystal, 115, 191, 242, 160);  // cool cyan glow (the original's look)
     set(MatGlow, 255, 140, 48, 255);      // warm glowstone, full emission
-    // Reflective materials: ore and snow catch a roughness-jittered sheen.
+    set(MatWater, 56, 130, 196);          // deep blue; Beer tints what's below
+    // Reflective materials: crystals stay the original near-mirror; ore and
+    // snow catch a roughness-jittered sheen. Everything else stays matte.
+    setParams(MatCrystal, 210, 20);
     setParams(MatOre, 90, 60);
     setParams(MatSnow, 40, 120);
-    // Crystals are the transmission showcase: near-clear cyan glass (Fresnel
-    // reflection comes from the IOR on the glass path, so reflectivity here
-    // only matters if transmission is ever zeroed).
-    setParams(MatCrystal, 210, 20);
-    setGlass(MatCrystal, 200, 140);
+    // Water is the transmission showcase: IOR 1.33 (byte 84), lightly rippled
+    // via the glossy jitter. On the glass path Fresnel comes from the IOR, so
+    // the reflectivity byte is left 0.
+    setParams(MatWater, 0, 25);
+    setGlass(MatWater, 215, 84);
 }
 
 float VoxelWorld::terrainHeight(int x, int z) const {
@@ -210,6 +213,8 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
 
     const float snowLine = (0.10f + 0.75f * 0.34f) * static_cast<float>(ny);
     const float sandLine = (0.10f + 0.12f * 0.34f) * static_cast<float>(ny);
+    // Water fills valleys up to just under the sand line, so beaches ring it.
+    const int waterLevel = static_cast<int>((0.10f + 0.08f * 0.34f) * static_cast<float>(ny));
 
     std::vector<float> heights(static_cast<size_t>(xw) * zw);
     for (int z = 0; z < zw; z++)
@@ -243,6 +248,12 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
                     mat = MatOre;
                 }
                 at(x, y, z) = mat;
+            }
+            // Water column: from the terrain surface up to the water level.
+            // Water voxels are solid to the DDA; the shader's transmission
+            // path refracts through them (Beer-tinted) to the bed below.
+            for (int y = top + 1; y <= waterLevel && y < ny; y++) {
+                at(x, y, z) = MatWater;
             }
         }
     }

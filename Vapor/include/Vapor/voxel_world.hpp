@@ -86,6 +86,7 @@ public:
         MatOre = 6,
         MatCrystal = 7,
         MatGlow = 8,
+        MatWater = 9,
     };
 
     VoxelWorld() = default;

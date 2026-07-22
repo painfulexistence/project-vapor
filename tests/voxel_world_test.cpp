@@ -87,7 +87,7 @@ static float gradFbm01(glm::vec3 p, int octaves, uint32_t seed) {
     return glm::clamp(0.5f + sum * 1.2f, 0.0f, 1.0f);
 }
 
-enum : uint8_t { MatGrass = 1, MatDirt, MatStone, MatSnow, MatSand, MatOre, MatCrystal, MatGlow };
+enum : uint8_t { MatGrass = 1, MatDirt, MatStone, MatSnow, MatSand, MatOre, MatCrystal, MatGlow, MatWater };
 
 // The original Generate() column/cave/ore/crystal/glowstone logic on a dense
 // cubic N^3 grid.
@@ -101,6 +101,7 @@ static std::vector<uint8_t> generateDense(int N, uint32_t seed) {
     const float varH = 0.34f * static_cast<float>(N);
     const float snowLine = baseH + 0.75f * varH;
     const float sandLine = baseH + 0.12f * varH;
+    const int waterLevel = static_cast<int>(baseH + 0.08f * varH);
     std::vector<float> heights(static_cast<size_t>(N) * N);
     for (int z = 0; z < N; z++) {
         for (int x = 0; x < N; x++) {
@@ -131,6 +132,9 @@ static std::vector<uint8_t> generateDense(int N, uint32_t seed) {
                     mat = MatOre;
                 }
                 voxelAt(x, y, z) = mat;
+            }
+            for (int y = top + 1; y <= waterLevel && y < N; y++) {
+                voxelAt(x, y, z) = MatWater;
             }
         }
     }
@@ -569,17 +573,20 @@ TEST_CASE("palette words match the shader decode contract (incl. transmission/io
     REQUIRE(((words[1] >> 24) & 0xFFu) == 0x88u);
 }
 
-TEST_CASE("default palette makes the crystal a transmissive dielectric", "[voxel_world]") {
+TEST_CASE("default palette: water is the transmissive dielectric, crystal stays mirror", "[voxel_world]") {
     VoxelWorld world;
     world.configure(glm::ivec3(64, 64, 64), 0.05f, 1u << 16);
     world.generate(1337u);
     const auto& pal = world.paletteData();
-    // Crystal: the glass showcase — transmissive, IOR ~1.55 (byte 140), near
-    // clear, still faintly emissive.
-    REQUIRE(pal[VoxelWorld::MatCrystal].transmission == 200);
-    REQUIRE(pal[VoxelWorld::MatCrystal].ior == 140);
+    // Crystal keeps the original near-mirror look (not transmissive).
+    REQUIRE(pal[VoxelWorld::MatCrystal].transmission == 0);
+    REQUIRE(pal[VoxelWorld::MatCrystal].reflectivity == 210);
     REQUIRE(pal[VoxelWorld::MatCrystal].roughness == 20);
-    REQUIRE(pal[VoxelWorld::MatCrystal].emission > 0);
+    REQUIRE(pal[VoxelWorld::MatCrystal].emission == 160);
+    // Water is the transmission showcase: IOR 1.33 (byte 84), light ripple.
+    REQUIRE(pal[VoxelWorld::MatWater].transmission == 215);
+    REQUIRE(pal[VoxelWorld::MatWater].ior == 84);
+    REQUIRE(pal[VoxelWorld::MatWater].roughness == 25);
     // Rough-sheen materials keep their glossy-jitter roughness, opaque.
     REQUIRE(pal[VoxelWorld::MatSnow].roughness == 120);
     REQUIRE(pal[VoxelWorld::MatSnow].transmission == 0);
