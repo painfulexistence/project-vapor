@@ -1093,7 +1093,7 @@ private:
     // Cluster-LOD screen-space error tolerance, in pixels. Larger = coarser
     // clusters selected sooner (fewer triangles); the task shader compares the
     // projected cluster error against this / screenHeight.
-    float meshletLodPixelError = 1.0f;
+    float meshletLodPixelError = 0.1f;
     // Meshlet shading: false (default) = full PBR from the shared material table
     // (parity with the forward path); true = per-meshlet debug hashColor (for
     // inspecting meshlet boundaries). Probes/synthetic/draw-all always force the
