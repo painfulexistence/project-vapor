@@ -3,10 +3,10 @@
 #include <glm/vec4.hpp>
 #include <vector>
 
-// Baked meshlet + cluster-LOD data model for a mesh: the serialized scene format
-// carries these fields (empty here — the offline builder and the mesh-shader draw
-// path are a separate follow-up). Kept so the scene format and Mesh struct stay
-// stable while the runtime meshlet path lands independently.
+// Baked meshlet + cluster-LOD data for a mesh, produced offline by MeshletBuilder
+// (meshoptimizer + clusterlod.h) and consumed at runtime by the task/mesh-shader
+// path. Shader-agnostic: the same data drives a real mesh-shader pipeline or a
+// compute-emulated fallback.
 namespace Vapor {
 
 // One meshlet/cluster: a small, self-contained triangle patch. `vertexOffset`

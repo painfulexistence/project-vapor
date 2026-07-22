@@ -41,30 +41,31 @@ namespace cereal {
     template<class Archive> void serialize(Archive& archive, Vapor::VertexData& vertex) {
         archive(vertex.position, vertex.uv, vertex.normal, vertex.tangent);
     }
+
+    template<class Archive> void serialize(Archive& archive, Vapor::Meshlet& m) {
+        archive(m.vertexOffset, m.triangleOffset, m.vertexCount, m.triangleCount);
+    }
+
+    template<class Archive> void serialize(Archive& archive, Vapor::MeshletBounds& b) {
+        archive(b.cullSphere, b.coneApex, b.coneAxisCutoff, b.lodSphere, b.parentSphere,
+                b.lodError, b.parentError, b.group, b.refined, b.depth);
+    }
 }// namespace cereal
 
 namespace Vapor {
 
 class AssetSerializer {
 public:
-    // v3: material names now serialize (the inspector's Scene Materials editor
-    // and the blueprint cook both want identity, not just factors). The
-    // meshlet/cluster-LOD data model exists on Mesh but is not serialized here —
-    // the mesh-shader draw path and its offline bake will own the next bump.
-    static constexpr uint32_t SCENE_FORMAT_VERSION = 3;
-
-    // Cache round-trip is best-effort: a write failure returns false and a
-    // read failure (missing, corrupt, or version-mismatched cache) returns
-    // nullptr — callers fall back to re-importing from source.
-    static bool serializeScene(const std::shared_ptr<RenderScene>& scene, const std::string& path);
-    static std::shared_ptr<RenderScene> deserializeScene(const std::string& path);
-
     // SceneBlueprint payload serialization (entities + meshes/materials/images/
     // lights + sources). Used by the scene cook (.vscene): the cook header
     // (magic/version/source-hash) is owned by scene_blueprint.cpp; these
     // (de)serialize just the blueprint body on an open archive.
     // v2: EntityBlueprint carries a per-entity "components" JSON blob.
-    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 3; // v3: EntityBlueprint::primitive
+    // v4: the shared (de)serializeMesh now round-trips Mesh::meshletData, so the
+    // per-mesh layout the blueprint cook writes changed. Bump so a stale v3 .vscene
+    // (whose meshes have no meshlet fields) is rejected and re-cooked instead of
+    // misreading later bytes as a meshlet count (huge alloc -> crash).
+    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 4; // v3: EntityBlueprint::primitive; v4: mesh meshletData
     static void serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint);
     // Returns ok == false on a version mismatch.
     static Vapor::SceneBlueprint deserializeBlueprint(cereal::BinaryInputArchive& archive);
