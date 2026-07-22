@@ -266,13 +266,13 @@ public:
 };
 
 // Tile culling pass: Performs light culling for tiled rendering
-class TileCullingPass : public MetalRenderPass {
+class LightCullingPass : public MetalRenderPass {
 public:
-    explicit TileCullingPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
+    explicit LightCullingPass(Renderer_Metal* renderer) : MetalRenderPass(renderer) {
     }
 
     auto getName() const -> const char* override {
-        return "TileCullingPass";
+        return "LightCullingPass";
     }
 
     void execute() override {
@@ -284,14 +284,16 @@ public:
 
         auto timedComputeDesc = makeTimedComputeDesc(true, true);
         auto encoder = r.currentCommandBuffer->computeCommandEncoder(timedComputeDesc.get());
-        encoder->setComputePipelineState(r.tileCullingPipeline.get());
+        encoder->setComputePipelineState(r.lightCullingPipeline.get());
         encoder->setBuffer(r.clusterBuffers[r.currentFrameInFlight].get(), 0, 0);
         encoder->setBuffer(r.pointLightBuffer.get(), 0, 1);
         encoder->setBuffer(r.cameraDataBuffers[r.currentFrameInFlight].get(), 0, 2);
         encoder->setBytes(&pointLightCount, sizeof(uint), 3);
         encoder->setBytes(&gridSize, sizeof(glm::uvec3), 4);
         encoder->setBytes(&screenSize, sizeof(glm::vec2), 5);
-        encoder->dispatchThreadgroups(MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, 1), MTL::Size(1, 1, 1));
+        // One threadgroup per 3D cluster (x, y, log-z slice).
+        encoder->dispatchThreadgroups(
+            MTL::Size(r.clusterGridSizeX, r.clusterGridSizeY, r.clusterGridSizeZ), MTL::Size(1, 1, 1));
         encoder->endEncoding();
     }
 };
@@ -3047,7 +3049,7 @@ auto Renderer_Metal::init(SDL_Window* window) -> void {
     graph.addPass(std::make_unique<PrePass>(this));
     graph.addPass(std::make_unique<NormalResolvePass>(this));
     graph.addPass(std::make_unique<VelocityPass>(this));
-    graph.addPass(std::make_unique<TileCullingPass>(this));
+    graph.addPass(std::make_unique<LightCullingPass>(this));
     graph.addPass(std::make_unique<PSSMShadowPass>(this));
     graph.addPass(std::make_unique<PSSMResolvePass>(this));
     if (m_supportsRaytracing) graph.addPass(std::make_unique<RaytraceShadowPass>(this));
@@ -3267,9 +3269,7 @@ auto Renderer_Metal::createResources() -> void {
     }
 
     postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
-    buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
-    cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
-    tileCullingPipeline = createComputePipeline("shaders/3d_tile_light_cull.metal");
+    lightCullingPipeline = createComputePipeline("shaders/3d_light_cull.metal");
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");
