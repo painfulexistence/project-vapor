@@ -259,10 +259,8 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
                                  &froxelGlobalsDefaults, sizeof(froxelGlobalsDefaults));
 
         // Froxel 3D textures: the injection grid (in-scatter.rgb + extinction) and
-        // the integrated volume (accumulated scattering.rgb + transmittance). Both
-        // RGBA16F, storage-written by the compute kernels and sampled by the
-        // composite. Only used on the Metal backend for now (Vulkan keeps the
-        // raymarch); harmless to allocate on both.
+        // the integrated volume (accum scattering.rgb + transmittance). RGBA16F,
+        // storage-written by the compute kernels, sampled by the composite.
         {
             TextureDesc froxelTexDesc;
             froxelTexDesc.width = FROXEL_GRID_X;
@@ -4496,11 +4494,8 @@ void Renderer::volumetricFogPass() {
     }
     rhi->updateBuffer(fogDataBuffer, &fog, 0, sizeof(fog));
 
-    // ── Froxel path: inject (compute) -> integrate (compute) -> composite.
-    // Decouples fog cost from screen resolution. Backend-agnostic — the Metal
-    // kernels (3d_volumetric_fog.metal) and the Vulkan .comp twins (FroxelInject/
-    // Integrate.comp) bind identically through the RHI compute API, so this is
-    // gated purely on the froxel resources existing, not on the backend. ──
+    // Froxel path: inject -> integrate -> composite. Backend-agnostic; the Metal
+    // kernels and the Vulkan .comp twins bind the same way through the RHI.
     const bool froxelReady = fogUseFroxel
         && volCount > 0
         && fogFroxelInjectPipeline.isValid() && fogFroxelIntegratePipeline.isValid()
@@ -4529,9 +4524,8 @@ void Renderer::volumetricFogPass() {
                                   static_cast<Uint32>(spotLights.size()),
                                   static_cast<Uint32>(rectLights.size()));
 
-        // Inject + integrate. One compute pass; Metal serializes the two
-        // dispatches and barriers the froxel grid between them (computeBarrier is
-        // a no-op there, and the correct fence once the Vulkan path is wired).
+        // Inject then integrate; computeBarrier fences the grid write->read
+        // (a no-op on Metal's serial encoder).
         rhi->beginComputePass("FroxelFog");
         rhi->bindComputePipeline(fogFroxelInjectPipeline);
         rhi->setComputeBuffer(0, fogFroxelGlobalsBuffer, 0, sizeof(VolumetricFogData));
@@ -4542,14 +4536,13 @@ void Renderer::volumetricFogPass() {
         rhi->setComputeBuffer(5, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
         rhi->setComputeBuffer(6, rectLightBuffer);
         rhi->setComputeBytes(&fogLightParams, sizeof(glm::uvec4), 7);
-        // Fog volumes: Metal uses buffer index 8 ([[buffer(8)]], past the light-
-        // params bytes at 7). Vulkan has only 8 descriptor slots (0-7) and its
-        // light params are a push constant (not a descriptor), so it binds b7.
+        // Volumes at buffer 8 on Metal (b7 is the light-params bytes); on Vulkan
+        // b7 is free (its light params ride a push constant, not a descriptor).
         rhi->setComputeBuffer(backend == GraphicsBackend::Metal ? 8u : 7u,
                               fogVolumeBuffer, 0, sizeof(VolumetricFogVolumeGPU) * kMaxFogVolumes);
-        rhi->setComputeTexture(0, fogFroxelGridTexture);       // storage write (Metal [[texture(0)]] / Vk set1 b0)
-        // Shadow map: Metal samples a plain [[texture(1)]] with the kernel's inline
-        // sampler; Vulkan needs a combined image sampler (set 2) it can textureLod.
+        rhi->setComputeTexture(0, fogFroxelGridTexture);       // storage write
+        // Shadow map: Metal reads it as a plain texture (inline sampler); Vulkan
+        // needs a combined sampler for textureLod.
         if (backend == GraphicsBackend::Metal) {
             rhi->setComputeTexture(1, pssmShadowArrayTexture);
         } else {
@@ -4565,9 +4558,8 @@ void Renderer::volumetricFogPass() {
         rhi->dispatch((FROXEL_GRID_X + 7) / 8, (FROXEL_GRID_Y + 7) / 8, 1);
         rhi->endComputePass();
 
-        // The integrate pass wrote the volume as a storage image (GENERAL); the
-        // composite samples it. Transition + barrier before the render pass (a
-        // no-op on Metal, which tracks the hazard). Must be outside a render pass.
+        // Integrate wrote the volume as a storage image (GENERAL); transition it
+        // to sampled before the composite render pass (no-op on Metal).
         rhi->prepareTextureForSampling(fogIntegratedVolumeTexture);
 
         // Composite: sample the integrated volume, ping-pong colorRT.
@@ -6373,10 +6365,8 @@ void Renderer::createRenderPipeline() {
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
 
-            // Froxel volumetric fog (Vulkan): inject + integrate compute stages
-            // write the 3D grid; the composite samples it. volumetricFogPass prefers
-            // this over the raymarch above when the pipelines/textures exist. The
-            // .comp local_size (4^3 / 8x8) matches the pass's dispatch group counts.
+            // Froxel volumetric fog (Vulkan): inject/integrate compute + composite.
+            // The .comp local_size (4^3 / 8x8) matches the pass's dispatch counts.
             {
                 auto makeFroxelCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
                     std::string code = readFile(spv);
@@ -8166,11 +8156,7 @@ void Renderer::drawGraphicsImGui() {
         // the pass on whether any exist. This panel only selects the render path.
         ImGui::Text(volumetricFogEnabled ? "Active - %d volume(s)" : "Inactive (no fog volumes)",
                     static_cast<int>(volumetricFogVolumes.size()));
-        if (backend == GraphicsBackend::Metal) {
-            ImGui::Checkbox("Use froxel grid (off = raymarch)", &fogUseFroxel);
-        } else {
-            ImGui::TextDisabled("Vulkan: fullscreen raymarch (froxel is Metal-only for now)");
-        }
+        ImGui::Checkbox("Use froxel grid (off = raymarch fallback)", &fogUseFroxel);
         ImGui::TreePop();
     }
 

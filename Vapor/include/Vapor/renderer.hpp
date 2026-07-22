@@ -710,16 +710,13 @@ private:
     // Persistent fog tunables (mirror of the first/global volume). volumetricFogPass()
     // copies this and overwrites the per-frame fields (invViewProj/camera/sun).
     FogRenderData fogSettings;
-    // ECS-resolved fog volumes (global + bounded AABB banks). Uploaded to
-    // fogVolumeBuffer each frame; blended by the froxel inject kernel (Metal) and
-    // the Vulkan raymarch (VolumetricFog.frag).
+    // ECS-resolved fog volumes (global + bounded AABB banks), uploaded to
+    // fogVolumeBuffer each frame and blended in the froxel grid.
     std::vector<VolumetricFogVolumeData> volumetricFogVolumes;
     BufferHandle fogVolumeBuffer;  // GPU array of VolumetricFogVolumeGPU
-    // Froxel volumetric fog (Metal RHI path): inject (compute) -> integrate
-    // (compute) -> composite. Decouples fog cost from screen resolution. Created
-    // for the Metal backend (reuses the 3d_volumetric_fog.metal kernels); the
-    // Vulkan backend keeps the fullscreen raymarch (VolumetricFog.frag) until its
-    // .comp twins land, so the pass falls back when these are absent.
+    // Froxel volumetric fog: inject -> integrate (compute) -> composite, on both
+    // backends (Metal reuses the 3d_volumetric_fog.metal kernels, Vulkan the
+    // Froxel*.comp twins). The fullscreen raymarch is the fallback.
     bool fogUseFroxel = true;
     BufferHandle fogFroxelGlobalsBuffer;        // VolumetricFogData layout (froxel kernels)
     TextureHandle fogFroxelGridTexture;         // 3D: in-scatter.rgb + extinction (storage+sampled)
