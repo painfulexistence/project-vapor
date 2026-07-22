@@ -82,23 +82,6 @@ public:
                         const Vapor::MeshletData* meshletData = nullptr,
                         bool meshletLodEnabled = true);
 
-    // In-place geometry rewrite for a registered mesh (streaming: a fixed
-    // mesh pool registered once, contents rewritten as the world moves).
-    // Counts must match registration; returns false otherwise.
-    bool updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
-                            const std::vector<Uint32>& indices) override;
-
-    // Pack the 4+4 terrain detail layers into the two 2D-array textures the
-    // Main pass's terrain branch samples (set2 b13/b14 on Vulkan; 18/19 on
-    // Metal-via-RHI), with full mip chains.
-    void setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& albedoLayers,
-                                const std::array<std::shared_ptr<Vapor::Image>, 4>& normalLayers) override;
-
-    // Terrain height-field descriptor (packed into terrain materials' spare
-    // fields at upload) so the Main pass can reconstruct per-pixel normals.
-    void setTerrainHeightField(float noiseFrequency, int noiseOctaves,
-                               Uint32 seed, float heightScale) override;
-
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
 
@@ -344,11 +327,6 @@ public:
     void requestIBLUpdate() override { if (m_iblAutoRebake) iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
     void setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) override;
-    // Grass ring: fixed instance pool, per-cell slot rewrites, per-frame draws.
-    bool configureGrassPool(Uint32 cellSlots, Uint32 bladesPerSlot) override;
-    void updateGrassCell(Uint32 slot, const std::vector<Vapor::GrassBladeGpu>& blades) override;
-    void setGrassDraws(const std::vector<Vapor::GrassCellDraw>& draws,
-                       const Vapor::GrassSettingsData& settings) override;
     // MicroVoxel tunables (the same state the ImGui panel edits) — exposed so
     // demo/gameplay hotkeys can flip debug views and toggles directly.
     MicroVoxelRenderData& getMicroVoxelSettings() { return microVoxelSettings; }
@@ -453,9 +431,6 @@ private:
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
-    // Streamed grass ring: instanced blade draws per resident cell, drawn
-    // between Main and MicroVoxel (writes depth; opaque, no blending).
-    void grassPass();
     void microVoxelPass();
     // Reconciles the ECS-pushed volume list with the GPU mirrors (create /
     // destroy buffers) and flushes per-brick dirty batches into the pool.
@@ -666,22 +641,6 @@ private:
     TextureId defaultWhiteTexture = INVALID_TEXTURE_ID;
     TextureId defaultNormalTexture = INVALID_TEXTURE_ID;
     TextureId defaultBlackTexture = INVALID_TEXTURE_ID;
-    // Terrain detail-layer arrays sampled by RHIMain.frag's terrain branch at
-    // set2 b13/b14 (Vulkan). defaultDetailArrayTexture (4-layer white) keeps
-    // those sampler2DArray descriptors valid on every Main-pass draw; the two
-    // staged arrays hold the real grass/rock/dirt/snow layers when a terrain
-    // surface is present (else invalid -> the default is bound).
-    TextureHandle defaultDetailArrayTexture;
-    TextureHandle terrainDetailAlbedoArray;
-    TextureHandle terrainDetailNormalArray;
-    // Terrain height-field descriptor (from TerrainWorld's noise config). Packed
-    // into terrain materials' unused Disney lobe fields at material upload so the
-    // Main pass's terrain branch can re-evaluate heightAt() for per-pixel normals.
-    bool   m_hasTerrainHeightField = false;
-    float  m_terrainNoiseFrequency = 0.0f;
-    int    m_terrainNoiseOctaves = 0;
-    Uint32 m_terrainSeed = 0u;
-    float  m_terrainHeightScale = 0.0f;
     // Neutral ORM (occlusion=1, roughness=1, metallic=0) — the default for
     // materials lacking a metallic/roughness/occlusion map. Using white here
     // (metallic .b = 1.0) rendered every such surface as fully metallic:
@@ -805,21 +764,6 @@ private:
         Uint32 pageEntryCount = 0;   // page-table entries this volume owns
         Uint32 brickCapacity = 0;    // pool slots this volume owns
     };
-    // ---- Grass ring (streamed instanced blades; see grassPass) -----------
-    // Fixed pool of cell slots in one instance buffer; TerrainSystem streams
-    // cells by rewriting slots in place, and each frame supplies the resident
-    // draws + wind/look settings.
-    BufferHandle grassInstanceBuffer;
-    BufferHandle grassParamsBuffer;
-    PipelineHandle grassPipeline;
-    ShaderHandle grassVS, grassFS;
-    Uint32 grassSlotCount = 0;
-    Uint32 grassBladesPerSlot = 0;
-    std::vector<Vapor::GrassCellDraw> grassDraws;
-    Vapor::GrassSettingsData grassSettings;
-    bool grassEnabled = true;
-    float grassTimeSeconds = 0.0f;
-    std::chrono::steady_clock::time_point grassLastTick {};
 
     BufferHandle voxelPageTableBuffer;  // concatenated per-volume page tables
     BufferHandle voxelBrickPoolBuffer;  // concatenated per-volume slot ranges

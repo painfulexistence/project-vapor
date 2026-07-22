@@ -62,11 +62,10 @@ namespace Vapor {
             registerComponent<FlipbookComponent>("Flipbook");
             registerComponent<Text2DComponent>("Text 2D");
             registerComponent<Shape2DComponent>("Shape 2D");
-            // Procedural worlds: the auto-draw skips their Hidden<> state; the
-            // owning system (VoxelVolumeSystem / TerrainSystem) picks up edits —
-            // tick `regenerate` after changing seeds/dims/rings to rebuild.
+            // Procedural world: the auto-draw skips its Hidden<> state; the
+            // owning VoxelVolumeSystem picks up edits — tick `regenerate` after
+            // changing seeds/dims to rebuild.
             registerComponent<VoxelVolumeComponent>("Voxel Volume");
-            registerComponent<StreamingTerrainComponent>("Streaming Terrain");
         }
 
         // -------------------------------------------------------------------------

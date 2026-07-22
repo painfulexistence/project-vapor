@@ -5,7 +5,6 @@
 #include "graphics_sprite.hpp"
 #include "physics_3d.hpp"
 #include "render_data.hpp"   // SkyType
-#include "terrain_world.hpp" // StreamingTerrainComponent's shared_ptr<TerrainWorld> needs the complete type
 #include "vehicle_controller.hpp"
 #include "voxel_world.hpp"   // VoxelVolumeComponent's shared_ptr<VoxelWorld> needs the complete type
 #include <entt/entt.hpp>
@@ -260,41 +259,6 @@ namespace Vapor {
         bool regenerate = false;   // set true (e.g. from the inspector) to rebuild
         Hidden<std::shared_ptr<VoxelWorld>> world = {};  // owned; created by the system
         Hidden<Uint32> _generatedSeed = {0u};            // seed the world was built with
-    };
-
-    // A streamed heightfield terrain (see terrain_world.hpp). TerrainSystem
-    // owns the TerrainWorld: on first sight it prewarms the whole world at
-    // the coarsest LOD (full horizon on frame one), then refines concentric
-    // detail rings around the active camera on task-scheduler workers,
-    // rewriting a fixed per-LOD mesh slot pool in place — streaming never
-    // allocates GPU geometry. Deterministic tree/rock scatter spawns
-    // instanced-mesh entities in a ring. One per world (singleton).
-    struct StreamingTerrainComponent {
-        float worldSize = 10240.0f;    // meters per axis (rounded to tiles)
-        float tileSize = 512.0f;
-        float heightScale = 500.0f;
-        float noiseFrequency = 0.0007f;
-        int noiseOctaves = 9;
-        Uint32 seed = 20260705u;
-        int lod0RadiusTiles = 2;
-        int lod1RadiusTiles = 4;
-        int lod2RadiusTiles = 8;
-        int scatterRadiusTiles = 3;
-        int scatterPerTile = 90;       // placement attempts per tile
-        // Streamed grass ring (GoT-style wind sway; defaults tuned in the
-        // original demo). density is attempts per m^2, culled by the coverage
-        // fraction and the height01 band; 0 disables grass entirely.
-        float grassDensity = 40.0f;
-        float grassRadius = 90.0f;
-        float grassBladeHeight = 1.6f;
-        glm::vec2 grassHeightBand = glm::vec2(0.02f, 0.64f);
-        float grassCoverage = 0.7f;
-        glm::vec3 grassRootColor = glm::vec3(0.10f, 0.15f, 0.06f);   // shadowed base
-        glm::vec3 grassTipColor = glm::vec3(0.965f, 0.949f, 0.388f); // golden tip
-        float grassWindStrength = 0.45f;
-        float grassWindSpeed = 1.8f;
-        bool regenerate = false;       // set true (e.g. from the inspector) to rebuild
-        Hidden<std::shared_ptr<TerrainWorld>> world = {};  // owned; created by the system
     };
 
     // ── Weather ──────────────────────────────────────────────────────────────
