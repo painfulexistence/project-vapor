@@ -1939,6 +1939,41 @@ void Renderer::mainRenderPass() {
         if (backend == GraphicsBackend::Metal && bindlessMaterialTable.isValid()) {
             rhi->bindTextureArgumentTable(bindlessMaterialTable);
         }
+        // Full-PBR fragment inputs for shadeMode 2 (see 3d_meshlet.metal
+        // fragmentMain). Bound unconditionally on Metal so mode 2 always has
+        // valid handles; mode 0/1 return before dereferencing them. The light
+        // buffers hold the same C++ types the main PBR fragment binds
+        // (DirectionalLightData≡DirLight, PointLightData≡PointLight, ...), so
+        // the meshlet fragment reads them at its own buffer indices. Shadows,
+        // point/spot/rect lights are a simplified subset of the main pass
+        // (single-cascade PCF, unshadowed analytic lights) — full parity is a
+        // follow-up. Vulkan meshlet uses MeshletDebug.frag and skips all this.
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setFragmentBuffer(2, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+            rhi->setFragmentBuffer(3, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+            rhi->setFragmentBuffer(4, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+            rhi->setFragmentBuffer(5, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(6, rectLightBuffer);
+            if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(7, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+            struct MeshletLightCounts { Uint32 pointCount, spotCount, rectCount, dirShadowOn; };
+            MeshletLightCounts lc{
+                std::min<Uint32>(static_cast<Uint32>(pointLights.size()), maxPointLights),
+                std::min<Uint32>(static_cast<Uint32>(spotLights.size()), maxSpotLights),
+                static_cast<Uint32>(rectLights.size()),
+                (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
+            };
+            rhi->setFragmentBytes(&lc, sizeof(lc), 8);
+            // IBL + shadow + rect-video textures (constexpr-sampled in-shader, so
+            // the bound sampler is a formality). Defaults keep every slot valid
+            // even when a subsystem is off (a material's iblEnabled gates the
+            // cube reads; unbound cubes would still be UB to declare).
+            rhi->setTexture(0, 0, (m_iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, clampSampler);
+            rhi->setTexture(0, 1, (m_iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex, clampSampler);
+            rhi->setTexture(0, 2, (m_iblReady && brdfLUTTex.isValid()) ? brdfLUTTex : blackTex, clampSampler);
+            rhi->setTexture(0, 3, pssmShadowArrayTexture, shadowSampler);
+            rhi->setTexture(0, 4, whiteTex, defaultSampler);  // rect-light video (unused unless useVideoTexture)
+        }
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
         rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);

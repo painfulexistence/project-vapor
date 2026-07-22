@@ -1,6 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 #include "Res/shaders/3d_common.metal"  // shared CameraData/InstanceData/VertexData + inverse()
+#include "Res/shaders/3d_pbr_lib.metal" // shared Surface/BRDF/analytic-light/IBL helpers
 
 // Meshlet task/mesh pipeline — Metal backend. Mirror of Meshlet.task /
 // Meshlet.mesh / MeshletDebug.frag (Vulkan). objectMain culls per meshlet
@@ -143,6 +144,8 @@ struct MeshletVertexOut {
     float3 color;
     float3 worldNormal;  // for the depth+normal pre-pass MRT (real path only)
     float2 uv;           // material-table sampling (real path only)
+    float3 worldPosition;// PBR shade: view dir + point/spot/rect lights (real path)
+    float4 worldTangent; // PBR shade: TBN for normal mapping (.w = handedness)
     uint   materialID [[flat]];  // bindless material-table index (real path only)
 };
 
@@ -428,9 +431,15 @@ static float3 hashColor(uint x) {
     if (tid < m.vertexCount) {
         uint vi = meshletVertices[m.vertexOffset + tid];  // merged-VB vertex index
         MeshletVertexOut vout;
-        vout.position = viewProj * (model * float4(float3(vertices[vi].position), 1.0));
+        float4 wp = model * float4(float3(vertices[vi].position), 1.0);
+        vout.position = viewProj * wp;
         vout.color = color;
         vout.worldNormal = normalMatrix * float3(vertices[vi].normal.xyz);
+        // Tangent: same normalMatrix transform as the PBR vertex shader; carry
+        // the glTF handedness sign in .w for the bitangent.
+        float4 tan = vertices[vi].tangent;
+        vout.worldTangent = float4(normalMatrix * tan.xyz, tan.w);
+        vout.worldPosition = wp.xyz;
         vout.uv = float2(vertices[vi].uv);
         // Same materialID the PBR path reads (instances[iid].materialID). Constant
         // across the meshlet's instance, so [[flat]] on the varying.
@@ -456,34 +465,133 @@ static float3 hashColor(uint x) {
     }
 }
 
+// Compact directional (PSSM) shadow for the meshlet path: pick the cascade by
+// view-space depth, project into its light space, 4-tap Poisson PCF with a
+// per-cascade slope-scaled bias. A deliberately simpler subset of the main PBR
+// pass's RT↔PSSM cross-fade (no RT shadow, no cascade blend, no SSCS) — enough
+// to ground meshlet geometry with sun shadows. Returns 1.0 (lit) when unbound.
+static float meshletDirShadow(float3 worldPos, float3 N, float3 sunDir, float viewZ,
+                              constant PSSMData& pssm,
+                              depth2d_array<float, access::sample> shadowMaps) {
+    int ci = 0;
+    if      (viewZ > pssm.cascadeSplits.z) ci = 2;
+    else if (viewZ > pssm.cascadeSplits.y) ci = 1;
+    float4 lsPos = pssm.lightSpaceMatrices[ci] * float4(worldPos, 1.0);
+    float3 proj  = lsPos.xyz / lsPos.w;
+    float2 uv    = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    float  ndl   = max(dot(N, sunDir), 0.0);
+    float  slope = clamp(1.0 - ndl, 0.0, 1.0);
+    float  bias  = 0.002 * float(ci + 1) * (1.0 + 2.0 * slope);
+    float  ref   = proj.z - bias;
+    constexpr sampler cmp(address::clamp_to_edge, filter::linear, compare_func::less_equal);
+    const float texel = 1.0 / 4096.0;
+    float s = 0.0;
+    for (int i = 0; i < 4; ++i)
+        s += shadowMaps.sample_compare(cmp, uv + poissonDisk4[i] * texel * 2.0, ci, ref);
+    return s * 0.25;
+}
+
+// Per-material light counts + a directional-shadow enable, packed to avoid a
+// pile of single-uint buffers. (pointCount, spotCount, rectCount, dirShadowOn).
+struct MeshletLightCounts { uint pointCount; uint spotCount; uint rectCount; uint dirShadowOn; };
+
 fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
-                             constant uint& shadeMode [[buffer(0)]],
+                             constant uint&              shadeMode  [[buffer(0)]],
+                             constant CameraData&        camera     [[buffer(1)]],
+                             const device MaterialData*  materials  [[buffer(2)]],
+                             const device DirLight*      dirLights  [[buffer(3)]],
+                             const device PointLight*    pointLights[[buffer(4)]],
+                             const device SpotLight*     spotLights [[buffer(5)]],
+                             const device RectLight*     rectLights [[buffer(6)]],
+                             constant PSSMData&          pssmData   [[buffer(7)]],
+                             constant MeshletLightCounts& counts    [[buffer(8)]],
                              // Shared bindless material table (buffer 13), same
                              // handle the Bindless-MDI PBR fragment consumes.
-                             // Only dereferenced in shadeMode 2, so it may be
-                             // unbound in modes 0/1 (probes / no-bindless caps).
-                             const device MeshletMaterialTexs* materialTexs [[buffer(13)]]) {
-    // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes),
-    // 0 = lambertian from the interpolated world normal (no material bind —
-    //     used when bindless textures are unavailable),
-    // 2 = textured albedo from the shared bindless material table (Step 1 of
-    //     wiring real PBR onto the meshlet path; normal/metallic/roughness +
-    //     analytic lights + IBL are the follow-up).
+                             const device MeshletMaterialTexs* materialTexs [[buffer(13)]],
+                             // System textures for IBL + directional shadow +
+                             // rect-light video. Direct args are legal here (the
+                             // meshlet pipeline is NOT an ICB pipeline).
+                             texturecube<float, access::sample>   irradianceMap  [[texture(0)]],
+                             texturecube<float, access::sample>   prefilterMap   [[texture(1)]],
+                             texture2d<float, access::sample>     brdfLUT        [[texture(2)]],
+                             depth2d_array<float, access::sample> pssmShadowMaps [[texture(3)]],
+                             texture2d<float, access::sample>     rectLightVideo [[texture(4)]]) {
+    // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes / UI toggle),
+    //            0 = lambertian fallback (no material bind — bindless caps absent),
+    //            2 = full PBR from the shared material table + analytic lights + IBL.
     if (shadeMode == 1u) return float4(in.color, 1.0);
 
-    // Cheap fixed-light lambertian term shared by modes 0 and 2 (a stand-in
-    // until the full analytic-light + IBL shade lands).
-    float3 N = normalize(in.worldNormal);
-    float3 L = normalize(float3(0.4, 0.7, 0.5));
-    float ndl = max(dot(N, L), 0.0);
-    float shade = 0.12 + 0.88 * ndl;
-
-    if (shadeMode == 2u) {
-        constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
-        float3 albedo = materialTexs[in.materialID].albedo.sample(s, in.uv).rgb;
-        return float4(albedo * shade, 1.0);
+    if (shadeMode != 2u) {
+        // Lambertian fallback (mode 0): no material/light binds are dereferenced.
+        float3 N = normalize(in.worldNormal);
+        float3 L = normalize(float3(0.4, 0.7, 0.5));
+        return float4(float3(0.8) * (0.12 + 0.88 * max(dot(N, L), 0.0)), 1.0);
     }
-    return float4(float3(0.8) * shade, 1.0);
+
+    // ── Mode 2: real PBR (parity with 3d_pbr_normal_mapped.metal's shade) ──
+    constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
+    MeshletMaterialTexs tex = materialTexs[in.materialID];
+    MaterialData material = materials[in.materialID];
+
+    float4 baseColor = tex.albedo.sample(s, in.uv);
+    // glTF MASK cutout (per-material cutoff in emissiveFactor.a; 0 = disabled).
+    if (material.emissiveFactor.a > 0.0 &&
+        baseColor.a * material.baseColorFactor.a < material.emissiveFactor.a) {
+        discard_fragment();
+    }
+
+    Surface surf;
+    surf.color      = srgbToLinear(baseColor.rgb * material.baseColorFactor.rgb);
+    surf.ao         = tex.occlusion.sample(s, in.uv).r * material.occlusionStrength;
+    surf.roughness  = tex.roughness.sample(s, in.uv).g * material.roughnessFactor;
+    surf.metallic   = tex.metallic.sample(s, in.uv).b * material.metallicFactor;
+    surf.emission   = srgbToLinear(tex.emissive.sample(s, in.uv).rgb * material.emissiveFactor.rgb) * material.emissiveStrength;
+    surf.subsurface = material.subsurface;
+    surf.specular   = material.specular;
+    surf.specular_tint = material.specularTint;
+    surf.anisotropic = material.anisotropic;
+    surf.sheen      = material.sheen;
+    surf.sheen_tint = material.sheenTint;
+    surf.clearcoat  = material.clearcoat;
+    surf.clearcoat_gloss = material.clearcoatGloss;
+
+    // TBN normal mapping (same construction as the PBR fragment).
+    float3 N = normalize(in.worldNormal);
+    float3 T = normalize(in.worldTangent.xyz);
+    T = normalize(T - dot(T, N) * N);
+    float3 B = normalize(cross(N, T) * in.worldTangent.w);
+    float3x3 TBN = float3x3(T, B, N);
+    float3 norm = normalize(TBN * normalize(tex.normal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    float3 viewDir = normalize(camera.position - in.worldPosition);
+
+    float3 result = float3(0.0);
+
+    // Directional sun + PSSM shadow.
+    float3 sunDir = normalize(-dirLights[0].direction);
+    float viewZ = abs((camera.view * float4(in.worldPosition, 1.0)).z);
+    float shadow = counts.dirShadowOn != 0u
+        ? meshletDirShadow(in.worldPosition, norm, sunDir, viewZ, pssmData, pssmShadowMaps)
+        : 1.0;
+    result += CalculateDirectionalLight(dirLights[0], norm, T, B, viewDir, surf) * shadow;
+
+    // Analytic point / spot / rect lights (loop-all — unshadowed, matching the
+    // Vulkan forward path; the tiled-cluster + RGB-shadow refinements are the
+    // main pass's Metal-only extras).
+    for (uint i = 0; i < counts.pointCount; ++i)
+        result += CalculatePointLight(pointLights[i], norm, T, B, viewDir, surf, in.worldPosition);
+    for (uint i = 0; i < counts.spotCount; ++i)
+        result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition);
+    for (uint i = 0; i < counts.rectCount; ++i)
+        result += CalculateRectLight(rectLights[i], norm, in.worldPosition, viewDir, surf, rectLightVideo);
+
+    // Ambient: IBL when the material opts in, else a minimal constant term.
+    if (material.iblEnabled > 0.5)
+        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
+    else
+        result += float3(0.03) * surf.ao * surf.color;
+
+    result += surf.emission;
+    return float4(result, 1.0);
 }
 
 // MRT output for the meshlet depth pre-pass (mirrors 3d_depth_only.metal's

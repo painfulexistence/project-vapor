@@ -219,6 +219,10 @@ function(vapor_flatten_metal_shaders TARGET)
     endif()
     set(_scratch "${CMAKE_CURRENT_BINARY_DIR}/metal_validate")
     set(_common "${VAPOR_ASSETS_DIR}/shaders/3d_common.metal")
+    # Shared include-only headers that many shaders pull in: list them in DEPENDS
+    # so editing one re-validates every shader that inlines it (they carry no
+    # entry point, so they are never validated as standalone TUs above).
+    set(_pbrlib "${VAPOR_ASSETS_DIR}/shaders/3d_pbr_lib.metal")
     set(_air_outputs)
     foreach(_metal ${_metal_sources})
         get_filename_component(_name ${_metal} NAME)
@@ -247,8 +251,8 @@ function(vapor_flatten_metal_shaders TARGET)
                     "${_metal}" "${VAPOR_ASSETS_DIR}/shaders" "${_scratch}/${_name}"
             COMMAND xcrun metal -c -Wno-unused-variable -Wno-unused-const-variable
                     "${_scratch}/${_name}" -o "${_scratch}/${_name}.air"
-            # Re-validate when the shader OR the shared include changes.
-            DEPENDS "${_metal}" "${_common}" "${_flatten_script}"
+            # Re-validate when the shader OR a shared include changes.
+            DEPENDS "${_metal}" "${_common}" "${_pbrlib}" "${_flatten_script}"
             COMMENT "Validating (xcrun metal) ${_name}"
             VERBATIM
         )
