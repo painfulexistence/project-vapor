@@ -74,13 +74,11 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
-    threadgroup atomic_uint visibleCount;
-    if (tid == 0u) atomic_store_explicit(&visibleCount, 0u, memory_order_relaxed);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
+    // Per-lane visibility test — one meshlet per thread.
     uint local = gid * 32u + tid;
+    uint mi = params.meshletOffset + local;
+    bool visible = false;
     if (local < params.meshletCount) {
-        uint mi = params.meshletOffset + local;
         MeshletBounds b = bounds[mi];
         float4x4 model = instances[params.instanceID].model;
         float maxScale = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
@@ -93,7 +91,7 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
         // Frustum: world-space sphere vs the camera planes.
         float3 wc = (model * float4(b.cullSphere.xyz, 1.0)).xyz;
         float wr = b.cullSphere.w * maxScale;
-        bool visible = true;
+        visible = true;
         for (int i = 0; i < 6 && !cullBypass; ++i) {
             float4 plane = cam.frustumPlanes[i];
             if (dot(plane.xyz, wc) + plane.w < -wr) { visible = false; break; }
@@ -116,16 +114,26 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
                 (projectError(b.lodSphere, b.lodError, model, maxScale, cam) <= params.errorThreshold);
             visible = parentTooCoarse && thisFineEnough;
         }
-
-        if (visible) {
-            uint slot = atomic_fetch_add_explicit(&visibleCount, 1u, memory_order_relaxed);
-            payload.meshletIndices[slot] = mi;
-        }
     }
 
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Compact survivors into the payload with SIMD-group ops (matches
+    // metal-by-example/MetalMeshletCulling). The object threadgroup is exactly
+    // one 32-wide SIMD-group (taskThreadgroupSize == 32), so simd_prefix_exclusive_sum
+    // assigns each survivor a dense payload slot IN-LANE, with implicit SIMD
+    // synchronization — no threadgroup atomic, no barrier. The previous
+    // atomic-counter + threadgroup_barrier version relied on threadgroup/payload
+    // memory ordering that only held under Metal Shader Validation (which
+    // serializes + zero-fills that memory): without it, the cooperatively filled
+    // object_data payload did not reliably land before the spawned mesh grid read
+    // it, so meshMain read stale indices and nothing rasterized (blank unless
+    // validation was on). SIMD prefix-sum removes that shared-memory hazard.
+    uint vote = visible ? 1u : 0u;
+    uint slot = simd_prefix_exclusive_sum(vote);
+    if (visible) {
+        payload.meshletIndices[slot] = mi;
+    }
+    uint count = simd_sum(vote);
     if (tid == 0u) {
-        uint count = atomic_load_explicit(&visibleCount, memory_order_relaxed);
         grid.set_threadgroups_per_grid(uint3(count, 1u, 1u));
     }
 }
