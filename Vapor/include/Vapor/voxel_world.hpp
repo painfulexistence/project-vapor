@@ -131,6 +131,11 @@ public:
     Uint64 solidVoxels() const { return solidCount.load(std::memory_order_relaxed); }
     Uint32 residentBricks() const;
     Uint64 droppedBricks() const { return droppedCount.load(std::memory_order_relaxed); }
+    // Surface height of the generated terrain at a voxel column, in voxel
+    // units — a pure function of (x, z, seed), valid the moment
+    // prepareGeneration has run (no chunks needed). Lets gameplay place
+    // things on the surface (the demo's quad flora) without sampling voxels.
+    float terrainHeight(int x, int z) const;
 
     // ---- Renderer access -------------------------------------------------
     const std::vector<Uint32>& pageTableData() const { return pageTable; }
@@ -164,7 +169,6 @@ private:
     }
 
     void setDefaultPalette();
-    float terrainHeight(int x, int z) const;  // voxels, pure function of (x, z, seed)
     // Allocates a pool slot (mutex-held by caller); PAGE_EMPTY when exhausted.
     Uint32 allocSlotLocked();
     void freeSlotLocked(Uint32 slot);

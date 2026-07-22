@@ -91,6 +91,186 @@ entt::entity getActiveCamera(entt::registry& reg) {
     return entt::null;
 }
 
+// ── Quad flora (Minecraft-style crossed billboards) ──────────────────────────
+// Raster vegetation over the raymarched voxels: the MicroVoxel pass writes true
+// hit depth, so ordinary alpha-cutout quads depth-composite with the terrain in
+// both directions for free. Each plant is two quads crossed at 90°, duplicated
+// with reversed winding so back faces survive back-face culling; normals point
+// +Y so blades light like the ground they grow from (no dark backside).
+
+std::shared_ptr<Vapor::Image> makeGrassTuftImage() {
+    constexpr int N = 48;
+    auto img = std::make_shared<Vapor::Image>();
+    img->uri = "microvoxel_flora_grass";  // unique key for the renderer's texture cache
+    img->width = N;
+    img->height = N;
+    img->channelCount = 4;
+    img->byteArray.assign(static_cast<size_t>(N) * N * 4, 0);
+    auto put = [&](int x, int y, glm::vec3 c) {
+        if (x < 0 || x >= N || y < 0 || y >= N) return;
+        // Image row 0 is the TOP of the texture; the quad UVs put v=0 at the
+        // blade roots, so write with y flipped (row N-1 = root).
+        const size_t i = (static_cast<size_t>(N - 1 - y) * N + x) * 4;
+        img->byteArray[i + 0] = static_cast<Uint8>(c.r * 255.0f);
+        img->byteArray[i + 1] = static_cast<Uint8>(c.g * 255.0f);
+        img->byteArray[i + 2] = static_cast<Uint8>(c.b * 255.0f);
+        img->byteArray[i + 3] = 255;
+    };
+    Uint32 rng = 0xC0FFEEu;
+    auto rand01 = [&rng] {
+        rng = rng * 1664525u + 1013904223u;
+        return static_cast<float>(rng >> 8) * (1.0f / 16777216.0f);
+    };
+    const glm::vec3 root(0.13f, 0.30f, 0.08f), tip(0.42f, 0.72f, 0.22f);
+    for (int s = 0; s < 14; s++) {
+        const float bx = 3.0f + rand01() * (N - 6);
+        const float height = N * (0.55f + 0.4f * rand01());
+        const float lean = (rand01() - 0.5f) * 10.0f;  // px of tip drift
+        for (int y = 0; y < static_cast<int>(height); y++) {
+            const float t = y / height;
+            const int x = static_cast<int>(bx + lean * t * t);
+            const glm::vec3 c = glm::mix(root, tip, t);
+            put(x, y, c);
+            if (t < 0.6f) put(x + 1, y, c);  // blades taper toward the tip
+        }
+    }
+    return img;
+}
+
+std::shared_ptr<Vapor::Image> makeFlowerImage(const char* uri, glm::vec3 petal, glm::vec3 center) {
+    constexpr int N = 48;
+    auto img = std::make_shared<Vapor::Image>();
+    img->uri = uri;
+    img->width = N;
+    img->height = N;
+    img->channelCount = 4;
+    img->byteArray.assign(static_cast<size_t>(N) * N * 4, 0);
+    auto put = [&](int x, int y, glm::vec3 c) {
+        if (x < 0 || x >= N || y < 0 || y >= N) return;
+        const size_t i = (static_cast<size_t>(N - 1 - y) * N + x) * 4;  // y up (see grass)
+        img->byteArray[i + 0] = static_cast<Uint8>(c.r * 255.0f);
+        img->byteArray[i + 1] = static_cast<Uint8>(c.g * 255.0f);
+        img->byteArray[i + 2] = static_cast<Uint8>(c.b * 255.0f);
+        img->byteArray[i + 3] = 255;
+    };
+    const glm::vec3 stem(0.16f, 0.38f, 0.10f);
+    const int cx = N / 2;
+    for (int y = 0; y < N * 58 / 100; y++) {  // stem with a slight S-curve
+        const int x = cx + static_cast<int>(1.5f * std::sin(y * 0.25f));
+        put(x, y, stem);
+        put(x + 1, y, stem * 1.15f);
+    }
+    put(cx - 4, N / 4, stem); put(cx - 3, N / 4, stem);       // leaf nubs
+    put(cx + 5, N / 3, stem); put(cx + 4, N / 3, stem);
+    const glm::vec2 head(cx, N * 0.72f);
+    for (int y = 0; y < N; y++) {
+        for (int x = 0; x < N; x++) {
+            const glm::vec2 d(x - head.x, y - head.y);
+            const float r = glm::length(d);
+            // Five-petal scallop: radius swells with cos(5*angle).
+            const float petalR = 8.5f + 2.5f * std::cos(5.0f * std::atan2(d.y, d.x));
+            if (r < 3.4f) put(x, y, center);
+            else if (r < petalR) put(x, y, petal * (0.85f + 0.15f * (1.0f - r / petalR)));
+        }
+    }
+    return img;
+}
+
+// Two quads crossed at 90°, each also emitted with reversed winding (the Main
+// pass culls back faces; a reversed duplicate is cheaper than a per-material
+// cull switch). Base at the local origin, `height` tall, `width` wide.
+std::shared_ptr<Vapor::Mesh> buildCrossedQuads(float width, float height,
+                                               std::shared_ptr<Vapor::Material> material) {
+    auto mesh = std::make_shared<Vapor::Mesh>();
+    std::vector<Vapor::VertexData> verts;
+    std::vector<Uint32> inds;
+    const float hw = width * 0.5f;
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);   // foliage trick: light like the ground
+    const glm::vec4 tan(1.0f, 0.0f, 0.0f, 1.0f);
+    auto quad = [&](glm::vec3 a, glm::vec3 b, bool reversed) {
+        const Uint32 base = static_cast<Uint32>(verts.size());
+        verts.push_back({ { a.x, 0.0f, a.z }, { 0.0f, 0.0f }, up, tan });
+        verts.push_back({ { b.x, 0.0f, b.z }, { 1.0f, 0.0f }, up, tan });
+        verts.push_back({ { b.x, height, b.z }, { 1.0f, 1.0f }, up, tan });
+        verts.push_back({ { a.x, height, a.z }, { 0.0f, 1.0f }, up, tan });
+        if (reversed) inds.insert(inds.end(), { base, base + 2, base + 1, base, base + 3, base + 2 });
+        else          inds.insert(inds.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+    };
+    quad({ -hw, 0, 0 }, { hw, 0, 0 }, false);
+    quad({ -hw, 0, 0 }, { hw, 0, 0 }, true);
+    quad({ 0, 0, -hw }, { 0, 0, hw }, false);
+    quad({ 0, 0, -hw }, { 0, 0, hw }, true);
+    mesh->initialize(verts, inds);
+    mesh->material = std::move(material);
+    return mesh;
+}
+
+std::shared_ptr<Vapor::Mesh> makeFloraMesh(std::shared_ptr<Vapor::Image> albedo, const char* name,
+                                           float width, float height) {
+    auto mat = std::make_shared<Vapor::Material>();
+    mat->name = name;
+    mat->alphaMode = Vapor::AlphaMode::MASK;   // cutout: RHIMain/PrePass discard below the cutoff
+    mat->alphaCutoff = 0.5f;
+    mat->doubleSided = true;                   // belt & braces on backends that honor it
+    mat->albedoMap = std::move(albedo);
+    mat->roughnessFactor = 0.95f;
+    mat->metallicFactor = 0.0f;
+    return buildCrossedQuads(width, height, std::move(mat));
+}
+
+// Scatter flora on every generated volume's terrain surface. terrainHeight is a
+// pure function of (x, z, seed) — chunks still generating don't matter — and
+// the grass band mirrors the generator's snow/sand lines so flowers never grow
+// on beaches or snowcaps. One-shot: returns false until every world exists.
+bool spawnFlora(entt::registry& registry,
+                const std::vector<std::shared_ptr<Vapor::Mesh>>& floraMeshes) {
+    auto view = registry.view<Vapor::VoxelVolumeComponent>();
+    for (auto entity : view) {
+        if (!view.get<Vapor::VoxelVolumeComponent>(entity).world.value) return false;
+    }
+    for (auto entity : view) {
+        auto& vv = view.get<Vapor::VoxelVolumeComponent>(entity);
+        const auto& world = *vv.world.value;
+        const glm::vec3 origin = Vapor::VoxelVolumeSystem::volumeOrigin(registry, entity, world);
+        const glm::ivec3 dim = world.dim();
+        const float voxelSize = world.voxelSizeMeters();
+        // The generator's biome lines (voxel_world.cpp generateColumnChunk).
+        const float snowLine = (0.10f + 0.75f * 0.34f) * static_cast<float>(dim.y);
+        const float sandLine = (0.10f + 0.12f * 0.34f) * static_cast<float>(dim.y);
+
+        const float areaM2 = (dim.x * voxelSize) * (dim.z * voxelSize);
+        const int attempts = static_cast<int>(areaM2 * 0.5f);  // ~1 plant / 2 m² pre-cull
+        Uint32 rng = vv.seed * 2654435761u + 77u;
+        auto rand01 = [&rng] {
+            rng = rng * 1664525u + 1013904223u;
+            return static_cast<float>(rng >> 8) * (1.0f / 16777216.0f);
+        };
+        for (int i = 0; i < attempts; i++) {
+            const int gx = static_cast<int>(rand01() * (dim.x - 1));
+            const int gz = static_cast<int>(rand01() * (dim.z - 1));
+            const float kind = rand01();     // draw every random up-front (stable stream)
+            const float yaw = rand01() * 6.2831853f;
+            const float scale = 0.8f + 0.5f * rand01();
+            const float h = world.terrainHeight(gx, gz);
+            if (h <= sandLine + 0.5f || h >= snowLine - 0.5f) continue;  // grass band only
+            const int top = static_cast<int>(h);
+            if (top + 1 >= dim.y) continue;
+            // 70% grass tufts, 30% flowers (alternating the two variants).
+            const auto& mesh = (kind < 0.7f) ? floraMeshes[0]
+                                             : floraMeshes[1 + (static_cast<int>(kind * 100.0f) & 1)];
+            auto e = registry.create();
+            auto& t = registry.emplace<Vapor::TransformComponent>(e);
+            t.position = origin + glm::vec3((gx + 0.5f) * voxelSize, (top + 1) * voxelSize,
+                                            (gz + 0.5f) * voxelSize);
+            t.rotation = glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+            t.scale = glm::vec3(scale);
+            auto& mr = registry.emplace<Vapor::MeshRendererComponent>(e);
+            mr.meshes.push_back(mesh);
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 auto main(int argc, char* args[]) -> int {
@@ -167,6 +347,20 @@ auto main(int argc, char* args[]) -> int {
             fmt::print(stderr, "MicroVoxel: scene blueprint failed to load; the world will be empty\n");
         }
     }
+    // Quad flora meshes must be staged (mesh + material registration) before
+    // stage(); the entities that draw them spawn later, once the voxel worlds
+    // exist and their surface heights can be queried.
+    std::vector<std::shared_ptr<Vapor::Mesh>> floraMeshes = {
+        makeFloraMesh(makeGrassTuftImage(), "flora_grass", 0.36f, 0.34f),
+        makeFloraMesh(makeFlowerImage("microvoxel_flora_poppy",
+                                      glm::vec3(0.85f, 0.18f, 0.12f), glm::vec3(0.12f, 0.09f, 0.02f)),
+                      "flora_poppy", 0.30f, 0.42f),
+        makeFloraMesh(makeFlowerImage("microvoxel_flora_daisy",
+                                      glm::vec3(0.95f, 0.95f, 0.92f), glm::vec3(0.98f, 0.80f, 0.15f)),
+                      "flora_daisy", 0.30f, 0.40f),
+    };
+    for (const auto& m : floraMeshes) scene->addMesh(m);
+
     renderer->stage(scene);
     scene->stagedMeshes.clear();
     scene->stagedMeshTransforms.clear();
@@ -310,6 +504,11 @@ auto main(int argc, char* args[]) -> int {
         Vapor::LightGatherSystem::update(registry, scene.get());
         Vapor::SkySystem::update(registry, renderer.get());
         Vapor::VoxelVolumeSystem::update(registry, renderer.get());
+
+        // One-shot flora scatter once every volume's world exists (the surface
+        // height is a pure function — chunk generation can still be streaming).
+        static bool floraSpawned = false;
+        if (!floraSpawned) floraSpawned = spawnFlora(registry, floraMeshes);
 
         // ---- Render --------------------------------------------------------
         if (activeCam == entt::null) continue;
