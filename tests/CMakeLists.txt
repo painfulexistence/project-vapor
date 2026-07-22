@@ -104,6 +104,19 @@ target_link_libraries(test_asset_management PRIVATE
 target_compile_features(test_asset_management PRIVATE cxx_std_20)
 target_compile_options(test_asset_management PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Meshlet / cluster-LOD bake tests (pure offline, no GPU) ──────────────────
+add_executable(test_meshlet_builder
+    meshlet_builder_test.cpp
+)
+target_link_libraries(test_meshlet_builder PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    glm::glm
+    fmt::fmt
+)
+target_compile_features(test_meshlet_builder PRIVATE cxx_std_20)
+target_compile_options(test_meshlet_builder PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── Backend Support tests (Metal/Vulkan window initialization) ────────────
 add_executable(test_backend_support
     backend_support_test.cpp
@@ -253,6 +266,7 @@ catch_discover_tests(test_resource_manager   WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_backend_support    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_backend_support>")
 catch_discover_tests(test_ui_system          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ui_system>")
 catch_discover_tests(test_file_system        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_file_system>")
+catch_discover_tests(test_meshlet_builder    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_meshlet_builder>")
 catch_discover_tests(test_particle_system    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_particle_system>")
 catch_discover_tests(test_scene_blueprint    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_blueprint>")
 catch_discover_tests(test_voxel_world        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_voxel_world>")

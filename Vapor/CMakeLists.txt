@@ -4,6 +4,24 @@ find_package(glm CONFIG REQUIRED)
 find_package(Vulkan REQUIRED)
 find_path(TINYGLTF_INCLUDE_DIRS "tiny_gltf.h")
 find_package(cereal CONFIG REQUIRED)
+# meshoptimizer: pinned via FetchContent (NOT vcpkg) because clusterlod.h needs
+# bleeding-edge APIs (meshopt_extractMeshletIndices / partitionClusters /
+# buildMeshletsSpatial) not yet in released/vcpkg versions. Keep this commit in
+# sync with Vapor/meshopt/clusterlod.h (see Vapor/meshopt/VENDOR.md).
+include(FetchContent)
+FetchContent_Declare(meshoptimizer
+    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+    GIT_TAG ce321f27536cdbc61ef86622d8ef11fedf5492a8  # keep in sync with clusterlod.h
+)
+set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
+set(MESHOPT_BUILD_GLTFPACK OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(meshoptimizer)
+# meshoptimizer builds a plain static lib; force PIC so it can be linked into
+# shared consumers of Vapor (e.g. libVaporCAPI.so). Without this the CAPI .so
+# link fails on Linux: "relocation R_X86_64_PC32 ... can not be used when making
+# a shared object; recompile with -fPIC". Vapor itself already sets PIC below.
+set_target_properties(meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 find_package(Jolt CONFIG REQUIRED)
 find_package(enkiTS CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
@@ -67,6 +85,7 @@ set(SOURCES
     src/scene_blueprint.cpp
     src/asset_manager_usd.cpp
     src/asset_serializer.cpp
+    src/meshlet_builder.cpp
     src/camera.cpp
     src/debug_draw.cpp
     src/atlas_baker.cpp
@@ -175,6 +194,12 @@ target_link_libraries(Vapor PRIVATE
     Jolt::Jolt
     enkiTS::enkiTS
     Tracy::TracyClient
+    # BUILD_INTERFACE-only: meshoptimizer is a private impl detail built via
+    # FetchContent (not installed/exported). Without this wrapper it leaks into
+    # Vapor's exported link interface (static lib) and install(EXPORT VaporTargets)
+    # fails with "requires target meshoptimizer that is not in any export set".
+    # In-tree consumers (app, tests) still link it transitively via the build.
+    $<BUILD_INTERFACE:meshoptimizer>
 )
 
 if(APPLE)

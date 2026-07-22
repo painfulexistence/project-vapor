@@ -6,6 +6,7 @@
 #include "file_system.hpp"
 #include "fsm.hpp"
 #include "mesh_builder.hpp"
+#include "meshlet_builder.hpp"
 #include "render_scene.hpp"
 
 #include <algorithm>
@@ -352,7 +353,7 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
 namespace {
 
     constexpr char kCookMagic[4] = { 'V', 'B', 'P', '1' };
-    constexpr uint32_t kCookVersion = 1;
+    constexpr uint32_t kCookVersion = 2;  // v2: meshlet bake config (regularize + sloppy factor)
 
     uint64_t fnv1a64(const void* data, size_t n, uint64_t h) {
         const auto* p = static_cast<const uint8_t*>(data);
@@ -499,6 +500,14 @@ SceneBlueprint loadSceneBlueprint(const std::string& path) {
                                 &mat->occlusionMap, &mat->emissiveMap })
                 if (*slot == img) slot->reset();
         }
+    }
+
+    // Bake meshlets + cluster-LOD per mesh (offline) so the mesh-shader path gets
+    // them straight from the cook — otherwise Renderer::registerMesh rebuilds them
+    // on every load. No-op for empty / non-triangle meshes; the result rides the
+    // .vscene via the shared (de)serializeMesh meshletData fields.
+    for (auto& m : bp.meshes) {
+        if (m) MeshletBuilder::build(*m);
     }
 
     // Write the cook so the next load skips parsing and model decode entirely.

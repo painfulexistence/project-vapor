@@ -1,6 +1,6 @@
 #include "Vapor/asset_serializer.hpp"
 #include "Vapor/graphics.hpp"
-#include "Vapor/render_scene.hpp"
+#include "Vapor/scene_blueprint.hpp"
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <cereal/archives/binary.hpp>
@@ -8,78 +8,10 @@
 #include <cereal/types/vector.hpp>
 #include <fstream>
 #include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>
-#include <iostream>
 #include <memory>
+#include <sstream>
 
 using namespace Vapor;
-
-TEST_CASE("AssetSerializer - Scene Serialization", "[model][serializer]") {
-    // Create a test scene
-    auto scene = std::make_shared<RenderScene>("TestScene");
-
-    // Create a test image
-    auto image = std::make_shared<Image>();
-    image->uri = "test_texture.png";
-    image->width = 256;
-    image->height = 256;
-    image->channelCount = 4;
-    image->byteArray = std::vector<Uint8>(256 * 256 * 4, 128);
-
-    // Create a test material
-    auto material = std::make_shared<Material>();
-    material->name = "TestMaterial";
-    material->alphaMode = AlphaMode::OPAQUE;
-    material->alphaCutoff = 0.5f;
-    material->doubleSided = false;
-    material->baseColorFactor = glm::vec4(1.0f, 0.5f, 0.2f, 1.0f);
-    material->normalScale = 1.0f;
-    material->metallicFactor = 0.0f;
-    material->roughnessFactor = 0.5f;
-    material->occlusionStrength = 1.0f;
-    material->emissiveFactor = glm::vec3(0.0f);
-    material->albedoMap = image;
-
-    // Create a test mesh
-    auto mesh = std::make_shared<Mesh>();
-    mesh->vertices = { { { -1.0f, -1.0f, 0.0f }, { 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-                       { { 1.0f, -1.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } },
-                       { { 0.0f, 1.0f, 0.0f }, { 0.5f, 1.0f }, { 0.0f, 0.0f, 1.0f }, { 1.0f, 0.0f, 0.0f, 1.0f } } };
-    mesh->indices = { 0, 1, 2 };
-    mesh->vertexCount = 3;
-    mesh->indexCount = 3;
-    mesh->material = material;
-    mesh->primitiveMode = PrimitiveMode::TRIANGLES;
-
-    // Stage the mesh with a baked world transform. addMesh feeds stagedMeshes
-    // (which is what serializeScene writes) and registers the mesh's material
-    // and texture maps on the scene.
-    scene->addMesh(mesh, glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -5.0f)));
-
-    // Add a directional light
-    DirectionalLight dirLight;
-    dirLight.direction = glm::vec3(0.0f, -1.0f, 0.0f);
-    dirLight.color = glm::vec3(1.0f, 1.0f, 1.0f);
-    dirLight.intensity = 1.0f;
-    scene->directionalLights.push_back(dirLight);
-
-    // Test serialization
-    std::string testPath = "test_scene.bin";
-    AssetSerializer::serializeScene(scene, testPath);
-
-    // Test deserialization
-    auto loadedScene = AssetSerializer::deserializeScene(testPath);
-
-    REQUIRE(loadedScene != nullptr);
-    CHECK(loadedScene->name == "TestScene");
-    CHECK(loadedScene->images.size() == 1);
-    CHECK(loadedScene->materials.size() == 1);
-    CHECK(loadedScene->directionalLights.size() == 1);
-    CHECK(loadedScene->stagedMeshes.size() == 1);
-
-    // Cleanup
-    std::remove(testPath.c_str());
-}
 
 struct TestData {
     std::string name;
@@ -120,8 +52,14 @@ TEST_CASE("AssetSerializer - Simple Cereal Test", "[model][serializer][cereal]")
     std::remove(testPath.c_str());
 }
 
-TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset][serializer]") {
-    auto scene = std::make_shared<RenderScene>("RoundTripScene");
+// The .vscene cook is the live scene cache; it (de)serializes a SceneBlueprint via
+// AssetSerializer::(de)serializeBlueprint, which shares (de)serializeMesh. This
+// round-trips a mesh WITH baked meshletData — exactly the field set that, when its
+// version wasn't bumped, misparsed a stale cook and crashed the loader.
+TEST_CASE("AssetSerializer - blueprint mesh round-trip preserves meshletData",
+          "[asset][serializer][blueprint]") {
+    SceneBlueprint bp;
+    bp.name = "RoundTrip";
 
     auto mesh = std::make_shared<Mesh>();
     mesh->vertices = {
@@ -134,62 +72,51 @@ TEST_CASE("AssetSerializer - round-trip preserves stagedMeshTransforms", "[asset
     mesh->indexCount = 3;
     mesh->primitiveMode = PrimitiveMode::TRIANGLES;
 
-    glm::mat4 worldTransform = glm::translate(glm::mat4(1.0f), glm::vec3(5.0f, 3.0f, 1.0f));
-    scene->addMesh(mesh, worldTransform);
+    Meshlet m{};
+    m.vertexOffset = 0;
+    m.triangleOffset = 0;
+    m.vertexCount = 3;
+    m.triangleCount = 1;
+    mesh->meshletData.meshlets.push_back(m);
+    mesh->meshletData.meshletVertices = { 0, 1, 2 };
+    mesh->meshletData.meshletTriangles = { 0, 1, 2 };
+    mesh->meshletData.lodLevelCount = 1;
 
-    std::string testPath = "test_staged_mesh.bin";
-    AssetSerializer::serializeScene(scene, testPath);
+    bp.meshes.push_back(mesh);
 
-    auto loaded = AssetSerializer::deserializeScene(testPath);
-    std::remove(testPath.c_str());
-
-    REQUIRE(loaded != nullptr);
-    REQUIRE(loaded->stagedMeshes.size() == 1);
-    REQUIRE(loaded->stagedMeshTransforms.size() == 1);
-
-    const glm::mat4& lt = loaded->stagedMeshTransforms[0];
-    for (int col = 0; col < 4; ++col)
-        for (int row = 0; row < 4; ++row)
-            CHECK(lt[col][row] == Catch::Approx(worldTransform[col][row]).epsilon(1e-5f));
-}
-
-TEST_CASE("AssetSerializer - version mismatch returns nullptr", "[asset][serializer]") {
-    std::string testPath = "test_version_mismatch.bin";
+    std::stringstream ss(std::ios::in | std::ios::out | std::ios::binary);
     {
-        std::ofstream file(testPath, std::ios::binary);
-        REQUIRE(file.is_open());
-        cereal::BinaryOutputArchive archive(file);
-        uint32_t oldVersion = 0;
-        archive(oldVersion);
-        std::string fakeName = "OldScene";
-        archive(fakeName);
+        cereal::BinaryOutputArchive out(ss);
+        AssetSerializer::serializeBlueprint(out, bp);
+    }
+    SceneBlueprint loaded;
+    {
+        cereal::BinaryInputArchive in(ss);
+        loaded = AssetSerializer::deserializeBlueprint(in);
     }
 
-    CHECK(AssetSerializer::deserializeScene(testPath) == nullptr);
-    std::remove(testPath.c_str());
+    REQUIRE(loaded.ok);
+    REQUIRE(loaded.meshes.size() == 1);
+    REQUIRE(loaded.meshes[0] != nullptr);
+    CHECK(loaded.meshes[0]->indices.size() == 3);
+    CHECK(loaded.meshes[0]->vertices.size() == 3);
+    REQUIRE(loaded.meshes[0]->meshletData.meshlets.size() == 1);
+    CHECK(loaded.meshes[0]->meshletData.meshlets[0].vertexCount == 3u);
+    CHECK(loaded.meshes[0]->meshletData.meshlets[0].triangleCount == 1u);
+    CHECK(loaded.meshes[0]->meshletData.meshletVertices.size() == 3);
+    CHECK(loaded.meshes[0]->meshletData.meshletTriangles.size() == 3);
+    CHECK(loaded.meshes[0]->meshletData.lodLevelCount == 1u);
 }
 
-TEST_CASE("AssetSerializer - corrupt or missing cache returns nullptr", "[asset][serializer]") {
-    // Missing file
-    CHECK(AssetSerializer::deserializeScene("no_such_cache.bin") == nullptr);
-
-    // Truncated file: correct version, then EOF mid-payload
-    std::string testPath = "test_truncated.bin";
+TEST_CASE("AssetSerializer - blueprint version mismatch yields ok == false",
+          "[asset][serializer][blueprint]") {
+    std::stringstream ss(std::ios::in | std::ios::out | std::ios::binary);
     {
-        std::ofstream file(testPath, std::ios::binary);
-        REQUIRE(file.is_open());
-        cereal::BinaryOutputArchive archive(file);
-        uint32_t version = AssetSerializer::SCENE_FORMAT_VERSION;
-        archive(version);
+        cereal::BinaryOutputArchive out(ss);
+        uint32_t badVersion = 0xDEADBEEFu;// deliberately not BLUEPRINT_FORMAT_VERSION
+        out(badVersion);
     }
-    CHECK(AssetSerializer::deserializeScene(testPath) == nullptr);
-    std::remove(testPath.c_str());
-}
-
-TEST_CASE("AssetSerializer - correct version passes", "[asset][serializer]") {
-    auto scene = std::make_shared<RenderScene>("VersionOK");
-    std::string testPath = "test_version_ok.bin";
-    REQUIRE(AssetSerializer::serializeScene(scene, testPath));
-    CHECK(AssetSerializer::deserializeScene(testPath) != nullptr);
-    std::remove(testPath.c_str());
+    cereal::BinaryInputArchive in(ss);
+    SceneBlueprint bp = AssetSerializer::deserializeBlueprint(in);
+    CHECK_FALSE(bp.ok);
 }
