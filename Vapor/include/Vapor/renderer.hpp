@@ -1094,7 +1094,7 @@ private:
     // Cluster-LOD screen-space error tolerance, in pixels. Larger = coarser
     // clusters selected sooner (fewer triangles); the task shader compares the
     // projected cluster error against this / screenHeight.
-    float meshletLodPixelError = 0.1f;
+    float meshletLodPixelError = 1.0f;
     // At model-instantiate, cluster-LOD is auto-disabled for meshes below this
     // triangle count (it degrades normal-density / seamed authored meshes faster
     // than it saves; it pays off on dense Nanite-class geometry). Mesh::
