@@ -17,9 +17,21 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Vapor {
+
+    // Detect a per-component enable flag (`visible` for drawables, `enabled` for
+    // logic components) so the inspector can show a toggle on the component header
+    // — the Unity `Behaviour.enabled` model. EnTT has no native component disable,
+    // so components carry the bool and their systems check it.
+    namespace inspector_detail {
+        template<typename T, typename = void> struct has_visible : std::false_type {};
+        template<typename T> struct has_visible<T, std::void_t<decltype(std::declval<T&>().visible)>> : std::true_type {};
+        template<typename T, typename = void> struct has_enabled : std::false_type {};
+        template<typename T> struct has_enabled<T, std::void_t<decltype(std::declval<T&>().enabled)>> : std::true_type {};
+    }
 
     class SceneInspector {
     public:
@@ -125,6 +137,13 @@ namespace Vapor {
                 } else {
                     if (auto* c = reg.try_get<T>(e)) {
                         ImGui::PushID(static_cast<int>(entt::type_hash<T>::value()));
+                        // Per-component enable checkbox on the header row: `visible`
+                        // for drawables, else `enabled` for logic components. The
+                        // component's own system checks the flag (Behaviour.enabled).
+                        bool* togglePtr = nullptr;
+                        if constexpr (inspector_detail::has_visible<T>::value)      togglePtr = &c->visible;
+                        else if constexpr (inspector_detail::has_enabled<T>::value) togglePtr = &c->enabled;
+                        if (togglePtr) { ImGui::Checkbox("##onoff", togglePtr); ImGui::SameLine(); }
                         if (ImGui::CollapsingHeader(dn.c_str(), ImGuiTreeNodeFlags_DefaultOpen))
                             drawComponentFields(*c);
                         ImGui::PopID();
@@ -294,6 +313,15 @@ namespace Vapor {
             }
 
             ImGui::Text("Entity %u", static_cast<uint32_t>(entt::to_integral(m_selected)));
+            // Entity-level Active toggle: unchecking adds an InactiveComponent tag,
+            // which rendering (and opted-in systems) exclude — the whole-entity
+            // switch, separate from per-drawable `visible`.
+            ImGui::SameLine();
+            bool active = !registry.all_of<InactiveComponent>(m_selected);
+            if (ImGui::Checkbox("Active", &active)) {
+                if (active) registry.remove<InactiveComponent>(m_selected);
+                else        registry.emplace_or_replace<InactiveComponent>(m_selected);
+            }
             ImGui::Separator();
 
             // Registered auto-draw components

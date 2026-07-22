@@ -450,6 +450,27 @@ struct alignas(16) MicroVoxelGIRenderData {
     glm::vec4 counts = glm::vec4(0.0f);  // x = volumeCount, y = crossVolume (0/1)
 };
 
+// CPU-side contract for the artist-facing volumetric-cloud tunables — the
+// subset the ECS (WeatherSystem) drives. Pushed via IRenderer::setClouds; the
+// renderer copies these into its VolumetricCloudRenderData and gates the cloud
+// passes on `enabled`. Shape/phase/step tunables stay renderer-side. Like
+// VolumetricFogRenderData this is a contract, not a GPU buffer.
+struct CloudsRenderData {
+    bool  enabled = false;
+    // Defaults = the hand-tuned native-Metal "slightly cloudy clear day".
+    float coverage = 0.25f;
+    float density = 0.3f;
+    float type = 0.5f;            // 0 stratus → 1 cumulus
+    float layerBottom = 9500.0f;  // meters
+    float layerTop = 15000.0f;
+    float ambientIntensity = 0.001f;
+    // Dims the cloud deck's lit brightness — multiplies the renderer's
+    // panel-tuned sunLightScale (never replaces it). 1.0 = clear.
+    float cloudDim = 1.0f;
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity.
+    glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
+};
+
 // Volumetric clouds. Field-for-field mirror of the Metal backend's
 // VolumetricCloudData (graphics_effects.hpp) — the defaults below are the
 // values already tuned/tested on the Metal renderer.
@@ -463,10 +484,12 @@ struct alignas(16) VolumetricCloudRenderData {
     glm::vec3 sunColor = glm::vec3(1.0f);
     float _pad3 = 0.0f;
     float sunIntensity = 22.0f;
-    float cloudLayerBottom = 1500.0f;
-    float cloudLayerTop = 4000.0f;
-    float cloudLayerThickness = 2500.0f;
-    float cloudCoverage = 0.5f;
+    // Hand-tuned on the native Metal renderer: deep 9500-15000 m layer, low
+    // coverage, near-zero ambient/silver-lining (high values milk out the sky).
+    float cloudLayerBottom = 9500.0f;
+    float cloudLayerTop = 15000.0f;
+    float cloudLayerThickness = 5500.0f;
+    float cloudCoverage = 0.25f;
     float cloudDensity = 0.3f;
     float cloudType = 0.5f;
     float erosionStrength = 0.3f;
@@ -474,14 +497,17 @@ struct alignas(16) VolumetricCloudRenderData {
     float detailNoiseScale = 5.0f;
     float curlNoiseScale = 1.0f;
     float curlNoiseStrength = 0.1f;
-    float ambientIntensity = 0.3f;
-    float silverLiningIntensity = 0.5f;
+    float ambientIntensity = 0.001f;
+    float silverLiningIntensity = 0.001f;
     float silverLiningSpread = 2.0f;
     float phaseG1 = 0.8f;
     float phaseG2 = -0.3f;
     float phaseBlend = 0.3f;
     float powderStrength = 0.5f;
-    float _pad4 = 0.0f;
+    // Cloud-specific scale on the shared sunIntensity. A sunlit cloud is nearly
+    // white, so the clear-sky base is high; weather's cloudDim steepens it
+    // down for overcast/storm decks (which also self-shadow via density).
+    float sunLightScale = 0.85f;
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     float _pad5 = 0.0f;
     glm::vec3 windOffset = glm::vec3(0.0f);
@@ -495,6 +521,15 @@ struct alignas(16) VolumetricCloudRenderData {
     Uint32 frameIndex = 0;
     float temporalBlend = 0.05f;
     glm::vec2 _pad8 = glm::vec2(0.0f);
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity. Weather
+    // drives it (blue clear sky / gray overcast / storm green).
+    glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
+    float _pad9 = 0.0f;
+    // Night key light: the moon (moonDir = -sunDirection) takes over as the sun
+    // sets. Colour from the Sky/night-sky moon; moonLightScale = moon lit
+    // brightness as a fraction of the sun term.
+    glm::vec3 moonColor = glm::vec3(0.92f, 0.93f, 1.0f);
+    float moonLightScale = 0.04f;
 };
 
 // IBL capture parameters (mirror of the Metal IBLCaptureData).
@@ -539,7 +574,10 @@ struct alignas(16) GPUParticleData {
     glm::vec3 velocity = glm::vec3(0.0f);
     float age = 0.0f;       // seconds since spawn
     glm::vec3 force = glm::vec3(0.0f);
-    float _pad3 = 0.0f;
+    // World-Y kill plane (cheap rain/spark ground collision): finite-lifetime
+    // particles below it die. Very negative = disabled. Occupies the old pad,
+    // so the GPU layout is unchanged.
+    float killPlaneY = -1.0e9f;
     glm::vec4 color = glm::vec4(1.0f);
 };
 
@@ -590,6 +628,7 @@ struct ParticleDrawPacket {
     Uint8     blendMode = 0;                    // ParticleBlendMode value
     TextureId texture   = INVALID_TEXTURE_ID;   // INVALID = procedural soft disc
     float     size      = 0.1f;                 // billboard half-extent
+    float     velocityStretch = 0.0f;           // > 0: stretch along velocity (rain)
 };
 
 // ============================================================================

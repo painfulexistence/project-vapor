@@ -50,7 +50,7 @@ struct VolumetricCloudData {
     float phaseG2;                  // Back scatter g
     float phaseBlend;               // Blend between phases
     float powderStrength;           // Beer-powder effect strength
-    float _pad1;
+    float sunLightScale;            // cloud-specific scale on sunIntensity (< 1: clouds occlude)
 
     // Animation
     float3 windDirection;           // Wind direction
@@ -62,12 +62,28 @@ struct VolumetricCloudData {
     uint primarySteps;              // Primary ray march steps
     uint lightSteps;                // Light ray march steps
     float2 screenSize;              // Screen dimensions
-    float _pad2;
+    // MUST stay float2 (twin of the C++ vec2 padding) or frameIndex and
+    // temporalBlend shift by 4 bytes and read the wrong fields.
+    float2 _pad2;
 
     // Temporal
     uint frameIndex;                // Frame counter
     float temporalBlend;            // TAA blend factor
     float2 _pad3;
+
+    // Cloud ambient (sky-fill) tint, scaled by ambientIntensity. Weather
+    // drives it: blue for clear, neutral gray overcast, storm green.
+    // float3 self-pads to 16 B, matching C++ `glm::vec3 ambientColor; float _pad9;`
+    // — do NOT add an explicit pad here (that shifts everything below by 16 B).
+    float3 ambientColor;
+    // Night key light: the moon (moonDir = -sunDirection) takes over as the sun
+    // sets. moonLightScale = moon lit brightness as a fraction of the sun term.
+    // packed_float3 (12 B) so moonLightScale packs into the vec3's 4th slot,
+    // matching C++ `glm::vec3 moonColor; float moonLightScale;` — a plain float3
+    // would 16-align moonColor and push moonLightScale to the wrong offset,
+    // reading garbage on Metal (night clouds vanish).
+    packed_float3 moonColor;
+    float moonLightScale;
 };
 
 // ============================================================================
@@ -116,10 +132,27 @@ float sampleCloudShape(float3 worldPos, constant VolumetricCloudData& data) {
     return saturate(baseShape);
 }
 
+// Curl-ish vector noise: three decorrelated gradient noises. Not a true
+// divergence-free curl, but visually equivalent wind-torn wisps at a third
+// of the cost of a finite-difference curl. (Twin of CloudRaymarch.frag.)
+float3 curlDistort(float3 p) {
+    return float3(gradientNoise3D(p),
+                  gradientNoise3D(p + float3(31.416, 47.853, 12.793)),
+                  gradientNoise3D(p + float3(-23.144, 9.271, 61.043)));
+}
+
 // Sample cloud detail
 float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data) {
     // Apply wind (detail moves faster)
     float3 samplePos = worldPos + data.windOffset * 1.5;
+
+    // Wind-torn edges: distort the detail lookup with large-scale vector noise
+    // (~500 m swirls at curlNoiseScale 1; strength 0.1 → ~30 m displacement).
+    // Full-quality samples only — the cheap light-march path skips detail.
+    if (data.curlNoiseStrength > 0.0) {
+        samplePos += curlDistort(samplePos * (data.curlNoiseScale * 0.002)) *
+                     (data.curlNoiseStrength * 300.0);
+    }
 
     // High frequency detail noise
     float3 detailUV = samplePos * data.detailNoiseScale * 0.001;
@@ -194,10 +227,9 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
 // Lighting Functions
 // ============================================================================
 
-// March towards sun to calculate shadow/transmittance
-float lightMarch(float3 worldPos, constant VolumetricCloudData& data) {
+// March toward an arbitrary light (sun by day, moon by night) for shadowing.
+float lightMarch(float3 worldPos, float3 lightDir, constant VolumetricCloudData& data) {
     float stepSize = data.cloudLayerThickness / float(data.lightSteps);
-    float3 lightDir = data.sunDirection;
 
     float transmittance = 1.0;
     float3 pos = worldPos;
@@ -218,15 +250,14 @@ float lightMarch(float3 worldPos, constant VolumetricCloudData& data) {
     return transmittance;
 }
 
-// Multi-scattering approximation (Schneider's method)
-float3 multiScatterApprox(float density, float lightTransmittance, float cosTheta,
-                          constant VolumetricCloudData& data) {
-    // Direct light with phase function
+// Scattering contribution from ONE key light (colour × power), no ambient.
+// Called once for the sun and once for the moon; the caller weights each by
+// day/night and adds a single ambient term.
+float3 scatterFromLight(float3 lightColor, float lightPower, float lightTransmittance,
+                        float cosTheta, constant VolumetricCloudData& data) {
     float phase = phaseDualLobe(cosTheta, data.phaseG1, data.phaseG2, data.phaseBlend);
-    float3 directLight = data.sunColor * data.sunIntensity * phase * lightTransmittance;
+    float3 directLight = lightColor * lightPower * phase * lightTransmittance;
 
-    // Multi-scatter approximation (octaves of scattering)
-    // Each bounce: dimmer, more isotropic, less shadowed
     float3 multiScatter = float3(0.0);
     float attenuation = 0.3;
     float contribution = 0.4;
@@ -236,24 +267,43 @@ float3 multiScatterApprox(float density, float lightTransmittance, float cosThet
     float scatterTransmittance = lightTransmittance;
 
     for (int i = 0; i < 4; i++) {
-        // Each bounce gets more ambient-like
         scatterPhase = mix(scatterPhase, 0.25, phaseAttenuation);  // More isotropic
         scatterTransmittance = mix(scatterTransmittance, 1.0, 0.7);  // Less shadow
-
-        multiScatter += contribution * scatterPhase * scatterTransmittance * data.sunColor;
-
+        multiScatter += contribution * scatterPhase * scatterTransmittance * lightColor;
         contribution *= attenuation;
     }
 
-    // Silver lining effect (bright edges when backlit)
+    // Silver lining (bright edges when backlit)
     float silverLining = pow(saturate(1.0 - lightTransmittance), data.silverLiningSpread);
-    silverLining *= saturate(-cosTheta * 0.5 + 0.5);  // Only when looking at sun
-    multiScatter += data.sunColor * data.silverLiningIntensity * silverLining;
+    silverLining *= saturate(-cosTheta * 0.5 + 0.5);
+    multiScatter += lightColor * data.silverLiningIntensity * silverLining;
 
-    // Ambient sky light
-    float3 ambient = float3(0.5, 0.6, 0.9) * data.ambientIntensity;
+    return directLight + multiScatter * lightPower;
+}
 
-    return directLight + multiScatter * data.sunIntensity + ambient;
+// Combined lighting: the sun fades out below the horizon while the moon
+// (antipodal, dim, cool) fades in, so night clouds are moonlit — not lit by a
+// phantom below-horizon sun. Ambient dims at night but keeps its tint.
+float3 cloudLighting(float3 worldPos, float3 rayDir, constant VolumetricCloudData& data) {
+    // sunLightScale < 1: clouds absorb/self-shadow, so the lit surface sits
+    // BELOW the clear-sky brightness instead of blooming over it.
+    float sunPower = data.sunIntensity * data.sunLightScale;
+    float dayFactor = smoothstep(-0.12, 0.08, data.sunDirection.y);  // 1 day, 0 night
+
+    float3 lum = data.ambientColor * data.ambientIntensity * mix(0.3, 1.0, dayFactor);
+
+    if (dayFactor > 0.01) {
+        float tr = lightMarch(worldPos, data.sunDirection, data);
+        lum += scatterFromLight(data.sunColor, sunPower, tr,
+                                dot(rayDir, data.sunDirection), data) * dayFactor;
+    }
+    if (dayFactor < 0.99) {
+        float3 moonDir = -data.sunDirection;  // antipodal, matches TimeOfDaySystem
+        float tr = lightMarch(worldPos, moonDir, data);
+        lum += scatterFromLight(data.moonColor, sunPower * data.moonLightScale, tr,
+                                dot(rayDir, moonDir), data) * (1.0 - dayFactor);
+    }
+    return lum;
 }
 
 // ============================================================================
@@ -311,11 +361,8 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
         float density = sampleCloudDensity(pos, data, false);
 
         if (density > 0.001) {
-            // Calculate lighting
-            float lightTransmittance = lightMarch(pos, data);
-
-            // Multi-scattering approximation
-            float3 luminance = multiScatterApprox(density, lightTransmittance, cosTheta, data);
+            // Sun-by-day / moon-by-night key lighting + ambient.
+            float3 luminance = cloudLighting(pos, rayDir, data);
 
             // Beer-powder effect
             float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * data.powderStrength +
@@ -466,9 +513,10 @@ fragment float4 cloudTemporalResolve(
     // Sample history
     float4 history = historyCloud.sample(linearSampler, prevUV);
 
-    // Validity check
+    // Validity check (prevClip.w > 0 rejects behind-camera reprojections —
+    // parity with CloudTemporal.frag).
     bool validHistory = prevUV.x >= 0.0 && prevUV.x <= 1.0 &&
-                        prevUV.y >= 0.0 && prevUV.y <= 1.0;
+                        prevUV.y >= 0.0 && prevUV.y <= 1.0 && prevClip.w > 0.0;
 
     // Neighborhood clamping for anti-ghosting
     float4 minBound = current;
@@ -501,14 +549,42 @@ fragment float4 cloudUpscaleComposite(
     texture2d<float, access::sample> sceneColor [[texture(0)]],
     texture2d<float, access::sample> cloudTexture [[texture(1)]],
     texture2d<float, access::sample> sceneDepth [[texture(2)]],
-    constant VolumetricCloudData& data [[buffer(0)]]
+    constant VolumetricCloudData& data [[buffer(0)]],
+    constant CameraData& camera [[buffer(1)]]
 ) {
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
 
     float4 scene = sceneColor.sample(linearSampler, in.uv);
-    float4 cloud = cloudTexture.sample(linearSampler, in.uv);
 
-    // Depth-aware upscale could be added here for better quality
+    // Depth-aware (bilateral) upsample — twin of CloudComposite.frag: the four
+    // nearest coarse texels weighted by bilinear weight x depth similarity, so
+    // cloud values don't bleed across geometry edges (eave/sky halo).
+    const float near = camera.near;
+    const float far  = camera.far;
+    float dCenterRaw = sceneDepth.sample(linearSampler, in.uv).r;
+    float dCenter = near * far / (far - dCenterRaw * (far - near));
+
+    float2 cloudSize = float2(cloudTexture.get_width(), cloudTexture.get_height());
+    float2 coord = in.uv * cloudSize - 0.5;
+    float2 base = floor(coord);
+    float2 f = coord - base;
+
+    float4 cloudSum = float4(0.0);
+    float wSum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        float2 off = float2(float(i & 1), float(i >> 1));
+        float2 uvTap = (base + off + 0.5) / cloudSize;  // texel center = point value
+        float wBilin = mix(1.0 - f.x, f.x, off.x) * mix(1.0 - f.y, f.y, off.y);
+        float dTapRaw = sceneDepth.sample(linearSampler, uvTap).r;
+        float dTap = near * far / (far - dTapRaw * (far - near));
+        // ~10%-of-depth tolerance: taps behind a different surface get ~zero weight.
+        float wDepth = exp(-abs(dTap - dCenter) / (0.1 * dCenter + 0.5));
+        float w = wBilin * wDepth;
+        cloudSum += cloudTexture.sample(linearSampler, uvTap) * w;
+        wSum += w;
+    }
+    float4 cloud = wSum > 1e-4 ? cloudSum / wSum
+                               : cloudTexture.sample(linearSampler, in.uv);
 
     // Composite: scene * transmittance + scattering
     float3 result = scene.rgb * cloud.a + cloud.rgb;

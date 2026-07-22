@@ -139,6 +139,10 @@ struct Cluster {
     float4 max;
     uint lightCount;
     uint lightIndices[MAX_LIGHTS_PER_CLUSTER];
+    uint spotCount;
+    uint spotIndices[64];   // MAX_SPOTS_PER_CLUSTER — must match graphics.hpp
+    uint rectCount;
+    uint rectIndices[32];   // MAX_RECTS_PER_CLUSTER
 };
 
 constant int PSSM_NUM_CASCADES = 3;

@@ -168,8 +168,8 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         clusterDesc.usage = BufferUsage::Storage;
         clusterDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         // Zero-fill: the PBR shaders read cluster lightCounts before the first
-        // TileCulling dispatch lands — garbage counts loop garbage lights
-        // (NaN-black frames on Metal). GPU-written per frame by TileCulling —
+        // LightCulling dispatch lands — garbage counts loop garbage lights
+        // (NaN-black frames on Metal). GPU-written per frame by LightCulling —
         // slotted like native's clusterBuffers[frameInFlight].
         {
             std::vector<Uint8> clusterZeros(clusterDesc.size, 0);
@@ -498,7 +498,7 @@ void Renderer::registerStatsSources() {
     log.addSource("CULL", [this](Vapor::StatLine& s) {
         Uint32 mn, avg, mx, nonEmpty;
         if (!sampleClusterHistogram(mn, avg, mx, nonEmpty)) return;
-        s.add("tiles", clusterGridSizeX * clusterGridSizeY);
+        s.add("clusters", clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ);
         s.add("pointLights", static_cast<Uint32>(pointLights.size()));
         s.add("min", mn);
         s.add("avg", avg);
@@ -567,26 +567,35 @@ TextureHandle Renderer::debugView(const char* key, TextureHandle src,
     return pv.view;
 }
 
-// Reads the culled cluster buffer (host-visible) and reduces the 2D tile grid to
+// Reads the culled cluster buffer (host-visible) and reduces the 3D cluster grid to
 // min/avg/max/non-empty light counts. Contains a waitIdle so the read sees the
 // GPU's writes — callers must throttle (StatsLog interval, or panel %N).
 bool Renderer::sampleClusterHistogram(Uint32& mn, Uint32& avg, Uint32& mx, Uint32& nonEmpty) {
     if (!clusterBuffer.isValid()) return false;
     rhi->waitIdle();
-    const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY;  // 2D grid
+    const Uint32 tileCount = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;  // 3D grid
     auto* clusters = static_cast<const Vapor::Cluster*>(rhi->mapBuffer(clusterBuffer));
     if (!clusters) return false;
     Uint32 lo = ~0u, hi = 0u, sum = 0u, ne = 0u;
+    // Spot/rect loop lengths ride the same readback (avg/max per cluster).
+    Uint32 spotSum = 0u, spotHi = 0u, rectSum = 0u, rectHi = 0u;
     for (Uint32 i = 0; i < tileCount; ++i) {
         Uint32 c = clusters[i].lightCount;
         lo = std::min(lo, c); hi = std::max(hi, c); sum += c;
         if (c > 0) ++ne;
+        Uint32 sc = clusters[i].spotCount, rc = clusters[i].rectCount;
+        spotSum += sc; spotHi = std::max(spotHi, sc);
+        rectSum += rc; rectHi = std::max(rectHi, rc);
     }
     rhi->unmapBuffer(clusterBuffer);
     mn = tileCount ? lo : 0u;
     avg = tileCount ? sum / tileCount : 0u;
     mx = hi;
     nonEmpty = ne;
+    cullAvgSpots = tileCount ? spotSum / tileCount : 0u;
+    cullMaxSpots = spotHi;
+    cullAvgRects = tileCount ? rectSum / tileCount : 0u;
+    cullMaxRects = rectHi;
     return true;
 }
 
@@ -1268,8 +1277,8 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.velocityPass(); });
     renderGraph.addPass("NormalResolve",
         [](Renderer& r) { r.normalResolvePass(); }, PassFlags::RequiresCompute);
-    renderGraph.addPass("TileCulling",
-        [](Renderer& r) { r.tileCullingPass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("LightCulling",
+        [](Renderer& r) { r.lightCullingPass(); }, PassFlags::RequiresCompute);
     renderGraph.addPass("RaytraceShadow",
         [](Renderer& r) { r.raytraceShadowPass(); }, PassFlags::RequiresRaytracing);
     // AO chain runs on BOTH backends now: the raygen stage picks RT AO or SSAO
@@ -1364,11 +1373,6 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("SkyAtmosphere",
         [](Renderer& r) { r.skyAtmospherePass(); });
 
-    // GPU particles (simulate + instanced billboards) into colorRT, after sky
-    // so they composite over it and get fogged like the rest of the scene.
-    renderGraph.addPass("Particles",
-        [](Renderer& r) { r.particlePass(); });
-
     // Cheap analytic height fog before bloom (so the fogged scene feeds bloom/
     // god rays); swaps colorRT with tempColorRT internally. On by default.
     renderGraph.addPass("HeightFog",
@@ -1389,6 +1393,20 @@ void Renderer::setupDefaultRenderGraph() {
     // fog and before bloom, matching the Metal graph. Off by default.
     renderGraph.addPass("VolumetricClouds",
         [](Renderer& r) { r.volumetricCloudPass(); });
+
+    // GPU particles (simulate + instanced billboards) into colorRT — AFTER the
+    // depth-based volumetrics (fog/clouds). Particles are translucent and don't
+    // write depth (depthWrite=false), so if they drew first, the fog/cloud
+    // composite — which derives transmittance from sceneDepth — would treat
+    // every particle pixel as the far background behind it and dim the near
+    // particle by the whole cloud layer that is actually 2 km behind it. Drawn
+    // after, they composite on top of the atmospheric scene and still depth-test
+    // against opaque geometry (depthStencilRT is untouched by the volumetrics).
+    // Trade-off: near-field particles no longer receive aerial fog, which is
+    // fine for rain/snow/effects. Still before bloom/god rays, so glowing
+    // particles bloom and occlude the sun.
+    renderGraph.addPass("Particles",
+        [](Renderer& r) { r.particlePass(); });
 
     // God rays (screen-space light scattering), composited in PostProcess.
     // Runs before the canvas passes (native order) so HUD sprites never feed
@@ -1771,7 +1789,7 @@ void Renderer::updateBuffers() {
                           instanceData.size() * sizeof(Vapor::InstanceData));
     }
 
-    // (No CPU-side cluster upload: the TileCulling compute pass produces the
+    // (No CPU-side cluster upload: the LightCulling compute pass produces the
     // whole cluster buffer on the GPU every frame — like the native renderer,
     // which never touches cluster data from the CPU. The old "fill every tile
     // with every light" path here predated that compute port; it uploaded a
@@ -1970,6 +1988,10 @@ void Renderer::mainRenderPass() {
         // and buffer(11) is dirLightCount, so 12 is the free slot). Same bits as
         // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
+        // Weather-driven IBL dimming at buffer(20) (19 is materials; on Vulkan
+        // this value rides in LightCullData instead — binding 20 would alias
+        // push offset 64 and clobber screenSize).
+        rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
         if (m_iblReady) {
@@ -2164,6 +2186,9 @@ void Renderer::mainRenderPass() {
                 (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
             };
             rhi->setFragmentBytes(&lc, sizeof(lc), 8);
+            // Weather-driven IBL dimming (buffer 12) — parity with the forward
+            // PBR fragment's buffer(20).
+            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 12);
             // Tiled point lights: same cluster buffer + tile grid the forward pass
             // uses, so the meshlet fragment shades only the lights covering its
             // tile instead of looping all of them (the main-pass cost driver).
@@ -2787,40 +2812,55 @@ void Renderer::normalResolvePass() {
 }
 
 // Clustered point-light culling on both backends: the Metal branch fills the
-// Metal PBR shader's cluster contract (3d_tile_light_cull.metal), the Vulkan
-// branch runs TileLightCull.comp for RHIMain.frag's tiled point-light loop.
-void Renderer::tileCullingPass() {
+// Metal PBR shader's cluster contract (3d_light_cull.metal), the Vulkan
+// branch runs LightCull.comp for RHIMain.frag's tiled point-light loop.
+void Renderer::lightCullingPass() {
     if (!clusterBuffer.isValid()) return;
     glm::vec2 screenSize(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     glm::uvec3 gridSize(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
     Uint32 pointLightCount = static_cast<Uint32>(pointLights.size());
 
     if (backend == GraphicsBackend::Metal) {
-        if (!tileCullingPipeline.isValid()) return;
-        rhi->beginComputePass("TileCulling");
-        rhi->bindComputePipeline(tileCullingPipeline);
+        if (!lightCullingPipeline.isValid()) return;
+        rhi->beginComputePass("LightCulling");
+        rhi->bindComputePipeline(lightCullingPipeline);
         rhi->setComputeBuffer(0, clusterBuffer);
         rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setComputeBuffer(2, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setComputeBytes(&pointLightCount, sizeof(Uint32), 3);
         rhi->setComputeBytes(&gridSize, sizeof(glm::uvec3), 4);
         rhi->setComputeBytes(&screenSize, sizeof(glm::vec2), 5);
-        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
+        // Spot/rect join the froxel cull (indices into the same light buffers
+        // the PBR shader binds).
+        Uint32 spotCullCount = static_cast<Uint32>(spotLights.size());
+        Uint32 rectCullCount = static_cast<Uint32>(rectLights.size());
+        rhi->setComputeBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setComputeBuffer(7, rectLightBuffer);
+        rhi->setComputeBytes(&spotCullCount, sizeof(Uint32), 8);
+        rhi->setComputeBytes(&rectCullCount, sizeof(Uint32), 9);
+        // One workgroup per 3D cluster (x, y, log-z slice).
+        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
         rhi->endComputePass();
     } else {
         if (!vkTileCullPipeline.isValid() || !lightCullDataBuffer.isValid()) return;
         Vapor::LightCullData lc{};
         lc.screenSize = screenSize;
+        lc.iblIntensity = m_iblIntensity;   // weather-driven env dimming (RHIMain.frag)
         lc.gridSize = gridSize;
         lc.lightCount = pointLightCount;
+        lc.cullSpotCount = static_cast<Uint32>(spotLights.size());
+        lc.cullRectCount = static_cast<Uint32>(rectLights.size());
         rhi->updateBuffer(lightCullDataBuffer, &lc, 0, sizeof(lc));
-        rhi->beginComputePass("TileCulling");
+        rhi->beginComputePass("LightCulling");
         rhi->bindComputePipeline(vkTileCullPipeline);
         rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setComputeBuffer(3, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
         rhi->setComputeBuffer(4, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
         rhi->setComputeBuffer(5, clusterBuffer);
-        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, 1);
+        rhi->setComputeBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+        rhi->setComputeBuffer(7, rectLightBuffer);
+        // One workgroup per 3D cluster (x, y, log-z slice).
+        rhi->dispatch(clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
         rhi->endComputePass();
     }
     rhi->computeBarrier();  // cluster writes -> fragment reads in Main
@@ -3226,6 +3266,9 @@ void Renderer::raytraceReflectionPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // reflection writes -> fragment reads in Main
+    // Glossy: build the mip chain so the PBR composite can sample a blurrier mip
+    // for rougher surfaces (the trace only writes mip 0).
+    rhi->generateMipmaps(reflectionRT);
 }
 
 // RT refractions: the reflection pass's structural twin with a refracted ray
@@ -5369,8 +5412,8 @@ void Renderer::particlePass() {
         const bool hasTexture = p.texture != INVALID_TEXTURE_ID &&
                                 p.texture < textures.size();
         const TextureId texId = hasTexture ? p.texture : defaultWhiteTexture;
-        struct { float particleSize; float useTexture; float _pad[2]; }
-            pc{ p.size, hasTexture ? 1.0f : 0.0f, {0.0f, 0.0f} };
+        struct { float particleSize; float useTexture; float velocityStretch; float _pad; }
+            pc{ p.size, hasTexture ? 1.0f : 0.0f, p.velocityStretch, 0.0f };
 
         if (metal) {
             // particleVertex: camera(0), ParticlePushConstants(1), particles(2);
@@ -5558,6 +5601,29 @@ void Renderer::setVolumetricFog(const VolumetricFogRenderData& fog) {
     fogSettings.windSpeed      = fog.windSpeed;
 }
 
+void Renderer::setClouds(const CloudsRenderData& clouds) {
+    // WeatherSystem owns these artist tunables while a WeatherComponent drives
+    // clouds (the panel copies of these fields are overwritten every frame);
+    // shape/phase/step tunables stay panel-side, per-frame fields are filled
+    // in the pass.
+    m_cloudsWeatherDriven            = true;  // panel shows a "driven by weather" hint
+    volumetricCloudsEnabled          = clouds.enabled;
+    cloudSettings.cloudCoverage      = clouds.coverage;
+    cloudSettings.cloudDensity       = clouds.density;
+    cloudSettings.cloudType          = clouds.type;
+    cloudSettings.cloudLayerBottom   = clouds.layerBottom;
+    cloudSettings.cloudLayerTop      = clouds.layerTop;
+    cloudSettings.cloudLayerThickness =
+        std::max(1.0f, clouds.layerTop - clouds.layerBottom);
+    cloudSettings.ambientIntensity   = clouds.ambientIntensity;
+    cloudSettings.ambientColor       = clouds.ambientColor;
+    m_cloudDim                       = clouds.cloudDim;
+}
+
+void Renderer::setIBLIntensity(float intensity) {
+    m_iblIntensity = glm::clamp(intensity, 0.0f, 4.0f);
+}
+
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
     m_particleDrawList = draws;
     if (m_particleDrawList.size() > MAX_PARTICLE_DRAWS)
@@ -5589,6 +5655,14 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.cameraPosition = currentCamera.position;
     cloudSettings.sunDirection = glm::normalize(atmosphereData.sunDirection);
     cloudSettings.sunColor = atmosphereData.sunColor;
+    // Shared atmosphere sun intensity (the value the clouds were tuned
+    // against) — NOT the struct default, which is brighter.
+    cloudSettings.sunIntensity = atmosphereData.sunIntensity;
+    // Night key light: the shader fades the sun out below the horizon and lights
+    // the deck with the moon (moonDir = -sunDirection). Colour tracks the Sky's
+    // moon so the moonlit clouds match the visible moon; moonLightScale stays a
+    // panel tunable.
+    cloudSettings.moonColor = glm::vec3(nightSkyData.moonColor);
     // windSpeed is the cloud's per-medium scroll coefficient; the shared wind
     // strength scales it so the WindFieldComponent drives the scroll rate.
     cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
@@ -5597,7 +5671,11 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 4),
                                          std::max(1u, rhi->getSwapchainHeight() / 4));
     cloudSettings.cloudLayerThickness = cloudSettings.cloudLayerTop - cloudSettings.cloudLayerBottom;
-    rhi->updateBuffer(cloudDataBuffer, &cloudSettings, 0, sizeof(cloudSettings));
+    // Upload a copy with the weather cloud-dim folded in — the panel's
+    // sunLightScale stays authoritative in cloudSettings itself.
+    VolumetricCloudRenderData uploadSettings = cloudSettings;
+    uploadSettings.sunLightScale *= m_cloudDim;
+    rhi->updateBuffer(cloudDataBuffer, &uploadSettings, 0, sizeof(uploadSettings));
 
     // Pass 1: quarter-res raymarch -> cloudRT.
     {
@@ -5652,6 +5730,13 @@ void Renderer::volumetricCloudPass() {
         rhi->setTexture(0, 0, colorRT, clampSampler);
         rhi->setTexture(0, 1, cloudHistoryRT, clampSampler);  // resolved clouds
         rhi->setTexture(0, 2, depthStencilRT, clampSampler);
+        // Camera near/far for the depth-aware upsample (same slots as the
+        // raymarch pass: Metal buffer(1), GLSL set-relative binding 3).
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        } else {
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
         rhi->draw(3, 1, 0, 0);
         rhi->endRenderPass();
         std::swap(colorRT, tempColorRT);
@@ -6246,8 +6331,13 @@ void Renderer::createRenderTargets() {
         desc.height = halfH;
         desc.format = PixelFormat::RGBA16_FLOAT;
         desc.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        // Mip chain for glossy reflections: the composite samples a blurrier mip
+        // as roughness rises (mips filled by generateMipmaps after the RT trace).
+        desc.mipLevels = static_cast<Uint32>(std::floor(std::log2(std::max(halfW, halfH))) + 1);
         reflectionRT = rhi->createTexture(desc);
-        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a).
+        // RT refraction twin (same half-res RGBA16F, rgb + hit mask in a). No mip
+        // chain for now — its composite still samples the sharp result.
+        desc.mipLevels = 1;
         refractionRT = rhi->createTexture(desc);
     }
 
@@ -6926,7 +7016,7 @@ void Renderer::createRenderPipeline() {
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
 
             // Tile light culling (fills the cluster buffer RHIMain.frag reads).
-            std::string tlcCode = readFile("shaders/TileLightCull.comp.spv");
+            std::string tlcCode = readFile("shaders/LightCull.comp.spv");
             if (!tlcCode.empty()) {
                 ShaderDesc td; td.stage = ShaderStage::Compute; td.code = tlcCode.data();
                 td.codeSize = tlcCode.size(); td.entryPoint = "main";
@@ -7219,13 +7309,16 @@ void Renderer::createRenderPipeline() {
         prefilterPipeline  = makeIblPipeline("shaders/3d_prefilter_envmap.metal", prefilterVS, prefilterFS);
         brdfLUTPipeline    = makeIblPipeline("shaders/3d_brdf_lut.metal", brdfVS, brdfFS);
 
-        std::string tcCode = readFile("shaders/3d_tile_light_cull.metal");
+        std::string tcCode = readFile("shaders/3d_light_cull.metal");
         if (!tcCode.empty()) {
             ShaderDesc d; d.stage = ShaderStage::Compute; d.code = tcCode.data();
             d.codeSize = tcCode.size(); d.entryPoint = "computeMain";
-            tileCullingShader = rhi->createShader(d);
-            ComputePipelineDesc cd; cd.computeShader = tileCullingShader;
-            tileCullingPipeline = rhi->createComputePipeline(cd);
+            lightCullingShader = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = lightCullingShader;
+            // 64 threads per threadgroup: the cull kernel is wave-cooperative
+            // (one group per cluster, threads split the light list).
+            cd.threadGroupSizeX = 64;
+            lightCullingPipeline = rhi->createComputePipeline(cd);
         }
 
         // GPU-driven frustum cull (Metal). Not RT-gated — GPU culling works on
@@ -8025,7 +8118,8 @@ void Renderer::collectDrawables(std::shared_ptr<RenderScene> scene) {
 
 void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<RenderScene> scene) {
     // Collect renderables from ECS
-    auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>();
+    auto view = registry.view<Vapor::TransformComponent, Vapor::MeshRendererComponent>(
+        entt::exclude<Vapor::InactiveComponent>);
 
     for (auto entity : view) {
         auto& transform = view.get<Vapor::TransformComponent>(entity);
@@ -8398,15 +8492,22 @@ void Renderer::drawGraphicsImGui() {
     // loop. The avg is exactly the loop length the Main pass runs per pixel.
     {
         bool open = ImGui::TreeNode("Light Culling Debug");
-        lightCullDebugOpen = open;  // gates the throttled readback in tileCullingPass
+        lightCullDebugOpen = open;  // gates the throttled readback in lightCullingPass
         if (open) {
             ImGui::Text("Scene point lights: %zu", pointLights.size());
-            const Uint32 tiles = clusterGridSizeX * clusterGridSizeY;
-            ImGui::Text("Tiles: %u (%ux%u)", tiles, clusterGridSizeX, clusterGridSizeY);
-            ImGui::Text("Culled per tile:  avg %u   (min %u / max %u)",
+            const Uint32 tiles = clusterGridSizeX * clusterGridSizeY * clusterGridSizeZ;
+            ImGui::Text("Clusters: %u (%ux%ux%u)", tiles,
+                        clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ);
+            ImGui::Text("Points  per cluster: avg %u   (min %u / max %u)",
                         cullAvgLights, cullMinLights, cullMaxLights);
-            ImGui::Text("Non-empty tiles: %u / %u", cullNonEmptyTiles, tiles);
-            ImGui::TextDisabled("avg = point-light loop length per pixel (refreshed ~15f)");
+            if (!spotLights.empty())
+                ImGui::Text("Spots   per cluster: avg %u   (max %u)   [%zu in scene]",
+                            cullAvgSpots, cullMaxSpots, spotLights.size());
+            if (!rectLights.empty())
+                ImGui::Text("Rects   per cluster: avg %u   (max %u)   [%zu in scene]",
+                            cullAvgRects, cullMaxRects, rectLights.size());
+            ImGui::Text("Non-empty clusters: %u / %u", cullNonEmptyTiles, tiles);
+            ImGui::TextDisabled("avg = per-pixel loop length in the Main pass (refreshed ~15f)");
             bool skipPoint = (mainDebugFlags & 1u) != 0u;
             if (ImGui::Checkbox("Skip point-light loop (perf isolation)", &skipPoint))
                 mainDebugFlags = (mainDebugFlags & ~1u) | (skipPoint ? 1u : 0u);
@@ -8850,6 +8951,9 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Volumetric Clouds")) {
+        if (m_cloudsWeatherDriven)
+            ImGui::TextDisabled("(driven by WeatherComponent — coverage/density/type/"
+                                "layer/ambient are overwritten each frame)");
         ImGui::Checkbox("Enabled", &volumetricCloudsEnabled);
         if (ImGui::DragFloat("Bottom (m)", &cloudSettings.cloudLayerBottom, 100.0f, 0.0f, 10000.0f) |
             ImGui::DragFloat("Top (m)", &cloudSettings.cloudLayerTop, 100.0f, 0.0f, 15000.0f)) {
@@ -8860,6 +8964,11 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Density", &cloudSettings.cloudDensity, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Type (Stratus-Cumulus)", &cloudSettings.cloudType, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Ambient", &cloudSettings.ambientIntensity, 0.01f, 0.0f, 1.0f);
+        ImGui::ColorEdit3("Ambient Color", &cloudSettings.ambientColor.x);
+        // Cloud-specific sun scale (< 1: clouds occlude — darker than the sky).
+        ImGui::DragFloat("Sun Light Scale", &cloudSettings.sunLightScale, 0.01f, 0.0f, 2.0f);
+        // Moonlit-cloud brightness at night, as a fraction of the sun term.
+        ImGui::DragFloat("Moon Light Scale", &cloudSettings.moonLightScale, 0.005f, 0.0f, 1.0f);
         ImGui::DragFloat("Silver Lining", &cloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
         // RHI-only extras (kept from the original Effects panel)
         ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);
@@ -9822,6 +9931,9 @@ void Renderer::renderToTexture(
             rhi->setFragmentBytes(&rttSpotRectCounts, sizeof(glm::uvec2), 1);
         } else {
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
+            // IBL dimming at buffer(20) — declared in the shared PBR fragment,
+            // so every encoder that draws with it must bind the slot.
+            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
             // Real IBL cubes: image-based ambience is view-independent.
             if (m_iblReady) {
                 if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);

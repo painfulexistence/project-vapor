@@ -267,6 +267,19 @@ public:
     // exists; otherwise the pass stays off (default) or panel-controlled.
     virtual void setVolumetricFog(const VolumetricFogRenderData& fog) {}
 
+    // Volumetric-cloud tunables resolved by the ECS WeatherSystem (the weather
+    // state machine owns the sky's cloudscape). Copies the artist subset into
+    // the backend's cloud params and gates the cloud passes on `enabled`.
+    // Pushed each frame while a WeatherComponent drives clouds; otherwise the
+    // pass stays off (default) or panel-controlled.
+    virtual void setClouds(const CloudsRenderData& clouds) {}
+
+    // Environment (IBL) intensity scale, resolved by the ECS WeatherSystem —
+    // heavy cloud cover dims the baked sky ambience that would otherwise stay
+    // sunny under an overcast deck. 1 = neutral. Cheap approximation of
+    // re-baking the IBL with clouds; applied at shading time in the PBR pass.
+    virtual void setIBLIntensity(float intensity) {}
+
     // Request a rebake of the environment IBL (sky capture -> irradiance /
     // prefilter). SkySystem calls this when the sun has moved far enough to
     // restale the captured environment. Both backends satisfy it identically by

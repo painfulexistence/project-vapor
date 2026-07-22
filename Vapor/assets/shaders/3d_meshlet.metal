@@ -650,6 +650,9 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              const device Cluster*       clusters   [[buffer(9)]],
                              constant MeshletTileParams& tile       [[buffer(10)]],
                              constant MeshletShadeFlags& flags      [[buffer(11)]],
+                             // Weather-driven IBL dimming — same value the
+                             // forward PBR fragment reads at buffer(20).
+                             constant float&             iblIntensity [[buffer(12)]],
                              // Shared bindless material table (buffer 13), same
                              // handle the Bindless-MDI PBR fragment consumes.
                              const device MeshletMaterialTexs* materialTexs [[buffer(13)]],
@@ -782,7 +785,7 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     if (flags.gibsOn != 0u)
         result += gibsGI.sample(screenSampler, screenUV).rgb * surf.ao * screenAO;
     else if (material.iblEnabled > 0.5)
-        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO;
+        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO * iblIntensity;
     else
         result += float3(0.03) * surf.ao * surf.color * screenAO;
 
