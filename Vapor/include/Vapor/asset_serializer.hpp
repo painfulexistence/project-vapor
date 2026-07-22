@@ -75,7 +75,11 @@ public:
     // (magic/version/source-hash) is owned by scene_blueprint.cpp; these
     // (de)serialize just the blueprint body on an open archive.
     // v2: EntityBlueprint carries a per-entity "components" JSON blob.
-    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 3; // v3: EntityBlueprint::primitive
+    // v4: the shared (de)serializeMesh now round-trips Mesh::meshletData, so the
+    // per-mesh layout the blueprint cook writes changed. Bump so a stale v3 .vscene
+    // (whose meshes have no meshlet fields) is rejected and re-cooked instead of
+    // misreading later bytes as a meshlet count (huge alloc -> crash).
+    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 4; // v3: EntityBlueprint::primitive; v4: mesh meshletData
     static void serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint);
     // Returns ok == false on a version mismatch.
     static Vapor::SceneBlueprint deserializeBlueprint(cereal::BinaryInputArchive& archive);
