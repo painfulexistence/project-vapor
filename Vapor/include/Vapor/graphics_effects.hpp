@@ -122,10 +122,10 @@ struct alignas(16) VolumetricCloudData {
     float _pad3;
     float sunIntensity = 22.0f;
     // Hand-tuned base (see renderer_metal.cpp's volumetricCloudSettings): deep
-    // 2000-12000 m layer, low coverage, near-zero ambient/silver-lining.
-    float cloudLayerBottom = 2000.0f;
-    float cloudLayerTop = 12000.0f;
-    float cloudLayerThickness = 10000.0f;
+    // 9500-15000 m layer, low coverage, near-zero ambient/silver-lining.
+    float cloudLayerBottom = 9500.0f;
+    float cloudLayerTop = 15000.0f;
+    float cloudLayerThickness = 5500.0f;
     float cloudCoverage = 0.25f;
     float cloudDensity = 0.3f;
     float cloudType = 0.5f;

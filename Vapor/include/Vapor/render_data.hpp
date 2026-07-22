@@ -404,8 +404,8 @@ struct CloudsRenderData {
     float coverage = 0.25f;
     float density = 0.3f;
     float type = 0.5f;            // 0 stratus → 1 cumulus
-    float layerBottom = 2000.0f;  // meters
-    float layerTop = 12000.0f;
+    float layerBottom = 9500.0f;  // meters
+    float layerTop = 15000.0f;
     float ambientIntensity = 0.001f;
     // Dims the cloud deck's lit brightness — multiplies the renderer's
     // panel-tuned sunLightScale (never replaces it). 1.0 = clear.
@@ -427,11 +427,11 @@ struct alignas(16) VolumetricCloudRenderData {
     glm::vec3 sunColor = glm::vec3(1.0f);
     float _pad3 = 0.0f;
     float sunIntensity = 22.0f;
-    // Hand-tuned on the native Metal renderer: deep 2000-12000 m layer, low
+    // Hand-tuned on the native Metal renderer: deep 9500-15000 m layer, low
     // coverage, near-zero ambient/silver-lining (high values milk out the sky).
-    float cloudLayerBottom = 2000.0f;
-    float cloudLayerTop = 12000.0f;
-    float cloudLayerThickness = 10000.0f;
+    float cloudLayerBottom = 9500.0f;
+    float cloudLayerTop = 15000.0f;
+    float cloudLayerThickness = 5500.0f;
     float cloudCoverage = 0.25f;
     float cloudDensity = 0.3f;
     float cloudType = 0.5f;

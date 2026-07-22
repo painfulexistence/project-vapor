@@ -218,7 +218,7 @@
           "emitExtents": [12.0, 0.5, 12.0], "groundKillY": 0.05,
           "color": [0.45, 0.55, 0.75, 0.4]
         },
-        "particleRenderer": { "blendMode": 0, "size": 0.02, "velocityStretch": 0.12 }
+        "particleRenderer": { "blendMode": 0, "size": 0.01, "velocityStretch": 0.5 }
       }
     },
     {

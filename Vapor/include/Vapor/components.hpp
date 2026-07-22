@@ -254,14 +254,14 @@ namespace Vapor {
     // outgoing and incoming state's params over the transition, so the sky
     // thickens/clears smoothly instead of popping. Defaults = the Clear preset
     // (a default-constructed WeatherComponent resolves to Clear), anchored to
-    // the hand-tuned native-Metal cloud settings: a deep 2000-12000 m layer,
+    // the hand-tuned native-Metal cloud settings: a deep 9500-15000 m layer,
     // low coverage, near-zero ambient (high ambient milks out the whole sky).
     struct WeatherParams {
         float cloudCoverage    = 0.25f;
         float cloudDensity     = 0.3f;
         float cloudType        = 0.5f;      // 0 stratus → 1 cumulus
-        float cloudLayerBottom = 2000.0f;   // storm states lower the ceiling
-        float cloudLayerTop    = 12000.0f;
+        float cloudLayerBottom = 9500.0f;   // storm states lower the ceiling
+        float cloudLayerTop    = 15000.0f;
         float cloudAmbient     = 0.001f;
         float sunDim           = 1.0f;      // multiplies sun/moon light intensity
         float fogDensityMul    = 1.0f;      // multiplies VolumetricFogComponent density
@@ -281,7 +281,7 @@ namespace Vapor {
 
     inline WeatherParams weatherParamsFor(WeatherState s) {
         switch (s) {
-            // Anchored to the tuned Clear base (0.25/0.3/0.5, 2000-12000 m,
+            // Anchored to the tuned Clear base (0.25/0.3/0.5, 9500-15000 m,
             // ambient 0.001); storms raise coverage/density, drop the ceiling
             // and flatten toward stratus. Ambient stays in the tuned ~0.001-0.01
             // range — it is a full-sky glow, not a per-cloud fill.
