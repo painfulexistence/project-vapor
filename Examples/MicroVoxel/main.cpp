@@ -206,6 +206,10 @@ std::shared_ptr<Vapor::Mesh> buildCrossedQuads(float width, float height,
     return mesh;
 }
 
+// width/height are in VOXEL units (the mesh is built at 1 m per voxel and the
+// spawner scales by the owning volume's voxelSize), so plants stay one voxel
+// wide and at most ~two voxels tall at ANY volume resolution — the 2.5 cm
+// centre diorama gets half-size flora automatically.
 std::shared_ptr<Vapor::Mesh> makeFloraMesh(std::shared_ptr<Vapor::Image> albedo, const char* name,
                                            float width, float height) {
     auto mat = std::make_shared<Vapor::Material>();
@@ -241,7 +245,12 @@ bool spawnFlora(entt::registry& registry,
         const float sandLine = (0.10f + 0.12f * 0.34f) * static_cast<float>(dim.y);
 
         const float areaM2 = (dim.x * voxelSize) * (dim.z * voxelSize);
-        const int attempts = static_cast<int>(areaM2 * 0.5f);  // ~1 plant / 2 m² pre-cull
+        // Voxel-scale plants need real density to read at all (~4 attempts/m²);
+        // instancing + castShadow=false make the count nearly free, but cap the
+        // spawned total per volume so a --big world stays well inside the
+        // renderer's MAX_INSTANCES budget alongside everything else.
+        const int attempts = static_cast<int>(areaM2 * 4.0f);
+        const size_t maxPlants = 1500;
         Uint32 rng = vv.seed * 2654435761u + 77u;
         auto rand01 = [&rng] {
             rng = rng * 1664525u + 1013904223u;
@@ -259,12 +268,13 @@ bool spawnFlora(entt::registry& registry,
             const int gz = static_cast<int>(rand01() * (dim.z - 1));
             const float kind = rand01();     // draw every random up-front (stable stream)
             const float yaw = rand01() * 6.2831853f;
-            const float scale = 0.8f + 0.5f * rand01();
+            const float scale = 0.75f + 0.35f * rand01();
             const float h = world.terrainHeight(gx, gz);
             if (h <= sandLine + 0.5f || h >= snowLine - 0.5f) continue;  // grass band only
             const int top = static_cast<int>(h);
             if (top + 1 >= dim.y) continue;
             // 70% grass tufts, 30% flowers (alternating the two variants).
+            if (perMesh[0].size() + perMesh[1].size() + perMesh[2].size() >= maxPlants) break;
             const size_t meshIdx = (kind < 0.7f) ? 0 : 1 + (static_cast<size_t>(kind * 100.0f) & 1);
             perMesh[meshIdx].push_back({
                 origin + glm::vec3((gx + 0.5f) * voxelSize, (top + 1) * voxelSize,
@@ -277,7 +287,7 @@ bool spawnFlora(entt::registry& registry,
                 auto& t = registry.emplace<Vapor::TransformComponent>(e);
                 t.position = pl.pos;
                 t.rotation = glm::angleAxis(pl.yaw, glm::vec3(0.0f, 1.0f, 0.0f));
-                t.scale = glm::vec3(pl.scale);
+                t.scale = glm::vec3(voxelSize * pl.scale);  // voxel units -> meters
                 auto& mr = registry.emplace<Vapor::MeshRendererComponent>(e);
                 mr.meshes.push_back(floraMeshes[meshIdx]);
                 // Tiny cutout quads contribute almost nothing to the cascades
@@ -373,14 +383,16 @@ auto main(int argc, char* args[]) -> int {
     // Default OFF: each plant is its own entity/drawable (not yet instanced),
     // and the directional-shadow cascades re-record every drawable per pass —
     // hundreds of plants cost real CPU time until the flora path is instanced.
+    // Dims in voxels: tufts one voxel, flowers a bit under two (the jitter
+    // below caps at 1.1x, so nothing exceeds ~2 voxels tall).
     std::vector<std::shared_ptr<Vapor::Mesh>> floraMeshes = {
-        makeFloraMesh(makeGrassTuftImage(), "flora_grass", 0.36f, 0.34f),
+        makeFloraMesh(makeGrassTuftImage(), "flora_grass", 1.0f, 1.2f),
         makeFloraMesh(makeFlowerImage("microvoxel_flora_poppy",
                                       glm::vec3(0.85f, 0.18f, 0.12f), glm::vec3(0.12f, 0.09f, 0.02f)),
-                      "flora_poppy", 0.30f, 0.42f),
+                      "flora_poppy", 1.0f, 1.8f),
         makeFloraMesh(makeFlowerImage("microvoxel_flora_daisy",
                                       glm::vec3(0.95f, 0.95f, 0.92f), glm::vec3(0.98f, 0.80f, 0.15f)),
-                      "flora_daisy", 0.30f, 0.40f),
+                      "flora_daisy", 1.0f, 1.7f),
     };
     for (const auto& m : floraMeshes) scene->addMesh(m);
     bool floraEnabled = false;   // P toggles (see the comment above)
