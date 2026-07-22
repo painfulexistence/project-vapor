@@ -108,9 +108,9 @@ std::shared_ptr<Vapor::Image> makeGrassTuftImage() {
     img->byteArray.assign(static_cast<size_t>(N) * N * 4, 0);
     auto put = [&](int x, int y, glm::vec3 c) {
         if (x < 0 || x >= N || y < 0 || y >= N) return;
-        // Image row 0 is the TOP of the texture; the quad UVs put v=0 at the
-        // blade roots, so write with y flipped (row N-1 = root).
-        const size_t i = (static_cast<size_t>(N - 1 - y) * N + x) * 4;
+        // The quad UVs put v=0 at the blade roots and v=0 samples byte row 0,
+        // so plant-space y maps straight to the image row (row 0 = root).
+        const size_t i = (static_cast<size_t>(y) * N + x) * 4;
         img->byteArray[i + 0] = static_cast<Uint8>(c.r * 255.0f);
         img->byteArray[i + 1] = static_cast<Uint8>(c.g * 255.0f);
         img->byteArray[i + 2] = static_cast<Uint8>(c.b * 255.0f);
@@ -147,7 +147,7 @@ std::shared_ptr<Vapor::Image> makeFlowerImage(const char* uri, glm::vec3 petal, 
     img->byteArray.assign(static_cast<size_t>(N) * N * 4, 0);
     auto put = [&](int x, int y, glm::vec3 c) {
         if (x < 0 || x >= N || y < 0 || y >= N) return;
-        const size_t i = (static_cast<size_t>(N - 1 - y) * N + x) * 4;  // y up (see grass)
+        const size_t i = (static_cast<size_t>(y) * N + x) * 4;  // row 0 = root (see grass)
         img->byteArray[i + 0] = static_cast<Uint8>(c.r * 255.0f);
         img->byteArray[i + 1] = static_cast<Uint8>(c.g * 255.0f);
         img->byteArray[i + 2] = static_cast<Uint8>(c.b * 255.0f);
@@ -223,7 +223,8 @@ std::shared_ptr<Vapor::Mesh> makeFloraMesh(std::shared_ptr<Vapor::Image> albedo,
 // the grass band mirrors the generator's snow/sand lines so flowers never grow
 // on beaches or snowcaps. One-shot: returns false until every world exists.
 bool spawnFlora(entt::registry& registry,
-                const std::vector<std::shared_ptr<Vapor::Mesh>>& floraMeshes) {
+                const std::vector<std::shared_ptr<Vapor::Mesh>>& floraMeshes,
+                std::vector<entt::entity>& outEntities) {
     auto view = registry.view<Vapor::VoxelVolumeComponent>();
     for (auto entity : view) {
         if (!view.get<Vapor::VoxelVolumeComponent>(entity).world.value) return false;
@@ -266,6 +267,7 @@ bool spawnFlora(entt::registry& registry,
             t.scale = glm::vec3(scale);
             auto& mr = registry.emplace<Vapor::MeshRendererComponent>(e);
             mr.meshes.push_back(mesh);
+            outEntities.push_back(e);
         }
     }
     return true;
@@ -348,8 +350,11 @@ auto main(int argc, char* args[]) -> int {
         }
     }
     // Quad flora meshes must be staged (mesh + material registration) before
-    // stage(); the entities that draw them spawn later, once the voxel worlds
-    // exist and their surface heights can be queried.
+    // stage(); the entities that draw them spawn lazily on the first P toggle,
+    // once the voxel worlds exist and their surface heights can be queried.
+    // Default OFF: each plant is its own entity/drawable (not yet instanced),
+    // and the directional-shadow cascades re-record every drawable per pass —
+    // hundreds of plants cost real CPU time until the flora path is instanced.
     std::vector<std::shared_ptr<Vapor::Mesh>> floraMeshes = {
         makeFloraMesh(makeGrassTuftImage(), "flora_grass", 0.36f, 0.34f),
         makeFloraMesh(makeFlowerImage("microvoxel_flora_poppy",
@@ -360,6 +365,9 @@ auto main(int argc, char* args[]) -> int {
                       "flora_daisy", 0.30f, 0.40f),
     };
     for (const auto& m : floraMeshes) scene->addMesh(m);
+    bool floraEnabled = false;   // P toggles (see the comment above)
+    bool floraSpawned = false;
+    std::vector<entt::entity> floraEntities;
 
     renderer->stage(scene);
     scene->stagedMeshes.clear();
@@ -376,7 +384,8 @@ auto main(int argc, char* args[]) -> int {
     fmt::print("MicroVoxel loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
     fmt::print("Raymarched 5 cm voxel volumes — no triangles. Hold E to dig into them.\n");
     fmt::print("Debug: 0=final 1=albedo 2=normals 3=AO 4=shadow 5=GI 6=material | "
-               "G/O/H/X/N/V toggle GI/AO/shadow/reflections/denoiser/cross-volume | B = split raw|denoised.\n");
+               "G/O/H/X/N/V toggle GI/AO/shadow/reflections/denoiser/cross-volume | B = split raw|denoised | "
+               "P = quad flora.\n");
 
     // The MicroVoxel tunables live on the concrete RHI renderer (also editable
     // in its ImGui panel); hotkeys poke them directly when available.
@@ -403,6 +412,14 @@ auto main(int argc, char* args[]) -> int {
                     break;
                 case SDL_EVENT_KEY_DOWN: {
                     if (e.key.scancode == SDL_SCANCODE_ESCAPE) quit = true;
+                    if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_P) {
+                        floraEnabled = !floraEnabled;
+                        for (auto fe : floraEntities) {
+                            if (auto* mr = registry.try_get<Vapor::MeshRendererComponent>(fe))
+                                mr->visible = floraEnabled;
+                        }
+                        fmt::print("Quad flora: {}\n", floraEnabled ? "on" : "off");
+                    }
                     if (rhiRenderer && !e.key.repeat) {
                         auto& mv = rhiRenderer->getMicroVoxelSettings();
                         auto setDebug = [&](int mode, const char* name) {
@@ -505,10 +522,11 @@ auto main(int argc, char* args[]) -> int {
         Vapor::SkySystem::update(registry, renderer.get());
         Vapor::VoxelVolumeSystem::update(registry, renderer.get());
 
-        // One-shot flora scatter once every volume's world exists (the surface
-        // height is a pure function — chunk generation can still be streaming).
-        static bool floraSpawned = false;
-        if (!floraSpawned) floraSpawned = spawnFlora(registry, floraMeshes);
+        // Lazy one-shot flora scatter (P toggles; surface height is a pure
+        // function, so chunk generation can still be streaming).
+        if (floraEnabled && !floraSpawned) {
+            floraSpawned = spawnFlora(registry, floraMeshes, floraEntities);
+        }
 
         // ---- Render --------------------------------------------------------
         if (activeCam == entt::null) continue;
