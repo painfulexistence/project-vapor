@@ -267,10 +267,9 @@ namespace Vapor {
         float fogDensityMul    = 1.0f;      // multiplies VolumetricFogComponent density
         float windMul          = 1.0f;      // multiplies WindFieldComponent strength
         float iblDim           = 1.0f;      // scales the baked environment (IBL) ambience
-        // Multiplies the renderer's cloud sunLightScale: storm decks read darker
-        // than their self-shadowing alone provides (6-step light march). Cloud
-        // albedo itself is near-white in reality — darkness is extinction, and
-        // this is the artistic stand-in for the part the march can't afford.
+        // Multiplies the renderer's cloud sunLightScale: the artistic stand-in
+        // for the extinction depth the 6-step light march can't afford — storm
+        // decks read darker than self-shadowing alone provides.
         float cloudSunMul      = 1.0f;
         // Cloud ambient (sky-fill) tint: blue under a clear sky, neutral gray
         // overcast, sickly green in a supercell thunderstorm.

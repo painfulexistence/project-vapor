@@ -422,13 +422,11 @@ namespace Vapor {
                         if (movedDeg >= sky.iblSunThresholdDeg) {
                             if (firstBake) {
                                 // The initial bake must ALWAYS happen, independent
-                                // of the auto-rebake toggle. The renderer's very-
-                                // early startup bake can capture the sky before the
-                                // async-loaded scene + sun are ready, leaving a
-                                // stale/wrong prefilter that RT reflection samples
-                                // (green ghosting until a manual Refresh IBL). Now
-                                // that the sun is valid, re-push the sky to force
-                                // one ungated bake (setSky sets iblNeedsUpdate).
+                                // of the auto-rebake toggle: the renderer's startup
+                                // bake can run before the async scene + sun are
+                                // ready, leaving a stale prefilter. Re-push the sky
+                                // to force one ungated bake (setSky sets
+                                // iblNeedsUpdate).
                                 sky.dirty = true;
                             } else {
                                 // Continuous sun-tracking rebakes: gated by the
@@ -586,10 +584,8 @@ namespace Vapor {
                 if (a > 0.15f) env += 0.7f * std::exp(-25.0f * (a - 0.15f));
                 if (env > 0.005f) {
                     intensity = w.lightningIntensity * env;
-                    // Cloud-interior glow. The tuned ambient scale is ~0.001,
-                    // so this is a massive-but-brief relative spike (a flash
-                    // lighting the deck from inside), on par with the direct
-                    // sun scattering for a couple of frames.
+                    // Cloud-interior glow: huge relative to the ~0.001 ambient
+                    // scale — a brief flash lighting the deck from inside.
                     glow = 1.5f * env;
                 }
             } else {

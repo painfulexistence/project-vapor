@@ -62,10 +62,8 @@ struct VolumetricCloudData {
     uint primarySteps;              // Primary ray march steps
     uint lightSteps;                // Light ray march steps
     float2 screenSize;              // Screen dimensions
-    // MUST be float2 (twin of the C++ vec2 _pad7): as a lone float it shifted
-    // everything after by 4 bytes — frameIndex read the padding (stuck at 0,
-    // static blue noise) and temporalBlend read frameIndex's bit pattern
-    // (≈ denormal 0, temporal resolve effectively frozen onto its clamp).
+    // MUST stay float2 (twin of the C++ vec2 padding) or frameIndex and
+    // temporalBlend shift by 4 bytes and read the wrong fields.
     float2 _pad2;
 
     // Temporal
@@ -75,7 +73,7 @@ struct VolumetricCloudData {
 
     // Cloud ambient (sky-fill) tint, scaled by ambientIntensity. Weather
     // drives it: blue for clear, neutral gray overcast, storm green.
-    float3 ambientColor;            // appended — offsets above unchanged
+    float3 ambientColor;
 };
 
 // ============================================================================
@@ -244,7 +242,7 @@ float lightMarch(float3 worldPos, constant VolumetricCloudData& data) {
 }
 
 // Multi-scattering approximation (Schneider's method)
-float3 multiScatterApprox(float density, float lightTransmittance, float cosTheta,
+float3 multiScatterApprox(float lightTransmittance, float cosTheta,
                           constant VolumetricCloudData& data) {
     // Direct light with phase function
     float phase = phaseDualLobe(cosTheta, data.phaseG1, data.phaseG2, data.phaseBlend);
@@ -343,7 +341,7 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
             float lightTransmittance = lightMarch(pos, data);
 
             // Multi-scattering approximation
-            float3 luminance = multiScatterApprox(density, lightTransmittance, cosTheta, data);
+            float3 luminance = multiScatterApprox(lightTransmittance, cosTheta, data);
 
             // Beer-powder effect
             float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * data.powderStrength +

@@ -4582,12 +4582,10 @@ void Renderer::setVolumetricFog(const VolumetricFogRenderData& fog) {
 }
 
 void Renderer::setClouds(const CloudsRenderData& clouds) {
-    // The ECS WeatherSystem is the SSOT for the artist-facing cloud tunables
-    // while a WeatherComponent drives clouds: copy them into cloudSettings and
-    // gate the passes on `enabled`. Shape/phase/step tunables stay panel-side.
-    // (While weather drives, the panel's copies of THESE fields are overwritten
-    // every frame.) Per-frame fields (matrices/sun/wind scroll) are still
-    // filled in the pass.
+    // WeatherSystem owns these artist tunables while a WeatherComponent drives
+    // clouds (the panel copies of these fields are overwritten every frame);
+    // shape/phase/step tunables stay panel-side, per-frame fields are filled
+    // in the pass.
     m_cloudsWeatherDriven            = true;  // panel shows a "driven by weather" hint
     volumetricCloudsEnabled          = clouds.enabled;
     cloudSettings.cloudCoverage      = clouds.coverage;
@@ -4637,10 +4635,8 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.cameraPosition = currentCamera.position;
     cloudSettings.sunDirection = glm::normalize(atmosphereData.sunDirection);
     cloudSettings.sunColor = atmosphereData.sunColor;
-    // Sun intensity from the shared atmosphere value (panel default 12), like
-    // the native-Metal path the clouds were tuned on — the struct default (22)
-    // left the RHI clouds ~1.8x brighter than the tuned look, which then also
-    // read as blown-out bloom (any cloud pixel over luminance 1 blooms).
+    // Shared atmosphere sun intensity (the value the clouds were tuned
+    // against) — NOT the struct default, which is brighter.
     cloudSettings.sunIntensity = atmosphereData.sunIntensity;
     // windSpeed is the cloud's per-medium scroll coefficient; the shared wind
     // strength scales it so the WindFieldComponent drives the scroll rate.

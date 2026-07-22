@@ -445,10 +445,7 @@ struct alignas(16) VolumetricCloudRenderData {
     float phaseBlend = 0.3f;
     float powderStrength = 0.5f;
     // Cloud-specific scale on the shared sunIntensity (< 1: clouds absorb and
-    // self-shadow — they should read DARKER than the clear sky, not glow). The
-    // old full-strength term dates from the pre-temporal era, when the deck was
-    // deliberately over-bright so bloom would mask raymarch noise. Rides in the
-    // old pad slot — GPU layout unchanged.
+    // self-shadow, so the lit deck reads darker than the clear sky).
     float sunLightScale = 0.3f;
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);
     float _pad5 = 0.0f;
