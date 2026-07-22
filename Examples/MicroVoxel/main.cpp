@@ -25,6 +25,7 @@
 #include "Vapor/irenderer.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/render_scene.hpp"
+#include "Vapor/scene_blueprint.hpp"
 #include "Vapor/systems.hpp"
 #include "Vapor/voxel_world.hpp"
 
@@ -90,20 +91,6 @@ entt::entity getActiveCamera(entt::registry& reg) {
     return entt::null;
 }
 
-entt::entity spawnVolume(entt::registry& registry, const char* name, glm::vec3 position,
-                         glm::ivec3 gridDim, float voxelSize, Uint32 seed, Uint32 brickCapacity) {
-    auto e = registry.create();
-    registry.emplace<Vapor::NameComponent>(e, Vapor::NameComponent { name });
-    auto& t = registry.emplace<Vapor::TransformComponent>(e);
-    t.position = position;
-    auto& vv = registry.emplace<Vapor::VoxelVolumeComponent>(e);
-    vv.gridDim = gridDim;
-    vv.voxelSize = voxelSize;
-    vv.seed = seed;
-    vv.brickCapacity = brickCapacity;
-    return e;
-}
-
 }  // namespace
 
 auto main(int argc, char* args[]) -> int {
@@ -161,71 +148,35 @@ auto main(int argc, char* args[]) -> int {
         return 1;
     }
 
-    // Empty scene: everything visible is raymarched, but draw()/light gather
-    // still route through the RenderScene object.
+    // Declarative scene: the dioramas (voxelVolume components), sun, sky and
+    // fly camera are all authored in the scene JSON — main.json is the three
+    // side-by-side dioramas (the 512^3 @ 2.5 cm centre between two 5 cm ones),
+    // big.json the single 51.2 x 12.8 x 51.2 m streaming world. The registry
+    // is populated by instantiate(); VoxelVolumeSystem generates the worlds on
+    // first sight, exactly as with code-spawned components.
     auto scene = std::make_shared<RenderScene>("microvoxel");
-    renderer->stage(scene);
-
     entt::registry registry;
-
-    // ---- Scene setup -------------------------------------------------------
-    if (bigWorld) {
-        // One large streaming world: 51.2 x 12.8 x 51.2 m of 5 cm voxels.
-        // Surface bricks land in the pool; uniform stone interiors collapse to
-        // page entries, so 128k slots (~75 MB) cover the whole thing.
-        spawnVolume(registry, "Volume.Big", glm::vec3(0.0f), glm::ivec3(1024, 256, 1024), 0.05f,
-                    1337u, 1u << 17);
-    } else {
-        // Three dioramas side by side, seeds matching the original demo. All
-        // three span the same 12.8 m, but the center one runs 2.5 cm voxels
-        // (512^3) — twice the linear detail (8x the voxels) of the 5 cm sides,
-        // the "finer picture" the sparse storage makes affordable. Only surface
-        // bricks take pool slots (uniform stone interiors collapse to page
-        // entries), so 128k slots cover the 64^3 brick grid with margin.
-        const float ext5 = 256 * 0.05f;  // 12.8 m
-        spawnVolume(registry, "Volume.Center", glm::vec3(0.0f), glm::ivec3(512, 512, 512), 0.025f,
-                    1337u, 1u << 17);
-        spawnVolume(registry, "Volume.Right", glm::vec3(ext5, 0.0f, 0.0f), glm::ivec3(256), 0.05f,
-                    7u, 1u << 16);
-        spawnVolume(registry, "Volume.Left", glm::vec3(-ext5, 0.0f, 0.0f), glm::ivec3(256), 0.05f,
-                    99u, 1u << 16);
-    }
-
-    // An angled warm sun, low over the horizon like the original demo, so the
-    // terrain gets long raking shadows and grazing light. The MicroVoxel pass
-    // reads it through atmosphereData (LightGatherSystem -> renderer).
     {
-        auto sun = registry.create();
-        registry.emplace<Vapor::NameComponent>(sun, Vapor::NameComponent { "Sun" });
-        auto& dl = registry.emplace<Vapor::DirectionalLightComponent>(sun);
-        // Original aims (-0.451, 10.179, -236.35) TOWARD the sun; Vapor's
-        // directional light stores the light's travel direction.
-        dl.direction = -glm::normalize(glm::vec3(-0.451f, 10.179f, -236.350f));
-        dl.color = glm::vec3(1.0f, 0.95f, 0.85f);
-        dl.intensity = 10.0f;
-        registry.emplace<Vapor::SunComponent>(sun);
-
-        auto env = registry.create();
-        registry.emplace<Vapor::NameComponent>(env, Vapor::NameComponent { "Environment" });
-        registry.emplace<Vapor::SkyComponent>(env);  // atmosphere sky + IBL rebake
+        auto& resourceManager = engineCore->getResourceManager();
+        auto sceneResource =
+            resourceManager.loadScene(std::string(bigWorld ? "scenes/big.json" : "scenes/main.json"));
+        auto sceneBlueprint = sceneResource->get();
+        if (sceneBlueprint && sceneBlueprint->ok) {
+            Vapor::instantiate(registry, *scene, *sceneBlueprint);
+        } else {
+            fmt::print(stderr, "MicroVoxel: scene blueprint failed to load; the world will be empty\n");
+        }
     }
+    renderer->stage(scene);
+    scene->stagedMeshes.clear();
+    scene->stagedMeshTransforms.clear();
 
-    // Camera entity: engine VirtualCamera + FlyCamera components, driven by
-    // the demo's FlyCameraSystem. Matches the original's start pose (at
-    // (1, 10, 15), pitched down 16°, yawed to look across the dioramas
-    // toward -X; FlyCameraComponent yaw 90 = -Z forward).
+    // Window-derived state the JSON can't know: the camera aspect.
     {
-        auto camEntity = registry.create();
-        registry.emplace<Vapor::NameComponent>(camEntity, Vapor::NameComponent { "Fly Camera" });
-        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(camEntity);
-        cam.isActive = true;
-        cam.aspect = (windowHeight > 0) ? float(windowWidth) / float(windowHeight) : 1.0f;
-        cam.position = bigWorld ? glm::vec3(0.0f, 18.0f, 30.0f) : glm::vec3(1.0f, 10.0f, 15.0f);
-        auto& fly = registry.emplace<Vapor::FlyCameraComponent>(camEntity);
-        fly.moveSpeed = 6.0f;
-        fly.rotateSpeed = 90.0f;
-        fly.yaw = bigWorld ? 90.0f : 180.0f;
-        fly.pitch = 16.0f;
+        auto camView = registry.view<Vapor::VirtualCameraComponent>();
+        camView.each([&](auto& cam) {
+            cam.aspect = (windowHeight > 0) ? float(windowWidth) / float(windowHeight) : 1.0f;
+        });
     }
 
     fmt::print("MicroVoxel loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");

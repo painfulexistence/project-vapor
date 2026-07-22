@@ -1,0 +1,31 @@
+{
+  "name": "microvoxel-big",
+  "entities": [
+    {
+      "name": "Volume.Big",
+      "position": [0.0, 0.0, 0.0],
+      "components": {
+        "voxelVolume": { "gridDim": [1024, 256, 1024], "voxelSize": 0.05, "seed": 1337, "brickCapacity": 131072 }
+      }
+    },
+    {
+      "name": "Sun",
+      "components": {
+        "directionalLight": {
+          "direction": [0.0019064, -0.0430277, 0.9990722],
+          "color": [1.0, 0.95, 0.85],
+          "intensity": 10.0
+        },
+        "sun": {}
+      }
+    },
+    { "name": "Environment", "components": { "sky": {} } },
+    {
+      "name": "Fly Camera",
+      "components": {
+        "virtualCamera": { "isActive": true, "position": [0.0, 18.0, 30.0] },
+        "flyCamera": { "moveSpeed": 6.0, "rotateSpeed": 90.0, "yaw": 90.0, "pitch": 16.0 }
+      }
+    }
+  ]
+}

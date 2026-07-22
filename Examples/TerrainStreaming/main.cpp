@@ -27,6 +27,7 @@
 #include "Vapor/irenderer.hpp"
 #include "Vapor/render_scene.hpp"
 #include "Vapor/renderer.hpp"
+#include "Vapor/scene_blueprint.hpp"
 #include "Vapor/systems.hpp"
 
 #include <SDL3/SDL.h>
@@ -143,58 +144,45 @@ auto main(int argc, char* args[]) -> int {
         return 1;
     }
 
+    // Declarative scene: the terrain (streamingTerrain component), sun, sky
+    // and fly camera are authored in scenes/main.json; instantiate() fills
+    // the registry and TerrainSystem does the rest on first update. Only
+    // window-derived state (aspect) and the post-prewarm camera height are
+    // set from code.
     auto scene = std::make_shared<RenderScene>("terrain");
     entt::registry registry;
-
-    // ---- Environment -------------------------------------------------------
     {
-        auto sun = registry.create();
-        registry.emplace<Vapor::NameComponent>(sun, Vapor::NameComponent { "Sun" });
-        auto& dl = registry.emplace<Vapor::DirectionalLightComponent>(sun);
-        dl.direction = glm::normalize(glm::vec3(-0.4f, -1.0f, 0.35f));
-        dl.color = glm::vec3(1.0f, 0.97f, 0.9f);
-        dl.intensity = 8.0f;
-        registry.emplace<Vapor::SunComponent>(sun);
-
-        auto env = registry.create();
-        registry.emplace<Vapor::NameComponent>(env, Vapor::NameComponent { "Environment" });
-        registry.emplace<Vapor::SkyComponent>(env);
+        auto& resourceManager = engineCore->getResourceManager();
+        auto sceneResource = resourceManager.loadScene(std::string("scenes/main.json"));
+        auto sceneBlueprint = sceneResource->get();
+        if (sceneBlueprint && sceneBlueprint->ok) {
+            Vapor::instantiate(registry, *scene, *sceneBlueprint);
+        } else {
+            fmt::print(stderr, "TerrainStreaming: scene blueprint failed to load; the world will be empty\n");
+        }
     }
+    renderer->stage(scene);
+    scene->stagedMeshes.clear();
+    scene->stagedMeshTransforms.clear();
 
-    // ---- Terrain entity ----------------------------------------------------
-    // One StreamingTerrainComponent is the whole setup; the engine's
-    // TerrainSystem does the rest (defaults already describe this demo's
-    // 10.24 km world — spelled out here as living documentation).
-    entt::entity terrainEntity;
+    // The terrain singleton entity (stats + teleport bounds below).
+    entt::entity terrainEntity = entt::null;
     {
-        terrainEntity = registry.create();
-        registry.emplace<Vapor::NameComponent>(terrainEntity, Vapor::NameComponent { "Terrain" });
-        auto& tc = registry.emplace<Vapor::StreamingTerrainComponent>(terrainEntity);
-        tc.worldSize = 10240.0f;
-        tc.tileSize = 512.0f;
-        tc.heightScale = 500.0f;
-        tc.noiseFrequency = 0.0007f;  // ~1.4 km feature wavelength
-        tc.noiseOctaves = 9;
-        tc.seed = 20260705u;
+        auto terrainView = registry.view<Vapor::StreamingTerrainComponent>();
+        for (auto e : terrainView) {
+            terrainEntity = e;
+            break;
+        }
+        if (terrainEntity == entt::null) {
+            fmt::print(stderr, "TerrainStreaming: no streamingTerrain entity in the scene\n");
+            return 1;
+        }
     }
-
-    // Camera: spawn high over the valley for an establishing vista; far plane
-    // past the world diagonal so the whole streamed horizon is in view.
     {
-        auto camEntity = registry.create();
-        registry.emplace<Vapor::NameComponent>(camEntity, Vapor::NameComponent { "Fly Camera" });
-        auto& cam = registry.emplace<Vapor::VirtualCameraComponent>(camEntity);
-        cam.isActive = true;
-        cam.aspect = (windowHeight > 0) ? float(windowWidth) / float(windowHeight) : 1.0f;
-        cam.fov = glm::radians(55.0f);
-        cam.near = 0.5f;
-        cam.far = 30000.0f;
-        cam.position = glm::vec3(-382.1f, 0.0f, -2279.9f);  // height set after prewarm below
-        auto& fly = registry.emplace<Vapor::FlyCameraComponent>(camEntity);
-        fly.moveSpeed = 12.0f;  // sprinting-character pace; LShift = x50
-        fly.rotateSpeed = 90.0f;
-        fly.yaw = 50.0f;
-        fly.pitch = 8.0f;
+        auto camView = registry.view<Vapor::VirtualCameraComponent>();
+        camView.each([&](auto& cam) {
+            cam.aspect = (windowHeight > 0) ? float(windowWidth) / float(windowHeight) : 1.0f;
+        });
     }
 
     // First system tick prewarms the whole horizon (base coat for every tile,
