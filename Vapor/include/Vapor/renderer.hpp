@@ -533,6 +533,11 @@ private:
         // one drawMeshTasks per instance.
         Uint32 mainDrawCalls = 0;
         const char* mainPath = "CPU";  // "CPU" | "Indirect" | "MDI" | "BindlessMDI" | "Meshlet"
+        // Meshlet cull effectiveness: total meshlets submitted (CPU-known) vs the
+        // survivors the object shader emitted (GPU atomic, read back best-effort,
+        // typically a frame stale). Both 0 unless the Meshlet path ran this frame.
+        Uint32 meshletTotal = 0;
+        Uint32 meshletSurvivors = 0;
     } lastFrameStats;
 
     // Tile-cull histogram cache for the "Light Culling Debug" panel. Refreshed
@@ -1245,6 +1250,7 @@ private:
     BufferHandle meshletTriangleBuffer;  // Uint8[] (padded to 4)
     BufferHandle meshletBoundsBuffer;    // MeshletBounds[]
     BufferHandle meshMeshletRangeBuffer; // uvec2[meshId] = {meshletOffset, meshletCount}
+    BufferHandle meshletCullStatsBuffer; // atomic uint: survivor count (GPU write, CPU read-back)
     bool m_meshletsDirty = false;
     void ensureMeshletBuffers();  // (re)build meshlet GPU buffers from CPU data
     BufferHandle lightCullDataBuffer;
