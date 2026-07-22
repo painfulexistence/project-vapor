@@ -13,6 +13,8 @@ layout(location = 0) out float outTransmittance;
 
 // Baked tileable Perlin-Worley base shape (same volume the raymarch samples).
 layout(set = 2, binding = 0) uniform sampler3D shapeNoiseTex;
+// Weather map twin of CloudRaymarch.frag's (R = coverage base, G = type).
+layout(set = 2, binding = 1) uniform sampler2D weatherMapTex;
 
 // Must match Vapor::VolumetricCloudRenderData (std430) — CloudRaymarch twin.
 layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
@@ -120,11 +122,8 @@ float sampleCloudShape(vec3 worldPos) {
 
 vec2 sampleWeather(vec3 worldPos) {
     vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
-    float coverage = valueNoise3D(vec3(weatherUV * 3.0, 0.0));
-    coverage = pow(coverage * 0.5 + 0.5, 0.5);
-    float type = valueNoise3D(vec3(weatherUV * 2.0 + 100.0, 0.0));
-    type = type * 0.5 + 0.5;
-    return vec2(coverage * cloudCoverage, type);
+    vec2 w = texture(weatherMapTex, weatherUV).rg;
+    return vec2(w.r * cloudCoverage, w.g);
 }
 
 float sampleCloudDensityCheap(vec3 worldPos) {

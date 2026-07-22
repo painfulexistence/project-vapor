@@ -785,6 +785,7 @@ private:
     // trilinear fetch replaces the per-sample procedural Perlin-Worley loops.
     TextureHandle cloudShapeNoiseTex;   // 128^3 R8: combined Perlin-Worley base shape
     TextureHandle cloudDetailNoiseTex;  // 32^3 R8: Worley FBM erosion detail
+    TextureHandle cloudWeatherMapTex;   // 512^2 RGBA8: coverage/type/precip over 20 km tile
     void createCloudNoiseTextures();
     // Cloud-shadow blend strength (panel). Pushed as 0 while the clouds pass
     // is disabled, so the ground never shows shadows from an invisible deck.

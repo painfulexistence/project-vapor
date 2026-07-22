@@ -5185,8 +5185,9 @@ void Renderer::cloudShadowPass() {
     rp.loadColor.push_back(false);
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(cloudShadowPipeline);
-    // Cheap density only needs the shape volume (repeat sampler).
+    // Cheap density needs the shape volume + weather map (repeat sampler).
     rhi->setTexture(0, 0, cloudShapeNoiseTex, defaultSampler);
+    rhi->setTexture(0, 1, cloudWeatherMapTex, defaultSampler);
     rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
     // Camera for the region center (same slots as the raymarch pass).
     if (backend == GraphicsBackend::Metal) {
@@ -5250,9 +5251,10 @@ void Renderer::volumetricCloudPass() {
         rhi->beginRenderPass(rp);
         rhi->bindPipeline(cloudRaymarchPipeline);
         rhi->setTexture(0, 0, depthStencilRT, clampSampler);
-        // Baked noise volumes (repeat sampler — the tiles wrap).
+        // Baked noise volumes + weather map (repeat sampler — the tiles wrap).
         rhi->setTexture(0, 1, cloudShapeNoiseTex, defaultSampler);
         rhi->setTexture(0, 2, cloudDetailNoiseTex, defaultSampler);
+        rhi->setTexture(0, 3, cloudWeatherMapTex, defaultSampler);
         rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
         // cloudFragmentLowRes reads the camera at buffer(1) on Metal; the
         // GLSL twin declares it at set-relative binding 3.
@@ -5554,6 +5556,41 @@ void Renderer::createCloudNoiseTextures() {
         d.usage = TextureUsage::Sampled;
         cloudDetailNoiseTex = rhi->createTexture(d);
         rhi->updateTexture(cloudDetailNoiseTex, data.data(), data.size());
+    }
+    // Weather map 512^2 RGBA8, tiling every 1.0 of weather UV (20 km world):
+    // R = coverage base (domain-warped FBM — fronts/streets/clear gaps instead
+    // of uniform value noise), G = cloud type, B = precipitation (reserved for
+    // the WeatherSystem to paint into). Replaces sampleWeather's per-sample
+    // valueNoise; the shaders multiply R by the weather state's cloudCoverage.
+    {
+        const int N = 512;
+        std::vector<uint8_t> data(size_t(N) * N * 4);
+        size_t i = 0;
+        for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x, i += 4) {
+            glm::vec2 uv = (glm::vec2(x, y) + 0.5f) / float(N);
+            // Domain warp (the warp field is itself periodic, so tiling is exact).
+            glm::vec3 p(uv.x * 3.0f, uv.y * 3.0f, 0.37f);
+            glm::vec2 warp(tileablePerlin(p + glm::vec3(17.3f, 9.1f, 0.0f), 3, 0x11u),
+                           tileablePerlin(p + glm::vec3(41.7f, 23.9f, 0.0f), 3, 0x22u));
+            glm::vec3 pw = p + glm::vec3(warp * 1.2f, 0.0f);
+            float c = tileablePerlin(pw, 3, 0x33u) +
+                      0.5f * tileablePerlin(glm::vec3(pw.x * 2.0f, pw.y * 2.0f, 0.71f), 6, 0x44u);
+            float coverage = std::pow(glm::clamp(c * 0.5f + 0.5f, 0.0f, 1.0f), 0.5f);
+            float type = glm::clamp(
+                tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.53f) + glm::vec3(100.0f, 100.0f, 0.0f), 2, 0x55u)
+                    * 0.5f + 0.5f, 0.0f, 1.0f);
+            data[i + 0] = uint8_t(coverage * 255.0f + 0.5f);
+            data[i + 1] = uint8_t(type * 255.0f + 0.5f);
+            data[i + 2] = uint8_t(glm::clamp(coverage * 2.0f - 1.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
+            data[i + 3] = 255;
+        }
+        TextureDesc d;
+        d.width = N; d.height = N; d.depth = 1;
+        d.format = PixelFormat::RGBA8_UNORM;
+        d.usage = TextureUsage::Sampled;
+        cloudWeatherMapTex = rhi->createTexture(d);
+        rhi->updateTexture(cloudWeatherMapTex, data.data(), data.size());
     }
 }
 

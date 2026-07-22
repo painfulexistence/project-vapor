@@ -16,6 +16,9 @@ layout(set = 2, binding = 0) uniform sampler2D sceneDepth;
 // below are unchanged. Repeat sampler — the tiles wrap.
 layout(set = 2, binding = 1) uniform sampler3D shapeNoiseTex;   // 128^3 Perlin-Worley base
 layout(set = 2, binding = 2) uniform sampler3D detailNoiseTex;  // 32^3 Worley FBM erosion
+// 512^2 weather map tiling every 1.0 of weather UV (~20 km): R = coverage
+// base (domain-warped FBM — fronts/streets), G = type, B = precip (reserved).
+layout(set = 2, binding = 3) uniform sampler2D weatherMapTex;
 
 // Must match Vapor::VolumetricCloudRenderData (std430).
 layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
@@ -180,16 +183,11 @@ float sampleCloudDetail(vec3 worldPos) {
 
 vec2 sampleWeather(vec3 worldPos) {
     // Scroll the coverage field with the wind (slower than the in-cloud detail,
-    // so macro shapes lag the internal churn). Without this the coverage
-    // envelope is pinned to world space and clouds form/dissolve in place
-    // instead of drifting across the sky. Small time term keeps the pattern
-    // slowly evolving on top of the drift.
+    // so macro shapes lag the internal churn); small time term keeps the
+    // pattern evolving. Coverage/type come pre-shaped from the weather map.
     vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
-    float coverage = valueNoise3D(vec3(weatherUV * 3.0, 0.0));
-    coverage = pow(coverage * 0.5 + 0.5, 0.5);
-    float type = valueNoise3D(vec3(weatherUV * 2.0 + 100.0, 0.0));
-    type = type * 0.5 + 0.5;
-    return vec2(coverage * cloudCoverage, type);
+    vec2 w = texture(weatherMapTex, weatherUV).rg;
+    return vec2(w.r * cloudCoverage, w.g);
 }
 
 float sampleCloudDensity(vec3 worldPos, bool useCheap) {
