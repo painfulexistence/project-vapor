@@ -3,6 +3,13 @@ using namespace metal;
 #include "Res/shaders/3d_common.metal"  // shared CameraData/InstanceData/VertexData + inverse()
 #include "Res/shaders/3d_pbr_lib.metal" // shared Surface/BRDF/analytic-light/IBL helpers
 
+// Bring-up debug probes (the negative-errorThreshold "probe ladder" in meshMain
+// + the mesh-only meshSynthetic pipeline) that were used to chase the blank-
+// screen heisenbug. Compiled OUT by default — flip to 1 (and the renderer's
+// kMeshletDebugProbes) to re-enable the probe ladder + its UI. Kept in-tree
+// because they isolate object/mesh-stage faults nothing else can.
+#define MESHLET_DEBUG_PROBES 0
+
 // Meshlet task/mesh pipeline — Metal backend. Mirror of Meshlet.task /
 // Meshlet.mesh / MeshletDebug.frag (Vulkan). objectMain culls per meshlet
 // (frustum + backface cone + two-sphere cluster-LOD cut) and forwards survivor
@@ -201,6 +208,7 @@ static float3 hashColor(uint x) {
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
+#if MESHLET_DEBUG_PROBES
     // Data probe (errorThreshold <= -2.5): read the REAL payload + meshlet
     // record, then emit one FIXED-position triangle colored by what was read —
     // R = vertexCount/64, G = triangleCount/128, B = (mi & 255)/255. This
@@ -412,6 +420,7 @@ static float3 hashColor(uint x) {
         }
         return;
     }
+#endif // MESHLET_DEBUG_PROBES
 
     uint mi = payload.meshletIndices[gid];
     Meshlet m = meshlets[mi];
@@ -768,6 +777,7 @@ fragment MeshletPrePassOutput fragmentPrePass(
     return out;
 }
 
+#if MESHLET_DEBUG_PROBES
 // Lowest-level probe: a MESH-ONLY pipeline (no object stage, no payload, no
 // buffer reads at all) emitting one green triangle on the left half of the
 // screen. If this rasterizes while the object->mesh synthetic (centered
@@ -792,3 +802,4 @@ fragment MeshletPrePassOutput fragmentPrePass(
         output.set_primitive_count(1);
     }
 }
+#endif // MESHLET_DEBUG_PROBES

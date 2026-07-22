@@ -6486,21 +6486,25 @@ void Renderer::createRenderPipeline() {
                 meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
                 // Mesh-ONLY probe (no object stage/payload/buffers): drawn
                 // alongside the synthetic triangle to split "object->mesh
-                // amplification broken" from "encoder-level broken".
-                d.stage = ShaderStage::Mesh; d.entryPoint = "meshSynthetic";
-                meshletSyntheticShader = rhi->createShader(d);
-                MeshPipelineDesc sp;
-                sp.taskShader = {};  // mesh-only
-                sp.meshShader = meshletSyntheticShader;
-                sp.fragmentShader = meshletFragShader;
-                sp.taskThreadgroupSize = 1;
-                sp.meshThreadgroupSize = 64;
-                sp.depthTest = false;
-                sp.depthWrite = false;
-                sp.cullMode = CullMode::None;
-                sp.hasDepthAttachment = true;
-                sp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                meshletSyntheticPipeline = rhi->createMeshPipeline(sp);
+                // amplification broken" from "encoder-level broken". Compiled out
+                // with the probe ladder (meshSynthetic is behind MESHLET_DEBUG_PROBES,
+                // so createShader would fail to find the entry point when off).
+                if constexpr (kMeshletDebugProbes) {
+                    d.stage = ShaderStage::Mesh; d.entryPoint = "meshSynthetic";
+                    meshletSyntheticShader = rhi->createShader(d);
+                    MeshPipelineDesc sp;
+                    sp.taskShader = {};  // mesh-only
+                    sp.meshShader = meshletSyntheticShader;
+                    sp.fragmentShader = meshletFragShader;
+                    sp.taskThreadgroupSize = 1;
+                    sp.meshThreadgroupSize = 64;
+                    sp.depthTest = false;
+                    sp.depthWrite = false;
+                    sp.cullMode = CullMode::None;
+                    sp.hasDepthAttachment = true;
+                    sp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    meshletSyntheticPipeline = rhi->createMeshPipeline(sp);
+                }
 
                 // Meshlet depth+normal pre-pass: same task+mesh shaders, MRT
                 // fragment into the PrePass targets (normal + albedo + depth),
@@ -7329,27 +7333,32 @@ void Renderer::drawGraphicsImGui() {
                 // overdraw). If the screen stays empty with this on, the problem is
                 // raster/depth/bindings, not the cull.
                 ImGui::Checkbox("Draw all meshlets (skip cull)", &meshletDrawAll);
-                // Diagnostic: mesh stage draws one hardcoded triangle, zero buffer
-                // reads. Visible triangle => dispatch/raster fine, bindings broken.
-                ImGui::Checkbox("Synthetic triangle (skip buffers)", &meshletSyntheticTri);
-                // Diagnostic: fixed triangle colored by the real payload+meshlet
-                // read (R=vertexCount/64, G=triangleCount/128, B=mi). Yellowish =>
-                // reads OK (bug is geometry/transform); black/wild/none => read bad.
-                ImGui::Checkbox("Data probe (color = meshlet record)", &meshletProbeData);
-                // Diagnostic: fixed triangle colored by the first real vertex
-                // position. White => read OK (bug is transform/index); cyan =>
-                // zero (buffer unbound); magenta => huge/NaN (VertexData stride).
-                ImGui::Checkbox("Vertex-read probe (color = position)", &meshletProbeVertex);
-                // Diagnostic: fixed triangle colored by clip-space landing of the
-                // first vertex. White => transform OK (bug is topology/set_index);
-                // missing R = behind camera, missing G = off-screen, missing B = bad Z.
-                ImGui::Checkbox("Transform probe (color = clip landing)", &meshletProbeXform);
-                // Diagnostic: real vertex loop, hardcoded topology. Cyan tris =>
-                // vertex loop OK (bug is the index loop); blank => vertex emission.
-                ImGui::Checkbox("Emission probe (real verts, fake topology)", &meshletProbeEmit);
-                // Diagnostic: read + validate meshletTriangles(5). In-range non-degen
-                // => buffer read OK (bug is set_index); no R => indices out of range.
-                ImGui::Checkbox("Topology probe (color = index validity)", &meshletProbeTopo);
+                // The probe ladder (fixed-triangle diagnostics + the mesh-only
+                // synthetic pipeline) is compiled out with MESHLET_DEBUG_PROBES /
+                // kMeshletDebugProbes; only surface its toggles when it's built.
+                if constexpr (kMeshletDebugProbes) {
+                    // Diagnostic: mesh stage draws one hardcoded triangle, zero buffer
+                    // reads. Visible triangle => dispatch/raster fine, bindings broken.
+                    ImGui::Checkbox("Synthetic triangle (skip buffers)", &meshletSyntheticTri);
+                    // Diagnostic: fixed triangle colored by the real payload+meshlet
+                    // read (R=vertexCount/64, G=triangleCount/128, B=mi). Yellowish =>
+                    // reads OK (bug is geometry/transform); black/wild/none => read bad.
+                    ImGui::Checkbox("Data probe (color = meshlet record)", &meshletProbeData);
+                    // Diagnostic: fixed triangle colored by the first real vertex
+                    // position. White => read OK (bug is transform/index); cyan =>
+                    // zero (buffer unbound); magenta => huge/NaN (VertexData stride).
+                    ImGui::Checkbox("Vertex-read probe (color = position)", &meshletProbeVertex);
+                    // Diagnostic: fixed triangle colored by clip-space landing of the
+                    // first vertex. White => transform OK (bug is topology/set_index);
+                    // missing R = behind camera, missing G = off-screen, missing B = bad Z.
+                    ImGui::Checkbox("Transform probe (color = clip landing)", &meshletProbeXform);
+                    // Diagnostic: real vertex loop, hardcoded topology. Cyan tris =>
+                    // vertex loop OK (bug is the index loop); blank => vertex emission.
+                    ImGui::Checkbox("Emission probe (real verts, fake topology)", &meshletProbeEmit);
+                    // Diagnostic: read + validate meshletTriangles(5). In-range non-degen
+                    // => buffer read OK (bug is set_index); no R => indices out of range.
+                    ImGui::Checkbox("Topology probe (color = index validity)", &meshletProbeTopo);
+                }
                 // One-shot GPU capture of the next frame -> .gputrace (open in Xcode).
                 // Needs the app relaunched with MTL_CAPTURE_ENABLED=1.
                 if (ImGui::Button("Capture next frame (.gputrace)")) {

@@ -1097,6 +1097,11 @@ private:
     // debug color regardless of this.
     bool meshletDebugColor = false;
     // Debug: bypass ALL meshlet culling (frustum/cone/LOD cut) — the task shader
+    // Compile gate for the meshlet bring-up "probe ladder" (the negative-
+    // errorThreshold data/vertex/transform/emission/topology/synthetic probes +
+    // the mesh-only synthetic pipeline + their UI). Off by default. MUST stay in
+    // sync with MESHLET_DEBUG_PROBES in 3d_meshlet.metal — flip BOTH to re-enable.
+    static constexpr bool kMeshletDebugProbes = false;
     // emits every meshlet when the errorThreshold it receives is negative.
     // Isolates "cull rejects everything" from raster/depth/binding problems.
     bool meshletDrawAll = false;
