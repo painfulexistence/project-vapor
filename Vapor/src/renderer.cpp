@@ -4635,6 +4635,11 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.cameraPosition = currentCamera.position;
     cloudSettings.sunDirection = glm::normalize(atmosphereData.sunDirection);
     cloudSettings.sunColor = atmosphereData.sunColor;
+    // Sun intensity from the shared atmosphere value (panel default 12), like
+    // the native-Metal path the clouds were tuned on — the struct default (22)
+    // left the RHI clouds ~1.8x brighter than the tuned look, which then also
+    // read as blown-out bloom (any cloud pixel over luminance 1 blooms).
+    cloudSettings.sunIntensity = atmosphereData.sunIntensity;
     // windSpeed is the cloud's per-medium scroll coefficient; the shared wind
     // strength scales it so the WindFieldComponent drives the scroll rate.
     cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
@@ -4698,6 +4703,13 @@ void Renderer::volumetricCloudPass() {
         rhi->setTexture(0, 0, colorRT, clampSampler);
         rhi->setTexture(0, 1, cloudHistoryRT, clampSampler);  // resolved clouds
         rhi->setTexture(0, 2, depthStencilRT, clampSampler);
+        // Camera near/far for the depth-aware upsample (same slots as the
+        // raymarch pass: Metal buffer(1), GLSL set-relative binding 3).
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        } else {
+            rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        }
         rhi->draw(3, 1, 0, 0);
         rhi->endRenderPass();
         std::swap(colorRT, tempColorRT);

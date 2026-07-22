@@ -167,8 +167,24 @@ float sampleCloudShape(vec3 worldPos) {
     return saturate(remap(perlin, worleyFBM - 1.0, 1.0, 0.0, 1.0));
 }
 
+// Curl-ish vector noise: three decorrelated gradient noises. Not a true
+// divergence-free curl, but visually equivalent wind-torn wisps at a third
+// of the cost of a finite-difference curl.
+vec3 curlDistort(vec3 p) {
+    return vec3(gradientNoise3D(p),
+                gradientNoise3D(p + vec3(31.416, 47.853, 12.793)),
+                gradientNoise3D(p + vec3(-23.144, 9.271, 61.043)));
+}
+
 float sampleCloudDetail(vec3 worldPos) {
     vec3 samplePos = worldPos + windOffset * 1.5;
+    // Wind-torn edges: distort the detail lookup with large-scale vector noise
+    // (~500 m swirls at curlNoiseScale 1; strength 0.1 → ~30 m displacement).
+    // Full-quality samples only — the cheap light-march path skips detail.
+    if (curlNoiseStrength > 0.0) {
+        samplePos += curlDistort(samplePos * (curlNoiseScale * 0.002)) *
+                     (curlNoiseStrength * 300.0);
+    }
     vec3 detailUV = samplePos * detailNoiseScale * 0.001;
     float d1 = 1.0 - worleyNoise3D(detailUV * 2.0);
     float d2 = 1.0 - worleyNoise3D(detailUV * 4.0);

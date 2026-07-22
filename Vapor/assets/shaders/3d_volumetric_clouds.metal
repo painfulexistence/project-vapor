@@ -116,10 +116,27 @@ float sampleCloudShape(float3 worldPos, constant VolumetricCloudData& data) {
     return saturate(baseShape);
 }
 
+// Curl-ish vector noise: three decorrelated gradient noises. Not a true
+// divergence-free curl, but visually equivalent wind-torn wisps at a third
+// of the cost of a finite-difference curl. (Twin of CloudRaymarch.frag.)
+float3 curlDistort(float3 p) {
+    return float3(gradientNoise3D(p),
+                  gradientNoise3D(p + float3(31.416, 47.853, 12.793)),
+                  gradientNoise3D(p + float3(-23.144, 9.271, 61.043)));
+}
+
 // Sample cloud detail
 float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data) {
     // Apply wind (detail moves faster)
     float3 samplePos = worldPos + data.windOffset * 1.5;
+
+    // Wind-torn edges: distort the detail lookup with large-scale vector noise
+    // (~500 m swirls at curlNoiseScale 1; strength 0.1 → ~30 m displacement).
+    // Full-quality samples only — the cheap light-march path skips detail.
+    if (data.curlNoiseStrength > 0.0) {
+        samplePos += curlDistort(samplePos * (data.curlNoiseScale * 0.002)) *
+                     (data.curlNoiseStrength * 300.0);
+    }
 
     // High frequency detail noise
     float3 detailUV = samplePos * data.detailNoiseScale * 0.001;
@@ -501,14 +518,42 @@ fragment float4 cloudUpscaleComposite(
     texture2d<float, access::sample> sceneColor [[texture(0)]],
     texture2d<float, access::sample> cloudTexture [[texture(1)]],
     texture2d<float, access::sample> sceneDepth [[texture(2)]],
-    constant VolumetricCloudData& data [[buffer(0)]]
+    constant VolumetricCloudData& data [[buffer(0)]],
+    constant CameraData& camera [[buffer(1)]]
 ) {
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
 
     float4 scene = sceneColor.sample(linearSampler, in.uv);
-    float4 cloud = cloudTexture.sample(linearSampler, in.uv);
 
-    // Depth-aware upscale could be added here for better quality
+    // Depth-aware (bilateral) upsample — twin of CloudComposite.frag: the four
+    // nearest coarse texels weighted by bilinear weight x depth similarity, so
+    // cloud values don't bleed across geometry edges (eave/sky halo).
+    const float near = camera.near;
+    const float far  = camera.far;
+    float dCenterRaw = sceneDepth.sample(linearSampler, in.uv).r;
+    float dCenter = near * far / (far - dCenterRaw * (far - near));
+
+    float2 cloudSize = float2(cloudTexture.get_width(), cloudTexture.get_height());
+    float2 coord = in.uv * cloudSize - 0.5;
+    float2 base = floor(coord);
+    float2 f = coord - base;
+
+    float4 cloudSum = float4(0.0);
+    float wSum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        float2 off = float2(float(i & 1), float(i >> 1));
+        float2 uvTap = (base + off + 0.5) / cloudSize;  // texel center = point value
+        float wBilin = mix(1.0 - f.x, f.x, off.x) * mix(1.0 - f.y, f.y, off.y);
+        float dTapRaw = sceneDepth.sample(linearSampler, uvTap).r;
+        float dTap = near * far / (far - dTapRaw * (far - near));
+        // ~10%-of-depth tolerance: taps behind a different surface get ~zero weight.
+        float wDepth = exp(-abs(dTap - dCenter) / (0.1 * dCenter + 0.5));
+        float w = wBilin * wDepth;
+        cloudSum += cloudTexture.sample(linearSampler, uvTap) * w;
+        wSum += w;
+    }
+    float4 cloud = wSum > 1e-4 ? cloudSum / wSum
+                               : cloudTexture.sample(linearSampler, in.uv);
 
     // Composite: scene * transmittance + scattering
     float3 result = scene.rgb * cloud.a + cloud.rgb;
