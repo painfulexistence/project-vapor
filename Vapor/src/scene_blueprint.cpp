@@ -101,12 +101,14 @@ BlueprintComponents& BlueprintComponents::instance() {
     static BlueprintComponents registry = [] {
         BlueprintComponents r;
         r.registerComponent<SunComponent>("sun");
+        r.registerComponent<MoonComponent>("moon");
         r.registerComponent<PointLightComponent>("pointLight");
         r.registerComponent<DirectionalLightComponent>("directionalLight");
         r.registerComponent<SpotLightComponent>("spotLight");
         r.registerComponent<RectLightComponent>("rectLight");
         r.registerComponent<SkyComponent>("sky");
         r.registerComponent<TimeOfDayComponent>("timeOfDay");
+        r.registerComponent<VolumetricFogComponent>("volumetricFog");
         r.registerComponent<VirtualCameraComponent>("virtualCamera");
         r.registerComponent<FlyCameraComponent>("flyCamera");
         r.registerComponent<FollowCameraComponent>("followCamera");

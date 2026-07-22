@@ -61,10 +61,18 @@
       }
     },
     {
+      "name": "Moon Light",
+      "components": {
+        "directionalLight": { "direction": [-0.4472136, -0.8944272, 0.0], "color": [0.55, 0.65, 0.9], "intensity": 0.0 },
+        "moon": {}
+      }
+    },
+    {
       "name": "Sky",
       "components": {
         "sky": {},
-        "timeOfDay": { "latitudeDeg": 0.0 }
+        "timeOfDay": { "latitudeDeg": 0.0 },
+        "volumetricFog": { "enabled": false }
       }
     },
     {
@@ -161,12 +169,12 @@
     { "name": "Page LoadingScreen", "components": { "uiPage": { "id": "LoadingScreen", "path": "ui/menus/loading_screen.rml",  "lazy": true } } },
     {
       "name": "Particle Attractor A",
-      "position": [0.0, 3.0, 0.0],
+      "position": [0.0, 14.0, 0.0],
       "components": { "particleAttractor": { "strength": 40.0 } }
     },
     {
       "name": "Particle Attractor B",
-      "position": [6.0, 1.0, -4.0],
+      "position": [6.0, 12.0, -4.0],
       "components": { "particleAttractor": { "strength": 18.0 } }
     },
     {

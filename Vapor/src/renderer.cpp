@@ -208,6 +208,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         gradientDataBuffer = rhi->createBuffer(gradDesc);
         rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
 
+        // Night-sky (stars + moon) visuals; re-uploaded by setSky. Same pattern.
+        BufferDesc nsDesc;
+        nsDesc.size = sizeof(NightSkyRenderData);
+        nsDesc.usage = BufferUsage::Uniform;
+        nsDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        nightSkyDataBuffer = rhi->createBuffer(nsDesc);
+        rhi->updateBuffer(nightSkyDataBuffer, &nightSkyData, 0, sizeof(nightSkyData));
+
         BufferDesc lsDesc;
         lsDesc.size = sizeof(LightScatteringRenderData);
         lsDesc.usage = BufferUsage::Uniform;
@@ -221,6 +229,13 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         fogDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         FogRenderData fogDefaults;
         createFrameSlottedBuffer(fogDataBuffer, fogDesc, &fogDefaults, sizeof(fogDefaults));
+
+        BufferDesc hfogDesc;
+        hfogDesc.size = sizeof(HeightFogRenderData);
+        hfogDesc.usage = BufferUsage::Uniform;
+        hfogDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        HeightFogRenderData hfogDefaults;
+        createFrameSlottedBuffer(heightFogDataBuffer, hfogDesc, &hfogDefaults, sizeof(hfogDefaults));
 
         BufferDesc volDesc;
         volDesc.size = sizeof(VolumeRenderData);
@@ -1159,8 +1174,13 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Particles",
         [](Renderer& r) { r.particlePass(); });
 
-    // Height/distance fog before bloom (so the fogged scene feeds bloom/god
-    // rays); swaps colorRT with tempColorRT internally.
+    // Cheap analytic height fog before bloom (so the fogged scene feeds bloom/
+    // god rays); swaps colorRT with tempColorRT internally. On by default.
+    renderGraph.addPass("HeightFog",
+        [](Renderer& r) { r.heightFogPass(); });
+
+    // Expensive per-light volumetric fog (opt-in, ECS-driven); same colorRT/
+    // tempColorRT swap, runs after the cheap height fog so both can compose.
     renderGraph.addPass("VolumetricFog",
         [](Renderer& r) { r.volumetricFogPass(); });
 
@@ -1763,26 +1783,32 @@ void Renderer::mainRenderPass() {
         // free on both paths (13/14 are the bindless tables, 16 is spotLights).
         bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
         if (reflOn) rhi->setTexture(0, 16, reflectionRT, clampSampler);
-        glm::vec2 reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
-        rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
-        // Spot lights (buffer 16) + counts/flags (buffer 15). buffer 14 is the
-        // bindless SystemTexs table's slot, so spot lights use 16 (see the shader
-        // note in 3d_pbr_normal_mapped.metal). Flag bit0 says the point-shadow
-        // texture carries the RGB channel format (R point / G rect / B spot); 0
-        // when stochastic shadows are off, so rect/spot stay unshadowed instead
-        // of sampling the (white) placeholder's channels.
+        // Spot lights (buffer 16). buffer 14 is the bindless SystemTexs table's
+        // slot, so spot lights use 16 (see 3d_pbr_normal_mapped.metal).
         rhi->setFragmentBuffer(16, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
-        glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
-                                  (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
-        rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
-        // RT refraction result (texture 17) + params (buffer 18), same
-        // runtime-gated contract as the reflection pair above. Weighted per
-        // pixel by the material's transmission factor in the shader.
+        // RT refraction result (texture 17), same runtime gate as reflection.
         bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
                       capabilities.raytracing && refractionRT.isValid();
         if (refrOn) rhi->setTexture(0, 17, refractionRT, clampSampler);
-        glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
-        rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
+        // RT reflection/refraction composite params + the spot-count/stochastic
+        // flag are read by the MSL PBR from fragment buffers 15/17/18. On Vulkan
+        // setFragmentBytes(N) writes push-constant offset 64+(N%4)*16, so 15/17/18
+        // ALIAS dirLightCount(binding 11 -> 112), spotRectCounts(binding 1 -> 80)
+        // and mainDebugFlags(binding 2 -> 96) — clobbering real lighting fields
+        // (corrupt directional/spot counts -> green ghosting when RT reflection is
+        // on). RHIMain.frag doesn't read these params (RT composite is Metal-only;
+        // the GLSL spot count comes from spotRectCounts@80), so push them on Metal
+        // only. The stochastic-shadow flag bit0 says whether the point-shadow
+        // texture carries the RGB channel format (R point / G rect / B spot).
+        if (backend == GraphicsBackend::Metal) {
+            glm::vec2  reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
+            glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
+                                      (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u);
+            glm::vec2  refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
+            rhi->setFragmentBytes(&reflParams, sizeof(glm::vec2), 17);
+            rhi->setFragmentBytes(&spotRectParams, sizeof(glm::uvec2), 15);
+            rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
+        }
     }
 
     // GPU-driven path is used only when enabled AND the cull pipeline/args
@@ -2560,6 +2586,13 @@ void Renderer::sunFlarePass() {
     }
     glm::vec2 screenSize(rhi->getSwapchainWidth(), rhi->getSwapchainHeight());
     glm::vec3 sunDir = glm::normalize(atmosphereData.sunDirection);
+    // Fade the flare out as the sun drops below the horizon (night). sunDirection
+    // points toward the sun, so its .y is the sun elevation — the same signal the
+    // Atmosphere pass uses for stars/moon. ToD drives sunDirection, so this makes
+    // the flare follow the day/night cycle without any extra plumbing.
+    float e = glm::clamp((sunDir.y + 0.06f) / 0.12f, 0.0f, 1.0f);
+    float dayFactor = e * e * (3.0f - 2.0f * e);  // smoothstep(-0.06, 0.06, sunDir.y)
+    if (dayFactor <= 0.0f) return;  // sun below horizon -> no flare
     glm::vec3 sunWorldPos = currentCamera.position + sunDir * 10000.0f;
     glm::vec4 sunClip = (currentCamera.proj * currentCamera.view) * glm::vec4(sunWorldPos, 1.0f);
     if (sunClip.w <= 0.0f) return;
@@ -2567,11 +2600,14 @@ void Renderer::sunFlarePass() {
     glm::vec2 sunScreenPos = sunNDC * 0.5f + 0.5f;
     sunScreenPos.y = 1.0f - sunScreenPos.y;
 
-    sunFlareSettings.sunScreenPos = sunScreenPos;
-    sunFlareSettings.aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
-    sunFlareSettings.sunColor = atmosphereData.sunColor;
+    // Local copy so the day/night scale never mutates the panel-set intensity.
+    SunFlareRenderData sf = sunFlareSettings;
+    sf.sunScreenPos = sunScreenPos;
+    sf.aspectRatio = glm::vec2(screenSize.x / screenSize.y, 1.0f);
+    sf.sunColor = atmosphereData.sunColor;
+    sf.intensity = sunFlareSettings.intensity * dayFactor;
     // Occlusion + edge fade are computed in-shader (smooth depth-disk test).
-    rhi->updateBuffer(sunFlareDataBuffer, &sunFlareSettings, 0, sizeof(sunFlareSettings));
+    rhi->updateBuffer(sunFlareDataBuffer, &sf, 0, sizeof(sf));
 
     RenderPassDesc rp;
     rp.name = "SunFlare";
@@ -3902,11 +3938,14 @@ void Renderer::skyAtmospherePass() {
     } else {
         rhi->bindPipeline(atmospherePipeline);
         if (backend == GraphicsBackend::Metal) {
-            // 3d_atmosphere.metal: camera at buffer(0), atmosphere at buffer(1).
+            // 3d_atmosphere.metal: camera(0), atmosphere(1), night sky(2).
             rhi->setFragmentBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setFragmentBuffer(1, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+            rhi->setFragmentBuffer(2, nightSkyDataBuffer, 0, sizeof(NightSkyRenderData));
         } else {
+            // Atmosphere.frag: atmosphere set1/b0, night sky set1/b2, camera set1/b3.
             rhi->setFragmentBuffer(0, atmosphereDataBuffer, 0, sizeof(AtmosphereRenderData));
+            rhi->setFragmentBuffer(2, nightSkyDataBuffer, 0, sizeof(NightSkyRenderData));
             rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         }
     }
@@ -3962,6 +4001,46 @@ void Renderer::lightScatteringPass() {
     frameCounter++;
     rhi->draw(3, 1, 0, 0);
     rhi->endRenderPass();
+}
+
+// Cheap analytic exponential height fog: one fullscreen pass, no shadows/lights.
+// Reads colorRT + depth, writes tempColorRT, then swaps so downstream passes
+// (bloom/god rays/post) see the fogged scene. The expensive per-light volumetric
+// variant is volumetricFogPass (now ECS-driven).
+void Renderer::heightFogPass() {
+    if (!heightFogEnabled || !heightFogPipeline.isValid() ||
+        !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
+        !heightFogDataBuffer.isValid()) {
+        return;
+    }
+
+    // Tunables from the persistent settings; per-frame fields (matrices/camera/
+    // sun) overwritten below. Sun follows the atmosphere/sky (light-driven).
+    HeightFogRenderData hf = heightFogSettings;
+    hf.invViewProj = glm::inverse(currentCamera.proj * currentCamera.view);
+    hf.cameraPosition = glm::vec4(currentCamera.position, 0.0f);
+    hf.sunDirection = glm::vec4(glm::normalize(atmosphereData.sunDirection), 0.0f);
+    hf.sunColorIntensity = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
+    rhi->updateBuffer(heightFogDataBuffer, &hf, 0, sizeof(hf));
+
+    RenderPassDesc rp;
+    rp.name = "HeightFog";
+    rp.colorAttachments.push_back(tempColorRT);
+    rp.loadColor.push_back(false);  // every pixel written
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(heightFogPipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, depthStencilRT, clampSampler);
+    if (backend == GraphicsBackend::Metal) {
+        // 3d_height_fog.metal reads HeightFogData at buffer(0) (inline bytes).
+        rhi->setFragmentBytes(&hf, sizeof(hf), 0);
+    } else {
+        rhi->setFragmentBuffer(0, heightFogDataBuffer, 0, sizeof(HeightFogRenderData));
+    }
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+
+    std::swap(colorRT, tempColorRT);  // colorRT now holds the fogged scene
 }
 
 // Simple height/distance fog: read colorRT + depth, write the fogged result to
@@ -4482,6 +4561,15 @@ void Renderer::setSky(const SkyRenderData& sky) {
     if (gradientDataBuffer.isValid()) {
         rhi->updateBuffer(gradientDataBuffer, &gradientData, 0, sizeof(gradientData));
     }
+    // Night-sky (stars + moon) visuals for the Atmosphere pass.
+    nightSkyData.moonColor      = glm::vec4(sky.moonColor, 0.0f);
+    nightSkyData.starDensity    = sky.starDensity;
+    nightSkyData.starBrightness = sky.starBrightness;
+    nightSkyData.moonSize       = sky.moonSize;
+    nightSkyData.moonBrightness = sky.moonBrightness;
+    if (nightSkyDataBuffer.isValid()) {
+        rhi->updateBuffer(nightSkyDataBuffer, &nightSkyData, 0, sizeof(nightSkyData));
+    }
     iblNeedsUpdate = true;  // re-bake IBL from the new sky
 }
 
@@ -4493,6 +4581,22 @@ void Renderer::setWind(const WindRenderData& wind) {
     cloudSettings.windDirection = wind.direction;
     fogSettings.windDirection = wind.direction;
     m_windStrength = wind.strength;
+}
+
+void Renderer::setVolumetricFog(const VolumetricFogRenderData& fog) {
+    // The VolumetricFogComponent is the SSOT for the raymarch: copy its tunables
+    // into the fog buffer source and gate the pass on `enabled`. Per-frame fields
+    // (matrices/camera/sun) and the wind scroll are still filled in the pass.
+    volumetricFogEnabled       = fog.enabled;
+    fogSettings.fogDensity     = fog.fogDensity;
+    fogSettings.fogHeightFalloff = fog.fogHeightFalloff;
+    fogSettings.fogBaseHeight  = fog.fogBaseHeight;
+    fogSettings.fogMaxHeight   = fog.fogMaxHeight;
+    fogSettings.anisotropy     = fog.anisotropy;
+    fogSettings.ambientIntensity = fog.ambientIntensity;
+    fogSettings.noiseScale     = fog.noiseScale;
+    fogSettings.noiseIntensity = fog.noiseIntensity;
+    fogSettings.windSpeed      = fog.windSpeed;
 }
 
 void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {
@@ -5613,7 +5717,11 @@ void Renderer::createRenderPipeline() {
                     "shaders/AODenoise.frag.spv", dummy, BlendMode::Opaque, PixelFormat::R16_FLOAT);
             }
 
-            // Simple height/distance fog: fullscreen color+depth -> tempColorRT.
+            // Cheap analytic height fog: fullscreen color+depth -> tempColorRT.
+            heightFogPipeline = makeFullscreenFragPipeline(
+                "shaders/HeightFog.frag.spv", heightFogShader, BlendMode::Opaque);
+
+            // Expensive per-light volumetric fog: fullscreen color+depth -> tempColorRT.
             volumetricFogPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumetricFog.frag.spv", volumetricFogShader, BlendMode::Opaque);
 
@@ -6020,6 +6128,8 @@ void Renderer::createRenderPipeline() {
                                            BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         lightScatteringPipeline = makeMetalPass("shaders/3d_light_scattering.metal", "vertexMain", "fragmentMain",
                                                 BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        heightFogPipeline = makeMetalPass("shaders/3d_height_fog.metal", "heightFogVertex", "heightFogFragment",
+                                          BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
@@ -7094,6 +7204,10 @@ void Renderer::drawGraphicsImGui() {
             ImGui::TreePop();
         }
         if (ImGui::Button("Refresh IBL")) iblNeedsUpdate = true;
+        ImGui::SameLine();
+        // Sun-driven auto rebake (SkySystem's throttled requestIBLUpdate). Off by
+        // default: a moving sun would otherwise re-bake the IBL every threshold step.
+        ImGui::Checkbox("Auto rebake", &m_iblAutoRebake);
         if (ch) iblNeedsUpdate = true;  // sky changed -> recapture IBL (native behavior)
         // Debug: the baked environment cubemap, unwrapped to equirect. Off by
         // default — the pass stalls (single-buffered RT read by ImGui), so only
@@ -7197,14 +7311,15 @@ void Renderer::drawGraphicsImGui() {
     }
 
     if (ImGui::TreeNode("Height Fog")) {
-        ImGui::Checkbox("Enabled", &volumetricFogEnabled);
-        ImGui::DragFloat("Density", &fogSettings.fogDensity, 0.001f, 0.0f, 0.5f);
-        ImGui::DragFloat("Height Falloff", &fogSettings.fogHeightFalloff, 0.01f, 0.001f, 1.0f);
-        ImGui::DragFloat("Base Height", &fogSettings.fogBaseHeight, 1.0f, -100.0f, 100.0f);
-        ImGui::DragFloat("Max Height", &fogSettings.fogMaxHeight, 10.0f, 0.0f, 500.0f);
-        ImGui::DragFloat("Anisotropy", &fogSettings.anisotropy, 0.01f, -0.99f, 0.99f);
-        ImGui::DragFloat("Ambient Intensity", &fogSettings.ambientIntensity, 0.01f, 0.0f, 2.0f);
-        if (ImGui::Button("Reset to Defaults")) fogSettings = FogRenderData{};
+        // Cheap analytic exponential height fog (the common-case global fog).
+        ImGui::Checkbox("Enabled", &heightFogEnabled);
+        ImGui::DragFloat("Density", &heightFogSettings.fogColorDensity.a, 0.001f, 0.0f, 0.5f);
+        ImGui::DragFloat("Height Falloff", &heightFogSettings.params.x, 0.01f, 0.001f, 1.0f);
+        ImGui::DragFloat("Base Height", &heightFogSettings.params.y, 1.0f, -100.0f, 100.0f);
+        ImGui::DragFloat("Anisotropy", &heightFogSettings.params.z, 0.01f, -0.99f, 0.99f);
+        ImGui::DragFloat("Ambient Intensity", &heightFogSettings.params.w, 0.01f, 0.0f, 2.0f);
+        ImGui::ColorEdit3("Fog Color", &heightFogSettings.fogColorDensity.x);
+        if (ImGui::Button("Reset to Defaults")) heightFogSettings = HeightFogRenderData{};
         ImGui::TreePop();
     }
 

@@ -192,6 +192,12 @@ namespace Vapor {
     // the time-of-day driver identify the sun by this tag, never by list order.
     struct SunComponent {};
 
+    // Tags the directional light that acts as the moon. TimeOfDaySystem drives
+    // its direction (opposite the sun), a cool dim colour, and an intensity that
+    // ramps up while the moon is above the horizon (i.e. at night). Put it on a
+    // second directional-light entity; LightGatherSystem gathers it after the sun.
+    struct MoonComponent {};
+
     // Sky authoring — the gameplay layer's choice of sky and its tunables. Put
     // one on an environment entity (singleton). SkySystem resolves it into a
     // SkyRenderData and pushes it to the renderer whenever `dirty` is set. The
@@ -214,6 +220,12 @@ namespace Vapor {
         glm::vec3 gradientZenith  = glm::vec3(0.18f, 0.34f, 0.62f);
         glm::vec3 gradientHorizon = glm::vec3(0.62f, 0.74f, 0.88f);
         glm::vec3 gradientGround  = glm::vec3(0.20f, 0.18f, 0.16f);
+        // Night-sky visuals (Atmosphere mode): stars + moon that fade in at night.
+        float starDensity    = 1000.0f;  // more = smaller/denser stars
+        float starBrightness = 15.0f;
+        glm::vec3 moonColor  = glm::vec3(0.92f, 0.93f, 1.0f);
+        float moonSize       = 0.0010f;  // angular size (1 - cos radius)
+        float moonBrightness = 1.2f;
         bool dirty = true;  // set when edited; SkySystem re-pushes to the renderer
 
         // IBL rebake throttle: SkySystem re-bakes the environment IBL when the
@@ -234,6 +246,10 @@ namespace Vapor {
         float dayLengthSeconds = 120.0f;  // real seconds per in-game day; 0 = frozen
         float latitudeDeg = 25.0f;        // tilts the sun's arc toward +Z (south)
         float maxSunIntensity = 10.0f;    // sun intensity at the zenith
+        // Moonlight: drives the MoonComponent-tagged directional light. The moon
+        // sits opposite the sun, so it is up (and lit) while the sun is down.
+        float maxMoonIntensity = 0.4f;    // moon intensity when high at night
+        glm::vec3 moonLightColor = glm::vec3(0.55f, 0.65f, 0.9f);  // cool blue
         bool  paused = false;
     };
 
@@ -329,6 +345,24 @@ namespace Vapor {
         glm::vec3 direction  = glm::vec3(1.0f, 0.0f, 0.0f);
         float     strength   = 0.0f;
         float     turbulence = 0.0f; // curl noise strength for the particle sim
+    };
+
+    // Opt-in per-light volumetric fog (the expensive raymarch). One singleton per
+    // scene; VolumetricFogSystem pushes it to the renderer each frame. The cheap
+    // always-on global fog is renderer-side "Height Fog"; this is the upgrade you
+    // add only where you want light shafts. First version is a single global
+    // volume — bounds + volume-blend come later.
+    struct VolumetricFogComponent {
+        bool  enabled = true;
+        float density = 0.02f;
+        float heightFalloff = 0.1f;
+        float baseHeight = 0.0f;
+        float maxHeight = 100.0f;
+        float anisotropy = 0.6f;
+        float ambientIntensity = 0.3f;
+        float noiseScale = 0.01f;
+        float noiseIntensity = 0.5f;
+        float windSpeed = 1.0f;
     };
 
     // Per-emitter configuration.
