@@ -1945,11 +1945,11 @@ void Renderer::mainRenderPass() {
         // buffers hold the same C++ types the main PBR fragment binds
         // (DirectionalLightData≡DirLight, PointLightData≡PointLight, ...), so
         // the meshlet fragment reads them at its own buffer indices. Full forward
-        // shading parity now: tiled point lights, RT-shadow near region + 3-cascade
+        // shading parity: tiled point lights, RT-shadow near region + 3-cascade
         // PSSM + cascade blend + RT↔PSSM cross-fade, SSCS, stochastic point/rect/
-        // spot shadows, screen-space AO on ambient, GIBS GI, and the RT reflection/
-        // refraction composite. Only triplanar/prototype UVs remain forward-only.
-        // Vulkan meshlet uses MeshletDebug.frag and skips all this.
+        // spot shadows, screen-space AO on ambient, GIBS GI, the RT reflection/
+        // refraction composite, and triplanar/prototype UVs (mesh stage carries
+        // scaledLocalPos + localNormal). Vulkan meshlet uses MeshletDebug.frag.
         if (backend == GraphicsBackend::Metal) {
             rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setFragmentBuffer(2, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);

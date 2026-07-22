@@ -146,6 +146,8 @@ struct MeshletVertexOut {
     float2 uv;           // material-table sampling (real path only)
     float3 worldPosition;// PBR shade: view dir + point/spot/rect lights (real path)
     float4 worldTangent; // PBR shade: TBN for normal mapping (.w = handedness)
+    float3 scaledLocalPos;// prototype/triplanar UV (object-space mode)
+    float3 localNormal;   // prototype/triplanar UV (object-space mode)
     uint   materialID [[flat]];  // bindless material-table index (real path only)
 };
 
@@ -441,6 +443,11 @@ static float3 hashColor(uint x) {
         vout.worldTangent = float4(normalMatrix * tan.xyz, tan.w);
         vout.worldPosition = wp.xyz;
         vout.uv = float2(vertices[vi].uv);
+        // Prototype/triplanar UV inputs (object-space mode): scaled local pos +
+        // untransformed local normal. Same as the PBR vertex shader.
+        float3 lscale = float3(length(model[0].xyz), length(model[1].xyz), length(model[2].xyz));
+        vout.scaledLocalPos = float3(vertices[vi].position) * lscale;
+        vout.localNormal = float3(vertices[vi].normal.xyz);
         // Same materialID the PBR path reads (instances[iid].materialID). Constant
         // across the meshlet's instance, so [[flat]] on the varying.
         vout.materialID = instances[params.instanceID].materialID;
@@ -603,6 +610,23 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     constexpr sampler s(address::repeat, filter::linear, mip_filter::linear);
     MeshletMaterialTexs tex = materialTexs[in.materialID];
     MaterialData material = materials[in.materialID];
+
+    // Prototype UV: triplanar mapping (world or object space) — same block as the
+    // forward fragment. 0 = Off, 1 = World Space, 2 = Object Space.
+    if (material.prototypeUVMode > 0.5) {
+        float3 pos;
+        float3 n;
+        if (material.prototypeUVMode > 1.5) {
+            pos = in.scaledLocalPos;
+            n = abs(normalize(in.localNormal));
+        } else {
+            pos = in.worldPosition;
+            n = abs(normalize(in.worldNormal));
+        }
+        if (n.x > n.y && n.x > n.z)      in.uv = pos.yz * material.uvScale;
+        else if (n.y > n.z)              in.uv = pos.xz * material.uvScale;
+        else                             in.uv = pos.xy * material.uvScale;
+    }
 
     float4 baseColor = tex.albedo.sample(s, in.uv);
     // glTF MASK cutout (per-material cutoff in emissiveFactor.a; 0 = disabled).
