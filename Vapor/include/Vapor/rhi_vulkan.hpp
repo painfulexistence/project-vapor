@@ -85,7 +85,6 @@ public:
     using RHI::updateTexture;
     void generateMipmaps(TextureHandle handle) override;
     void copyTexture(TextureHandle src, Uint32 srcMip, TextureHandle dst, Uint32 dstMip) override;
-    void prepareTextureForSampling(TextureHandle handle) override;
     void flushUploads() override;
 
     BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;

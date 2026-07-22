@@ -567,16 +567,6 @@ public:
     virtual void copyTexture(TextureHandle /*src*/, Uint32 /*srcMip*/,
                              TextureHandle /*dst*/, Uint32 /*dstMip*/) {}
 
-    // Transition a texture into the shader-read layout so a following graphics
-    // pass can sample it via setTexture (which does NOT itself transition — see
-    // copyTexture's note). Call this BETWEEN passes (never inside a render
-    // pass) for a texture whose last write was a compute storage image: those
-    // sit in GENERAL and would otherwise be sampled in the wrong layout,
-    // tripping VUID-VkDescriptorImageInfo-imageLayout-00344. Idempotent — a
-    // no-op when the texture is already shader-readable. Default no-op for
-    // backends that track image layout automatically (Metal).
-    virtual void prepareTextureForSampling(TextureHandle /*handle*/) {}
-
     // Uploads to GPU-only resources are recorded into a shared upload command
     // stream and submitted automatically before the next frame's rendering
     // (or when the staging ring fills). Call this to force an immediate

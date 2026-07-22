@@ -98,7 +98,6 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
-    src/voxel_world.cpp
     src/terrain_world.cpp
     src/terrain_texture_gen.cpp
     # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)

@@ -192,14 +192,6 @@ namespace detail {
         } else if constexpr (std::is_same_v<V, glm::vec4>) {
             if (j.is_array() && j.size() >= 4)
                 out = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
-        } else if constexpr (std::is_same_v<V, glm::ivec2>) {
-            if (j.is_array() && j.size() >= 2) out = { j[0].get<int>(), j[1].get<int>() };
-        } else if constexpr (std::is_same_v<V, glm::ivec3>) {
-            // e.g. VoxelVolumeComponent::gridDim
-            if (j.is_array() && j.size() >= 3) out = { j[0].get<int>(), j[1].get<int>(), j[2].get<int>() };
-        } else if constexpr (std::is_same_v<V, glm::ivec4>) {
-            if (j.is_array() && j.size() >= 4)
-                out = { j[0].get<int>(), j[1].get<int>(), j[2].get<int>(), j[3].get<int>() };
         } else if constexpr (std::is_same_v<V, glm::quat>) {
             // [x, y, z, w] — the glTF layout, same as EntityBlueprint rotation.
             if (j.is_array() && j.size() >= 4)

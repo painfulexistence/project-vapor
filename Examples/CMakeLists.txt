@@ -2,14 +2,10 @@
 # the counterpart of Atmospheric's Examples/ tree.
 #
 # Drop the intermediate Examples/ path component from the build tree so each
-# app lands at build/<Name>/ (e.g. build/MicroVoxel/microvoxel) instead of
-# build/Examples/MicroVoxel/microvoxel. The value is inherited by each
-# subdirectory below at add_subdirectory time; every example keeps its own
+# app lands at build/<Name>/ (e.g. build/TerrainStreaming/terrainstreaming)
+# instead of build/Examples/TerrainStreaming/terrainstreaming. The value is
+# inherited by each subdirectory at add_subdirectory time; every example keeps its own
 # output directory, so its Res/ (engine + game assets) stays self-contained
 # exactly as before.
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/MicroVoxel")
-add_subdirectory(MicroVoxel)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/USDViewer")
-add_subdirectory(USDViewer)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/TerrainStreaming")
 add_subdirectory(TerrainStreaming)

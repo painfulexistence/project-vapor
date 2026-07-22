@@ -3497,25 +3497,6 @@ void RHI_Vulkan::setComputeSampledTexture(Uint32 binding, TextureHandle texture,
     }
 }
 
-void RHI_Vulkan::prepareTextureForSampling(TextureHandle handle) {
-    auto it = textures.find(handle.id);
-    if (it == textures.end()) {
-        return;
-    }
-    // flushDescriptors writes every graphics texture descriptor with layout
-    // SHADER_READ_ONLY_OPTIMAL, but setTexture records no barrier. A texture
-    // whose last write was a compute storage image sits in GENERAL; move it to
-    // the shader-read layout here so the following graphics sample is valid.
-    // Must run outside any render pass (between passes) — the same rule as
-    // setComputeSampledTexture, which this mirrors. Idempotent.
-    if (it->second.currentLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        return;
-    }
-    transitionImage(it->second.image, it->second.currentLayout,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
-    it->second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-}
-
 void RHI_Vulkan::flushComputeDescriptors() {
     if (!computeDescriptorsDirty || currentCommandBuffer == VK_NULL_HANDLE) {
         return;

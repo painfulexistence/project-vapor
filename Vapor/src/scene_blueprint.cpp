@@ -148,10 +148,9 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<FlyCameraComponent>("flyCamera");
         r.registerComponent<FollowCameraComponent>("followCamera");
         r.registerComponent<WindFieldComponent>("windField");
-        // Procedural worlds: both are data-only configs whose Hidden<> state
-        // the owning system (VoxelVolumeSystem / TerrainSystem) creates on
-        // first sight — exactly the shape the PFR applier authors.
-        r.registerComponent<VoxelVolumeComponent>("voxelVolume");
+        // Procedural world: a data-only config whose Hidden<> state the owning
+        // TerrainSystem creates on first sight — exactly the shape the PFR
+        // applier authors.
         r.registerComponent<StreamingTerrainComponent>("streamingTerrain");
         r.registerComponent<ParticleEmitterComponent>("particleEmitter");
         r.registerComponent<ParticleAttractorComponent>("particleAttractor");
