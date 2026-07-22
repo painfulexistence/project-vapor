@@ -46,21 +46,66 @@ layout(std430, set = 1, binding = 0) readonly buffer ParticleBuffer {
     Particle particles[];
 };
 
+// Scene depth texture for ground clamping (bound at set 2)
+layout(set = 2, binding = 1) uniform sampler2D sceneDepth;
+
+// Per-emitter parameters (48 bytes: velocityStretch + depth effects)
 layout(push_constant) uniform PushConstants {
     float particleSize;
-    float useTexture;       // consumed by the fragment stage
-    float velocityStretch;  // > 0: stretch the quad along velocity (rain streaks)
-    float _pad3;
+    float useTexture;         // > 0.5: sample particleTexture; else procedural disc
+    float velocityStretch;    // > 0: stretch the quad along velocity (rain streaks)
+    float depthFadeEnabled;   // > 0.5: apply depth fade in fragment
+    float depthFadeDistance;
+    float groundClampEnabled; // > 0.5: clamp to depth surface
+    float groundClampOffset;  // height above surface
+    float _pad;
 } pushConstants;
 
 layout(location = 0) out vec2 fragUV;
 layout(location = 1) out vec4 fragColor;
+layout(location = 2) out float fragDepth;      // linear view-space depth for depth fade
+layout(location = 3) out vec2 fragScreenUV;    // screen UV for depth texture sampling
+
+float linearizeDepth(float d) {
+    return near * far / (far - d * (far - near));
+}
+
+vec3 reconstructWorldPosition(vec2 screenUV, float depth) {
+    vec2 ndc = screenUV * 2.0 - 1.0;
+    vec4 clipPos = vec4(ndc, depth * 2.0 - 1.0, 1.0);
+    vec4 viewPos = invProj * clipPos;
+    viewPos /= viewPos.w;
+    vec4 worldPos = invView * viewPos;
+    return worldPos.xyz;
+}
 
 void main() {
     uint particleIndex = gl_InstanceIndex;
     uint vertexIndex = gl_VertexIndex;
 
     Particle p = particles[particleIndex];
+    vec3 worldPos = p.position;
+
+    // Ground clamping: project particle to screen, sample depth, clamp to surface
+    if (pushConstants.groundClampEnabled > 0.5) {
+        vec4 clipPos = proj * view * vec4(worldPos, 1.0);
+        if (clipPos.w > 0.0) {
+            vec2 ndc = clipPos.xy / clipPos.w;
+            vec2 screenUV = ndc * 0.5 + 0.5;
+
+            // Only clamp if particle is on screen
+            if (screenUV.x >= 0.0 && screenUV.x <= 1.0 &&
+                screenUV.y >= 0.0 && screenUV.y <= 1.0) {
+                float sceneDepthSample = texture(sceneDepth, screenUV).r;
+                vec3 surfacePos = reconstructWorldPosition(screenUV, sceneDepthSample);
+
+                // Clamp particle Y to surface + offset
+                if (worldPos.y < surfacePos.y + pushConstants.groundClampOffset) {
+                    worldPos.y = surfacePos.y + pushConstants.groundClampOffset;
+                }
+            }
+        }
+    }
 
     // Billboard: get camera right and up vectors from view matrix
     vec3 cameraRight = vec3(view[0][0], view[1][0], view[2][0]);
@@ -69,27 +114,36 @@ void main() {
     // Calculate billboard vertex position
     vec2 quadPos = quadVertices[vertexIndex];
     float size = pushConstants.particleSize;
-    vec3 worldPos;
+    vec3 billboardPos;
+
     if (pushConstants.velocityStretch > 0.0 && dot(p.velocity, p.velocity) > 1e-6) {
         // Velocity-aligned billboard (rain streaks): quad Y runs along the
         // motion, X across it, turned toward the camera. Falls back to the
         // camera-right axis when the velocity points straight at the viewer.
         vec3 along = normalize(p.velocity);
-        vec3 across = cross(along, cameraPosition - p.position);
+        vec3 across = cross(along, cameraPosition - worldPos);
         float len2 = dot(across, across);
         across = len2 > 1e-8 ? across * inversesqrt(len2) : cameraRight;
         float halfLen = size * (1.0 + pushConstants.velocityStretch * length(p.velocity));
-        worldPos = p.position
-                 + across * quadPos.x * size
-                 + along * quadPos.y * halfLen;
+        billboardPos = worldPos
+                     + across * quadPos.x * size
+                     + along * quadPos.y * halfLen;
     } else {
-        worldPos = p.position
-                 + cameraRight * quadPos.x * size
-                 + cameraUp * quadPos.y * size;
+        billboardPos = worldPos
+                     + cameraRight * quadPos.x * size
+                     + cameraUp * quadPos.y * size;
     }
 
-    gl_Position = proj * view * vec4(worldPos, 1.0);
+    vec4 viewPos = view * vec4(billboardPos, 1.0);
+    gl_Position = proj * viewPos;
 
     fragUV = quadUVs[vertexIndex];
     fragColor = p.color;
+
+    // Pass linear depth (negated because view space Z is negative forward)
+    fragDepth = -viewPos.z;
+
+    // Compute screen UV for depth sampling (convert from clip to [0,1] range)
+    vec2 ndc = gl_Position.xy / gl_Position.w;
+    fragScreenUV = ndc * 0.5 + 0.5;
 }

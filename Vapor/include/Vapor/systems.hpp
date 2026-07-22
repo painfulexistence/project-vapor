@@ -882,7 +882,7 @@ namespace Vapor {
                 const auto& t = attrView.get<TransformComponent>(entity);
                 const auto& a = attrView.get<ParticleAttractorComponent>(entity);
                 ParticleAttractor pa;
-                pa.position = t.position;
+                pa.position = glm::vec3(t.worldTransform[3]); // world position from transform matrix
                 pa.strength = a.strength;
                 field.attractors.push_back(pa);
                 if (field.attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
@@ -1118,6 +1118,11 @@ namespace Vapor {
                     p.texture   = r->texture;
                     p.size      = r->size;
                     p.velocityStretch = r->velocityStretch;
+                    // Depth effects
+                    p.depthEffects = (r->depthFadeEnabled ? 0x01 : 0)
+                                   | (r->groundClampEnabled ? 0x02 : 0);
+                    p.depthFadeDistance = r->depthFadeDistance;
+                    p.groundClampOffset = r->groundClampOffset;
                 }
                 draws.push_back(p);
                 if (draws.size() >= MAX_PARTICLE_DRAWS) break;

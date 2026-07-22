@@ -547,6 +547,12 @@ namespace Vapor {
         // particle's velocity (screen-aligned): half-length becomes
         // size * (1 + velocityStretch * speed). Rain streaks ≈ 0.1-0.2.
         float velocityStretch = 0.0f;
+
+        // Depth effects (RHI layer) — per-emitter
+        bool  depthFadeEnabled   = false;   // soft fade when near scene geometry
+        float depthFadeDistance  = 0.5f;    // fade range in world units
+        bool  groundClampEnabled = false;   // clamp particles to depth surface
+        float groundClampOffset  = 0.02f;   // height above surface when clamped
     };
 
     // One-shot burst of particles at the entity's current position.

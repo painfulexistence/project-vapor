@@ -4772,24 +4772,47 @@ void Renderer::particlePass() {
         const bool hasTexture = p.texture != INVALID_TEXTURE_ID &&
                                 p.texture < textures.size();
         const TextureId texId = hasTexture ? p.texture : defaultWhiteTexture;
-        struct { float particleSize; float useTexture; float velocityStretch; float _pad; }
-            pc{ p.size, hasTexture ? 1.0f : 0.0f, p.velocityStretch, 0.0f };
+        // Extended push constants for velocity stretch + depth effects (48 bytes)
+        struct ParticlePushConstants {
+            float particleSize;
+            float useTexture;
+            float velocityStretch;
+            float depthFadeEnabled;
+            float depthFadeDistance;
+            float groundClampEnabled;
+            float groundClampOffset;
+            float _pad;
+        } pc{
+            p.size,
+            hasTexture ? 1.0f : 0.0f,
+            p.velocityStretch,
+            (p.depthEffects & 0x01) ? 1.0f : 0.0f,  // bit 0 = depthFade
+            p.depthFadeDistance,
+            (p.depthEffects & 0x02) ? 1.0f : 0.0f,  // bit 1 = groundClamp
+            p.groundClampOffset,
+            0.0f
+        };
 
         if (metal) {
-            // particleVertex: camera(0), ParticlePushConstants(1), particles(2);
-            // particleFragment: params in buffer(0), texture/sampler at 0.
+            // particleVertex: camera(0), ParticlePushConstants(1), particles(2), sceneDepth(texture1)
+            // particleFragment: params(buffer0), camera(buffer1), particleTexture(texture0), sceneDepth(texture1)
             rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setVertexBytes(&pc, sizeof(pc), 1);
-            rhi->setFragmentBytes(&pc, sizeof(pc), 0);
             rhi->setVertexBuffer(2, particleBuffer, 0, bufBytes);
+            rhi->setFragmentBytes(&pc, sizeof(pc), 0);
+            rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         } else {
             rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));   // set0 b0
             rhi->setFragmentBuffer(0, particleBuffer, 0, bufBytes);                       // set1 b0 (read in VS)
-            rhi->setVertexBytes(&pc, sizeof(pc), 0);  // pc [0,16), visible to VS+FS
+            rhi->setVertexBytes(&pc, sizeof(pc), 0);  // pc [0,32), visible to VS+FS
         }
         if (texId < textures.size()) {
             const RenderTexture& tex = textures[texId];
             rhi->setTexture(2, 0, tex.handle, tex.sampler);  // GLSL set2 b0 / MSL texture(0)
+        }
+        // Bind scene depth texture for depth fade / ground clamp (set2 b1)
+        if ((p.depthEffects & 0x03) != 0 && depthStencilRT.isValid()) {
+            rhi->setTexture(2, 1, depthStencilRT, clampSampler);
         }
 
         if (indirect) {

@@ -572,6 +572,11 @@ struct ParticleDrawPacket {
     TextureId texture   = INVALID_TEXTURE_ID;   // INVALID = procedural soft disc
     float     size      = 0.1f;                 // billboard half-extent
     float     velocityStretch = 0.0f;           // > 0: stretch along velocity (rain)
+
+    // Depth effects (per-emitter)
+    Uint8 depthEffects     = 0;    // bitfield: bit 0=depthFade, bit 1=groundClamp
+    float depthFadeDistance = 0.5f;
+    float groundClampOffset = 0.02f;
 };
 
 // ============================================================================
