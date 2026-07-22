@@ -169,7 +169,9 @@ float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data) {
 
 // Sample weather map (procedural for now, could be texture)
 float2 sampleWeather(float3 worldPos, constant VolumetricCloudData& data) {
-    float2 weatherUV = worldPos.xz * 0.00005 + data.time * 0.001;
+    // Scroll the coverage field with the wind (slower than the in-cloud detail,
+    // so macro shapes lag the internal churn) — twin of CloudRaymarch.frag.
+    float2 weatherUV = (worldPos.xz + data.windOffset.xz * 0.6) * 0.00005 + data.time * 0.0002;
 
     // Coverage from low-frequency noise
     float coverage = valueNoise3D(float3(weatherUV * 3.0, 0.0));

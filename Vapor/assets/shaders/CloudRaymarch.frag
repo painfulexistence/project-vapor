@@ -197,7 +197,12 @@ float sampleCloudDetail(vec3 worldPos) {
 }
 
 vec2 sampleWeather(vec3 worldPos) {
-    vec2 weatherUV = worldPos.xz * 0.00005 + time * 0.001;
+    // Scroll the coverage field with the wind (slower than the in-cloud detail,
+    // so macro shapes lag the internal churn). Without this the coverage
+    // envelope is pinned to world space and clouds form/dissolve in place
+    // instead of drifting across the sky. Small time term keeps the pattern
+    // slowly evolving on top of the drift.
+    vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
     float coverage = valueNoise3D(vec3(weatherUV * 3.0, 0.0));
     coverage = pow(coverage * 0.5 + 0.5, 0.5);
     float type = valueNoise3D(vec3(weatherUV * 2.0 + 100.0, 0.0));
