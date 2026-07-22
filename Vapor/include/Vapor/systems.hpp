@@ -7,6 +7,7 @@
 #include "renderer.hpp"
 #include "render_scene.hpp"
 #include <entt/entt.hpp>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <random>
@@ -81,7 +82,7 @@ namespace Vapor {
             std::vector<RenderInstance>& instances,
             std::unordered_map<std::shared_ptr<Material>, std::vector<std::shared_ptr<Mesh>>>& instanceBatches
         ) {
-            auto view = registry.view<MeshRendererComponent>();
+            auto view = registry.view<MeshRendererComponent>(entt::exclude<InactiveComponent>);
 
             for (auto entity : view) {
                 auto& render = view.get<MeshRendererComponent>(entity);
@@ -228,7 +229,7 @@ namespace Vapor {
         }
 
         static void update(entt::registry& registry, Physics3D* physics, Camera* camera, float deltaTime) {
-            auto view = registry.view<HeldByComponent>();
+            auto view = registry.view<HeldByComponent>(entt::exclude<InactiveComponent>);
 
             for (auto entity : view) {
                 auto& held = view.get<HeldByComponent>(entity);
@@ -285,7 +286,7 @@ namespace Vapor {
 
             // Point lights: position from the transform.
             scene->pointLights.clear();
-            auto pointView = reg.view<PointLightComponent, TransformComponent>();
+            auto pointView = reg.view<PointLightComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : pointView) {
                 const auto& light     = pointView.get<PointLightComponent>(entity);
                 const auto& transform = pointView.get<TransformComponent>(entity);
@@ -302,7 +303,7 @@ namespace Vapor {
             // registry iteration order.
             scene->directionalLights.clear();
             entt::entity sunEntity = entt::null;
-            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : sunView) { sunEntity = entity; break; }
             auto pushDirectional = [&](const DirectionalLightComponent& light) {
                 scene->directionalLights.push_back({
@@ -314,7 +315,7 @@ namespace Vapor {
             if (sunEntity != entt::null) {
                 pushDirectional(reg.get<DirectionalLightComponent>(sunEntity));
             }
-            auto dirView = reg.view<DirectionalLightComponent>();
+            auto dirView = reg.view<DirectionalLightComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : dirView) {
                 if (entity == sunEntity) continue;
                 pushDirectional(dirView.get<DirectionalLightComponent>(entity));
@@ -323,7 +324,7 @@ namespace Vapor {
             // Spot lights: position from the transform, beam along its forward
             // axis (rotation * -Z), degree angles converted to cosines for the GPU.
             scene->spotLights.clear();
-            auto spotView = reg.view<SpotLightComponent, TransformComponent>();
+            auto spotView = reg.view<SpotLightComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : spotView) {
                 const auto& light     = spotView.get<SpotLightComponent>(entity);
                 const auto& transform = spotView.get<TransformComponent>(entity);
@@ -341,7 +342,7 @@ namespace Vapor {
             // Rect area lights: quad axes from the transform's rotation (right =
             // +X, up = +Y), half-extents from the component size.
             scene->rectLights.clear();
-            auto rectView = reg.view<RectLightComponent, TransformComponent>();
+            auto rectView = reg.view<RectLightComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : rectView) {
                 const auto& light     = rectView.get<RectLightComponent>(entity);
                 const auto& transform = rectView.get<TransformComponent>(entity);
@@ -370,7 +371,7 @@ namespace Vapor {
     public:
         static void update(entt::registry& reg, IRenderer* renderer) {
             if (!renderer) return;
-            auto view = reg.view<SkyComponent>();
+            auto view = reg.view<SkyComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& sky = view.get<SkyComponent>(entity);
 
@@ -404,7 +405,7 @@ namespace Vapor {
                 // so both backends stay aligned via requestIBLUpdate().
                 if (sky.iblSunThresholdDeg > 0.0f) {
                     glm::vec3 sunDir(0.0f);
-                    auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+                    auto sunView = reg.view<DirectionalLightComponent, SunComponent>(entt::exclude<InactiveComponent>);
                     for (auto e : sunView) {
                         sunDir = sunView.get<DirectionalLightComponent>(e).direction;
                         break;
@@ -421,13 +422,11 @@ namespace Vapor {
                         if (movedDeg >= sky.iblSunThresholdDeg) {
                             if (firstBake) {
                                 // The initial bake must ALWAYS happen, independent
-                                // of the auto-rebake toggle. The renderer's very-
-                                // early startup bake can capture the sky before the
-                                // async-loaded scene + sun are ready, leaving a
-                                // stale/wrong prefilter that RT reflection samples
-                                // (green ghosting until a manual Refresh IBL). Now
-                                // that the sun is valid, re-push the sky to force
-                                // one ungated bake (setSky sets iblNeedsUpdate).
+                                // of the auto-rebake toggle: the renderer's startup
+                                // bake can run before the async scene + sun are
+                                // ready, leaving a stale prefilter. Re-push the sky
+                                // to force one ungated bake (setSky sets
+                                // iblNeedsUpdate).
                                 sky.dirty = true;
                             } else {
                                 // Continuous sun-tracking rebakes: gated by the
@@ -445,6 +444,174 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // 天氣系統 - the weather state machine (clouds / dimming / precipitation / lightning)
+    // ============================================================================
+    // Blends the singleton WeatherComponent toward its target state and fans the
+    // resolved params out to every weather-affected medium:
+    //   - volumetric clouds: pushed via IRenderer::setClouds (weather OWNS the
+    //     artist cloud tunables while driveClouds is set — the panel copies of
+    //     those fields are overwritten each frame)
+    //   - sun/moon dimming: resolved into _resolved.sunDim, consumed by
+    //     TimeOfDaySystem (clouds occlude the lights, CPU side)
+    //   - fog density / wind strength multipliers: consumed by
+    //     VolumetricFogSystem / WindSystem at push time (the authored component
+    //     values stay untouched — weather multiplies, never overwrites)
+    //   - precipitation: PrecipitationComponent-tagged emitter entities are
+    //     (de)activated by adding/removing InactiveComponent
+    //   - lightning: LightningComponent-tagged point lights get a double-pulse
+    //     intensity envelope during Thunderstorm, plus a cloud-interior glow
+    // Run BEFORE TimeOfDaySystem / WindSystem / VolumetricFogSystem so they see
+    // this frame's resolved weather.
+    class WeatherSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer, float deltaTime) {
+            auto view = reg.view<WeatherComponent>(entt::exclude<InactiveComponent>);
+            for (auto entity : view) {
+                auto& w = view.get<WeatherComponent>(entity);
+                if (!w.enabled) break;
+
+                // ── Transition blend (snapshot-on-change so chained switches
+                // mid-transition continue from the currently blended values) ──
+                if (static_cast<uint8_t>(w.state) != static_cast<uint8_t>(w._lastState)) {
+                    const float tPrev = smoothstep01(w._blend);
+                    const auto prevTarget = static_cast<WeatherState>(static_cast<uint8_t>(w._lastState));
+                    w._from = mixWeatherParams(w._from, weatherParamsFor(prevTarget), tPrev);
+                    w._blend = 0.0f;
+                    w._lastState = static_cast<uint8_t>(w.state);
+                }
+                if (w._blend < 1.0f) {
+                    const float step = (w.transitionSeconds > 0.0f)
+                                           ? deltaTime / w.transitionSeconds : 1.0f;
+                    w._blend = std::min(1.0f, w._blend + step);
+                }
+                const WeatherParams p =
+                    mixWeatherParams(w._from, weatherParamsFor(w.state), smoothstep01(w._blend));
+                w._resolved = p;
+
+                // ── Lightning (returns the cloud-interior glow to add) ──
+                const float flashGlow = updateLightning(reg, w, deltaTime);
+
+                // ── Clouds ──
+                if (renderer && w.driveClouds) {
+                    CloudsRenderData clouds;
+                    clouds.enabled          = true;
+                    clouds.coverage         = p.cloudCoverage;
+                    clouds.density          = p.cloudDensity;
+                    clouds.type             = p.cloudType;
+                    clouds.layerBottom      = p.cloudLayerBottom;
+                    clouds.layerTop         = p.cloudLayerTop;
+                    clouds.ambientIntensity = p.cloudAmbient + flashGlow;
+                    clouds.cloudDim         = p.cloudDim;
+                    clouds.ambientColor     = p.cloudAmbientColor;
+                    renderer->setClouds(clouds);
+                }
+
+                // ── Environment dimming: the baked IBL would stay sunny under
+                // an overcast deck; scale it by the resolved factor (applied at
+                // shading time in the PBR pass — no rebake needed) ──
+                if (renderer) renderer->setIBLIntensity(p.iblDim);
+
+                // ── Precipitation: gate on the target state once the transition
+                // is half way in, so rain starts under an already-heavy sky ──
+                const bool committed = w._blend > 0.5f;
+                const bool rainOn = committed && (w.state == WeatherState::Rain ||
+                                                  w.state == WeatherState::Thunderstorm);
+                const bool snowOn = committed && w.state == WeatherState::Snow;
+                // Active camera position for camera-following emitters (rain
+                // falls where the player is, not where the scene authored it).
+                glm::vec3 camPos(0.0f);
+                bool camValid = false;
+                auto camView = reg.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
+                for (auto ce : camView) {
+                    const auto& vc = camView.get<VirtualCameraComponent>(ce);
+                    if (vc.isActive) { camPos = vc.position; camValid = true; break; }
+                }
+                auto precip = reg.view<PrecipitationComponent>();
+                for (auto pe : precip) {
+                    const auto& pc = precip.get<PrecipitationComponent>(pe);
+                    const auto kind = pc.kind;
+                    if (pc.followCamera && camValid) {
+                        if (auto* tr = reg.try_get<TransformComponent>(pe)) {
+                            tr->position = glm::vec3(camPos.x, camPos.y + pc.followHeight, camPos.z);
+                            tr->isDirty = true;
+                        }
+                    }
+                    const bool on = (kind == PrecipitationComponent::Kind::Rain) ? rainOn : snowOn;
+                    if (on) {
+                        // Wake the authored-inactive emitter and (re)start it.
+                        reg.remove<InactiveComponent>(pe);
+                        if (auto* em = reg.try_get<ParticleEmitterComponent>(pe)) em->emitting = true;
+                    } else if (!reg.all_of<InactiveComponent>(pe)) {
+                        // Graceful stop: quit spawning, let airborne particles
+                        // finish falling (the entity stays active so they draw).
+                        if (auto* em = reg.try_get<ParticleEmitterComponent>(pe)) em->emitting = false;
+                    }
+                }
+
+                break;  // singleton: the first weather wins
+            }
+        }
+
+    private:
+        static float smoothstep01(float x) {
+            x = glm::clamp(x, 0.0f, 1.0f);
+            return x * x * (3.0f - 2.0f * x);
+        }
+
+        // Drives every LightningComponent-tagged point light. Returns the
+        // cloud-ambient glow for this frame (lightning illuminating the cloud
+        // deck from inside). Strikes use a double-pulse envelope: a bright
+        // leader followed by a re-strike ~0.15 s later, both decaying fast.
+        static float updateLightning(entt::registry& reg, WeatherComponent& w, float deltaTime) {
+            const bool storm = w.state == WeatherState::Thunderstorm && w._blend > 0.5f;
+            float intensity = 0.0f;
+            float glow = 0.0f;
+            if (storm) {
+                w._flashAge = static_cast<float>(w._flashAge) + deltaTime;
+                w._lightningTimer = static_cast<float>(w._lightningTimer) - deltaTime;
+                if (static_cast<float>(w._lightningTimer) <= 0.0f) {
+                    uint32_t s = w._rng;
+                    if (s == 0u) s = 0x9E3779B9u;   // first-use seed
+                    s ^= s << 13; s ^= s >> 17; s ^= s << 5;   // xorshift32
+                    w._rng = s;
+                    const float u = static_cast<float>(s & 0xFFFFFFu) / 16777216.0f;
+                    const float span = std::max(0.0f, w.lightningMaxInterval - w.lightningMinInterval);
+                    w._lightningTimer = w.lightningMinInterval + u * span;
+                    w._flashAge = 0.0f;   // strike!
+                }
+                const float a = w._flashAge;
+                float env = std::exp(-25.0f * a);
+                if (a > 0.15f) env += 0.7f * std::exp(-25.0f * (a - 0.15f));
+                if (env > 0.005f) {
+                    intensity = w.lightningIntensity * env;
+                    // Cloud-interior glow: huge relative to the ~0.001 ambient
+                    // scale — a brief flash lighting the deck from inside.
+                    glow = 1.5f * env;
+                }
+            } else {
+                w._flashAge = 1e9f;
+                w._lightningTimer = 0.0f;  // first strike lands as the storm arrives
+            }
+            auto lights = reg.view<PointLightComponent, LightningComponent>();
+            for (auto e : lights)
+                lights.get<PointLightComponent>(e).intensity = intensity;
+            return glow;
+        }
+    };
+
+    // The active weather singleton's resolved params, or nullptr when no
+    // enabled WeatherComponent exists. Consumers (TimeOfDay/Wind/Fog systems)
+    // treat nullptr as "no weather" (all multipliers 1).
+    inline const WeatherParams* activeWeatherParams(entt::registry& reg) {
+        auto view = reg.view<WeatherComponent>(entt::exclude<InactiveComponent>);
+        for (auto e : view) {
+            const auto& w = view.get<WeatherComponent>(e);
+            return w.enabled ? &static_cast<const WeatherParams&>(w._resolved) : nullptr;
+        }
+        return nullptr;
+    }
+
+    // ============================================================================
     // 時間系統 - advances the time-of-day clock and drives the sun
     // ============================================================================
     // The single moving sun: TimeOfDaySystem turns the clock into the
@@ -455,7 +622,7 @@ namespace Vapor {
     class TimeOfDaySystem {
     public:
         static void update(entt::registry& reg, float deltaTime) {
-            auto todView = reg.view<TimeOfDayComponent>();
+            auto todView = reg.view<TimeOfDayComponent>(entt::exclude<InactiveComponent>);
             entt::entity todEntity = entt::null;
             for (auto e : todView) { todEntity = e; break; }
             if (todEntity == entt::null) return;
@@ -489,12 +656,17 @@ namespace Vapor {
             glm::vec3 sunColor = glm::mix(glm::vec3(1.0f, 0.45f, 0.25f),
                                           glm::vec3(1.0f, 0.98f, 0.95f), warm);
 
-            auto sunView = reg.view<DirectionalLightComponent, SunComponent>();
+            // Weather dimming: heavy cloud cover occludes the sun and moon.
+            // WeatherSystem resolves the factor (runs before this system).
+            float weatherDim = 1.0f;
+            if (const WeatherParams* wp = activeWeatherParams(reg)) weatherDim = wp->sunDim;
+
+            auto sunView = reg.view<DirectionalLightComponent, SunComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : sunView) {
                 auto& dl = sunView.get<DirectionalLightComponent>(entity);
                 dl.direction = glm::normalize(-sunPos);  // light travels away from the sun
                 dl.color     = sunColor;
-                dl.intensity = tod.maxSunIntensity * daylight;
+                dl.intensity = tod.maxSunIntensity * daylight * weatherDim;
                 break;
             }
 
@@ -506,12 +678,12 @@ namespace Vapor {
             glm::vec3 moonPos = -sunPos;
             float moonUp = glm::clamp(moonPos.y / 0.15f, 0.0f, 1.0f);
             moonUp = moonUp * moonUp * (3.0f - 2.0f * moonUp);  // smoothstep
-            auto moonView = reg.view<DirectionalLightComponent, MoonComponent>();
+            auto moonView = reg.view<DirectionalLightComponent, MoonComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : moonView) {
                 auto& dl = moonView.get<DirectionalLightComponent>(entity);
                 dl.direction = glm::normalize(-moonPos);  // = normalize(sunPos)
                 dl.color     = tod.moonLightColor;
-                dl.intensity = tod.maxMoonIntensity * moonUp;
+                dl.intensity = tod.maxMoonIntensity * moonUp * weatherDim;
                 break;
             }
         }
@@ -529,12 +701,16 @@ namespace Vapor {
     public:
         static void update(entt::registry& reg, IRenderer* renderer) {
             if (!renderer) return;
-            auto view = reg.view<WindFieldComponent>();
+            auto view = reg.view<WindFieldComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& wf = view.get<WindFieldComponent>(entity);
+                // Weather multiplies at push time — the authored strength stays
+                // untouched, so clearing weather restores the scene's wind.
+                float windMul = 1.0f;
+                if (const WeatherParams* wp = activeWeatherParams(reg)) windMul = wp->windMul;
                 WindRenderData data;
                 data.direction  = wf.direction;
-                data.strength   = wf.strength;
+                data.strength   = wf.strength * windMul;
                 data.turbulence = wf.turbulence;
                 renderer->setWind(data);
                 break;  // singleton: the first wind field wins
@@ -553,12 +729,15 @@ namespace Vapor {
     public:
         static void update(entt::registry& reg, IRenderer* renderer) {
             if (!renderer) return;
-            auto view = reg.view<VolumetricFogComponent>();
+            auto view = reg.view<VolumetricFogComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& f = view.get<VolumetricFogComponent>(entity);
+                // Weather multiplies at push time (authored density untouched).
+                float fogMul = 1.0f;
+                if (const WeatherParams* wp = activeWeatherParams(reg)) fogMul = wp->fogDensityMul;
                 VolumetricFogRenderData data;
                 data.enabled          = f.enabled;
-                data.fogDensity       = f.density;
+                data.fogDensity       = f.density * fogMul;
                 data.fogHeightFalloff = f.heightFalloff;
                 data.fogBaseHeight    = f.baseHeight;
                 data.fogMaxHeight     = f.maxHeight;
@@ -583,7 +762,7 @@ namespace Vapor {
     class CameraControlSystem {
     public:
         static void update(entt::registry& registry, float deltaTime) {
-            auto view = registry.view<VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& cam = view.get<VirtualCameraComponent>(entity);
                 if (!cam.isActive) continue;
@@ -612,7 +791,7 @@ namespace Vapor {
             );
             intent.moveVerticalAxis = inputState.getAxis(InputAction::MoveDown, InputAction::MoveUp);
 
-            auto view = registry.view<VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& cam = view.get<VirtualCameraComponent>(entity);
                 if (!cam.isActive) continue;
@@ -628,7 +807,7 @@ namespace Vapor {
         }
 
         static entt::entity getActiveCamera(entt::registry& registry) {
-            auto view = registry.view<VirtualCameraComponent>();
+            auto view = registry.view<VirtualCameraComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 if (view.get<VirtualCameraComponent>(entity).isActive) {
                     return entity;
@@ -698,7 +877,7 @@ namespace Vapor {
 
             ParticleForceField field;
 
-            auto attrView = registry.view<ParticleAttractorComponent, TransformComponent>();
+            auto attrView = registry.view<ParticleAttractorComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : attrView) {
                 const auto& t = attrView.get<TransformComponent>(entity);
                 const auto& a = attrView.get<ParticleAttractorComponent>(entity);
@@ -709,10 +888,14 @@ namespace Vapor {
                 if (field.attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
             }
 
-            auto windView = registry.view<WindFieldComponent>();
+            auto windView = registry.view<WindFieldComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : windView) {
                 const auto& w = windView.get<WindFieldComponent>(entity);
-                field.wind       = glm::vec4(w.direction, w.strength);
+                // Same weather multiplier WindSystem applies for clouds/fog, so
+                // particles feel the storm's wind too.
+                float windMul = 1.0f;
+                if (const WeatherParams* wp = activeWeatherParams(registry)) windMul = wp->windMul;
+                field.wind       = glm::vec4(w.direction, w.strength * windMul);
                 field.turbulence = w.turbulence;
                 break;
             }
@@ -736,7 +919,7 @@ namespace Vapor {
             static std::mt19937 rng(std::random_device{}());
             static std::uniform_real_distribution<float> u01(0.0f, 1.0f);
 
-            auto view = registry.view<ParticleEmitterComponent, TransformComponent>();
+            auto view = registry.view<ParticleEmitterComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& emit = view.get<ParticleEmitterComponent>(entity);
                 const auto& t = view.get<TransformComponent>(entity);
@@ -832,6 +1015,8 @@ namespace Vapor {
                     : glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
                 glm::vec3 up = glm::cross(fwd, right);
 
+                const bool boxEmit = emit.emitExtents.x > 0.0f || emit.emitExtents.y > 0.0f ||
+                                     emit.emitExtents.z > 0.0f;
                 std::vector<GPUParticleData> batch(spawns);
                 for (uint32_t i = 0; i < spawns; ++i) {
                     float theta  = u01(rng) * 2.0f * 3.14159265f;
@@ -841,10 +1026,19 @@ namespace Vapor {
 
                     GPUParticleData& p = batch[i];
                     p.position = t.position;
+                    if (boxEmit) {
+                        // Area emission: uniform point inside the half-extent box
+                        // (rain/snow sheets — direction still follows the cone).
+                        p.position += glm::vec3(
+                            (u01(rng) * 2.0f - 1.0f) * emit.emitExtents.x,
+                            (u01(rng) * 2.0f - 1.0f) * emit.emitExtents.y,
+                            (u01(rng) * 2.0f - 1.0f) * emit.emitExtents.z);
+                    }
                     p.lifetime = emit.particleLifetime;
                     p.age      = 0.0f;
                     p.velocity = dir * emit.speed;
                     p.force    = glm::vec3(0.0f);
+                    p.killPlaneY = emit.groundKillY;
                     p.color    = emit.color;
                 }
 
@@ -911,7 +1105,7 @@ namespace Vapor {
             if (!renderer) return;
 
             std::vector<ParticleDrawPacket> draws;
-            auto view = registry.view<ParticleEmitterComponent>();
+            auto view = registry.view<ParticleEmitterComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& emit = view.get<ParticleEmitterComponent>(entity);
                 if (emit._slotBegin == ~0u || emit._slotCount == 0) continue;
@@ -923,6 +1117,7 @@ namespace Vapor {
                     p.blendMode = static_cast<Uint8>(r->blendMode);
                     p.texture   = r->texture;
                     p.size      = r->size;
+                    p.velocityStretch = r->velocityStretch;
                 }
                 draws.push_back(p);
                 if (draws.size() >= MAX_PARTICLE_DRAWS) break;
@@ -942,7 +1137,7 @@ namespace Vapor {
             static std::mt19937 rng(std::random_device{}());
             static std::uniform_real_distribution<float> u01(0.0f, 1.0f);
 
-            auto view = registry.view<ParticleBurstRequest>();
+            auto view = registry.view<ParticleBurstRequest>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 const auto& req = view.get<ParticleBurstRequest>(entity);
                 auto* t = registry.try_get<TransformComponent>(entity);
@@ -991,7 +1186,7 @@ namespace Vapor {
     class SpellBoltSystem {
     public:
         static void update(entt::registry& registry, IRenderer* renderer, float deltaTime) {
-            auto view = registry.view<SpellBoltComponent, TransformComponent>();
+            auto view = registry.view<SpellBoltComponent, TransformComponent>(entt::exclude<InactiveComponent>);
             for (auto entity : view) {
                 auto& bolt = view.get<SpellBoltComponent>(entity);
                 auto& t    = view.get<TransformComponent>(entity);

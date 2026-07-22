@@ -143,7 +143,10 @@ struct Cluster {
 layout(std430, set = 1, binding = 4) readonly buffer ClusterBuf { Cluster tiles[]; };
 layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
     vec2 cullScreenSize;
-    vec2 _cpad1;
+    // Weather-driven environment dimming (Vapor::LightCullData.iblIntensity):
+    // heavy cloud cover scales the baked IBL down at shading time.
+    float cullIblIntensity;
+    float _cpad1;
     uvec3 cullGridSize;
     uint cullLightCount;
 };
@@ -560,7 +563,8 @@ vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
     vec3 prefiltered = textureLod(prefilterMap, R, s.roughness * MAX_REFLECTION_LOD).rgb;
     vec2 brdf = texture(brdfLut, vec2(NdotV, s.roughness)).rg;
     vec3 specularIBL = prefiltered * (F * brdf.x + brdf.y);
-    return (diffuseIBL + specularIBL) * ao;
+    // cullIblIntensity: weather dims the baked environment under heavy cloud.
+    return (diffuseIBL + specularIBL) * ao * cullIblIntensity;
 }
 
 void main() {

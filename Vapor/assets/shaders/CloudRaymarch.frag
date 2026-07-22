@@ -37,7 +37,7 @@ layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     float phaseG2;
     float phaseBlend;
     float powderStrength;
-    float _p4;
+    float sunLightScale;  // cloud-specific scale on sunIntensity (< 1: clouds occlude)
     vec3 windDirection;   float _p5;
     vec3 windOffset;      float _p6;
     float windSpeed;
@@ -49,6 +49,10 @@ layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     uint frameIndex;
     float temporalBlend;
     vec2 _p8;
+    vec3 ambientColor;  // cloud ambient tint (weather-driven), scaled by ambientIntensity
+    float _p9;
+    vec3 moonColor;        // night key-light colour (moonDir = -sunDirection)
+    float moonLightScale;  // moon lit brightness as a fraction of the sun term
 };
 
 // Must match Vapor::CameraRenderData.
@@ -167,8 +171,24 @@ float sampleCloudShape(vec3 worldPos) {
     return saturate(remap(perlin, worleyFBM - 1.0, 1.0, 0.0, 1.0));
 }
 
+// Curl-ish vector noise: three decorrelated gradient noises. Not a true
+// divergence-free curl, but visually equivalent wind-torn wisps at a third
+// of the cost of a finite-difference curl.
+vec3 curlDistort(vec3 p) {
+    return vec3(gradientNoise3D(p),
+                gradientNoise3D(p + vec3(31.416, 47.853, 12.793)),
+                gradientNoise3D(p + vec3(-23.144, 9.271, 61.043)));
+}
+
 float sampleCloudDetail(vec3 worldPos) {
     vec3 samplePos = worldPos + windOffset * 1.5;
+    // Wind-torn edges: distort the detail lookup with large-scale vector noise
+    // (~500 m swirls at curlNoiseScale 1; strength 0.1 → ~30 m displacement).
+    // Full-quality samples only — the cheap light-march path skips detail.
+    if (curlNoiseStrength > 0.0) {
+        samplePos += curlDistort(samplePos * (curlNoiseScale * 0.002)) *
+                     (curlNoiseStrength * 300.0);
+    }
     vec3 detailUV = samplePos * detailNoiseScale * 0.001;
     float d1 = 1.0 - worleyNoise3D(detailUV * 2.0);
     float d2 = 1.0 - worleyNoise3D(detailUV * 4.0);
@@ -206,12 +226,13 @@ float sampleCloudDensity(vec3 worldPos, bool useCheap) {
 }
 
 // ── Lighting ───────────────────────────────────────────────────────────────
-float lightMarch(vec3 worldPos) {
+// March toward an arbitrary light (sun by day, moon by night) for shadowing.
+float lightMarch(vec3 worldPos, vec3 lightDir) {
     float stepSize = cloudLayerThickness / float(lightSteps);
     float transmittance = 1.0;
     vec3 pos = worldPos;
     for (uint i = 0u; i < lightSteps; i++) {
-        pos += sunDirection * stepSize;
+        pos += lightDir * stepSize;
         if (pos.y > cloudLayerTop) break;
         float density = sampleCloudDensity(pos, true);
         transmittance *= beerLambert(density, stepSize);
@@ -220,9 +241,12 @@ float lightMarch(vec3 worldPos) {
     return transmittance;
 }
 
-vec3 multiScatterApprox(float lightTransmittance, float cosTheta) {
+// Scattering contribution from ONE key light (colour × power), no ambient.
+// Called once for the sun and once for the moon; the caller weights each by
+// day/night and adds a single ambient term.
+vec3 scatterFromLight(vec3 lightColor, float lightPower, float lightTransmittance, float cosTheta) {
     float phase = phaseDualLobe(cosTheta, phaseG1, phaseG2, phaseBlend);
-    vec3 directLight = sunColor * sunIntensity * phase * lightTransmittance;
+    vec3 directLight = lightColor * lightPower * phase * lightTransmittance;
 
     vec3 multiScatter = vec3(0.0);
     float attenuation = 0.3;
@@ -233,16 +257,39 @@ vec3 multiScatterApprox(float lightTransmittance, float cosTheta) {
     for (int i = 0; i < 4; i++) {
         scatterPhase = mix(scatterPhase, 0.25, phaseAttenuation);
         scatterTransmittance = mix(scatterTransmittance, 1.0, 0.7);
-        multiScatter += contribution * scatterPhase * scatterTransmittance * sunColor;
+        multiScatter += contribution * scatterPhase * scatterTransmittance * lightColor;
         contribution *= attenuation;
     }
 
     float silverLining = pow(saturate(1.0 - lightTransmittance), silverLiningSpread);
     silverLining *= saturate(-cosTheta * 0.5 + 0.5);
-    multiScatter += sunColor * silverLiningIntensity * silverLining;
+    multiScatter += lightColor * silverLiningIntensity * silverLining;
 
-    vec3 ambient = vec3(0.5, 0.6, 0.9) * ambientIntensity;
-    return directLight + multiScatter * sunIntensity + ambient;
+    return directLight + multiScatter * lightPower;
+}
+
+// Combined lighting: the sun fades out below the horizon while the moon
+// (antipodal, dim, cool) fades in, so night clouds are moonlit — not lit by a
+// phantom below-horizon sun. Ambient dims at night but keeps its tint.
+vec3 cloudLighting(vec3 worldPos, vec3 rayDir) {
+    // sunLightScale < 1: clouds absorb/self-shadow, so the lit surface sits
+    // BELOW the clear-sky brightness instead of blooming over it.
+    float sunPower = sunIntensity * sunLightScale;
+    float dayFactor = smoothstep(-0.12, 0.08, sunDirection.y);  // 1 day, 0 night
+
+    vec3 lum = ambientColor * ambientIntensity * mix(0.3, 1.0, dayFactor);
+
+    if (dayFactor > 0.01) {
+        float tr = lightMarch(worldPos, sunDirection);
+        lum += scatterFromLight(sunColor, sunPower, tr, dot(rayDir, sunDirection)) * dayFactor;
+    }
+    if (dayFactor < 0.99) {
+        vec3 moonDir = -sunDirection;  // antipodal, matches TimeOfDaySystem
+        float tr = lightMarch(worldPos, moonDir);
+        lum += scatterFromLight(moonColor, sunPower * moonLightScale, tr, dot(rayDir, moonDir))
+             * (1.0 - dayFactor);
+    }
+    return lum;
 }
 
 // ── Raymarch ───────────────────────────────────────────────────────────────
@@ -272,8 +319,7 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
         vec3 pos = rayOrigin + rayDir * t;
         float density = sampleCloudDensity(pos, false);
         if (density > 0.001) {
-            float lightTransmittance = lightMarch(pos);
-            vec3 luminance = multiScatterApprox(lightTransmittance, cosTheta);
+            vec3 luminance = cloudLighting(pos, rayDir);
             float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * powderStrength +
                            (1.0 - powderStrength);
             float stepTransmittance = beerLambert(density, stepSize);

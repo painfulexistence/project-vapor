@@ -156,6 +156,10 @@ fragment float4 fragmentMain(
     // shadow). buffer(11) is dirLightCount (Vulkan-only, unread here), so this
     // takes buffer(12). Mirrors RHIMain.frag's mainDebugFlags.
     constant uint& mainDebugFlags [[buffer(12)]],
+    // Weather-driven IBL dimming (buffer 20 — 19 is materials). On Vulkan the
+    // same value rides in LightCullData instead. Every pass drawing with this
+    // fragment must bind it (main + RTT).
+    constant float& iblIntensity [[buffer(20)]],
     // Spot lights at buffer(16): buffer(14) is the bindless systemTexs table,
     // so a plain buffer(14) here fails specialization ("invalid location").
     const device SpotLight* spotLights [[buffer(16)]],
@@ -539,6 +543,12 @@ fragment float4 fragmentMain(
     float3 iblSpecular = float3(0.0);
     if (material.iblEnabled > 0.5) {
         CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT, iblDiffuse, iblSpecular);
+        // Weather dims the baked environment under heavy cloud (from #80). Apply
+        // at the source so both the diffuse branch and the specular composite
+        // below carry it; RT reflection stays undimmed (it already reflects the
+        // weather-lit scene, so dimming it too would double-count).
+        iblDiffuse  *= iblIntensity;
+        iblSpecular *= iblIntensity;
     }
 
     // Diffuse indirect: GIBS GI, else IBL irradiance, else a flat ambient floor.

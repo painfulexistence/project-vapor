@@ -1736,6 +1736,10 @@ public:
         cloudData->phaseG2 = r.volumetricCloudSettings.phaseG2;
         cloudData->phaseBlend = r.volumetricCloudSettings.phaseBlend;
         cloudData->powderStrength = r.volumetricCloudSettings.powderStrength;
+        cloudData->sunLightScale = r.volumetricCloudSettings.sunLightScale;
+        cloudData->ambientColor = r.volumetricCloudSettings.ambientColor;
+        cloudData->moonColor = r.volumetricCloudSettings.moonColor;
+        cloudData->moonLightScale = r.volumetricCloudSettings.moonLightScale;
         cloudData->windDirection = r.volumetricCloudSettings.windDirection;
         cloudData->windSpeed = r.volumetricCloudSettings.windSpeed;
         cloudData->primarySteps = r.volumetricCloudSettings.primarySteps;
