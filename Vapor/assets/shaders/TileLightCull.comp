@@ -75,66 +75,37 @@ layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer { Cluster til
 layout(std430, set = 0, binding = 6) readonly buffer SpotLightBuffer { SpotLight spotLights[]; };
 layout(std430, set = 0, binding = 7) readonly buffer RectLightBuffer { RectLight rectLights[]; };
 
-bool sphereTileIntersection(vec3 center, float radius, mat4 viewProj, vec2 tileMin, vec2 tileMax,
-                            float sliceZ0, float sliceZ1) {
-    vec4 clipPos = viewProj * vec4(center, 1.0);
-    // clipPos.w is the view-space forward distance (positive in front of the
-    // camera, negative behind). A light whose influence sphere is entirely
-    // behind the camera cannot touch any visible pixel — reject it, or it
-    // lands in EVERY tile (the old `w <= radius` accepted all w<0 lights,
-    // giving every tile a floor of ~half the scene's lights and defeating the
-    // cull). Only spheres straddling the near/camera plane get the
-    // conservative accept, since those genuinely can cover anything on screen.
-    if (clipPos.w < -radius) return false;
-    // 3D clustering: reject lights whose depth interval misses this z-slice.
-    // clipPos.w IS the light's view-space depth, so the test needs no
-    // projection and is valid even for near-plane-straddling lights — do it
-    // BEFORE the conservative accept below, or near lights flood all Z slices
-    // (an every-cluster floor, the depth-axis twin of the behind-camera bug).
-    if (clipPos.w + radius < sliceZ0 || clipPos.w - radius > sliceZ1) return false;
-    // Straddling the near plane: the projected position is unreliable, so
-    // conservatively accept for every XY tile — but only in the slices the
-    // depth test above admitted.
-    if (clipPos.w <= radius) return true;
-    vec3 ndc = clipPos.xyz / clipPos.w;
-    vec2 screenUV = ndc.xy * 0.5 + 0.5;
-    vec2 centerSS = screenUV * screenSize;
-    // Perspective-correct projected radius: r * cot(fov/2) * (H/2) / w, taken
-    // per-axis so anisotropic projections stay correct. The old heuristic
-    // underestimated at oblique angles and produced hard tile-edge light
-    // dropouts (visible banding).
-    float radiusX = radius * cam.proj[0][0] * (screenSize.x * 0.5) / clipPos.w;
-    float radiusY = radius * cam.proj[1][1] * (screenSize.y * 0.5) / clipPos.w;
-    // Half-tile safety pad against center/edge quantization.
-    vec2 pad = 0.5 * (screenSize / vec2(gridSize.xy));
-    vec2 sphereMin = centerSS - vec2(radiusX, radiusY) - pad;
-    vec2 sphereMax = centerSS + vec2(radiusX, radiusY) + pad;
-    return !(sphereMax.x < tileMin.x || sphereMin.x > tileMax.x ||
-             sphereMax.y < tileMin.y || sphereMin.y > tileMax.y);
-}
-
-// World-space bounding sphere of this froxel (screen tile x depth slice).
-// Unproject the 8 corners: ndc.xy at forward distance z gives view-space
-// (ndc.x*z/proj00, ndc.y*z/proj11, -z) (camera looks down -Z), then invView to
-// world. The sphere bounds the froxel AABB — conservative, never over-culls.
-void froxelWorldSphere(vec2 tileMin, vec2 tileMax, float z0, float z1,
-                       out vec3 sphereCenter, out float sphereRadius) {
+// View-space AABB of this froxel (screen tile x depth slice). Corners are
+// exact in view space: ndc.xy at forward distance z is
+// (ndc.x*z/proj00, ndc.y*z/proj11, -z) — camera looks down -Z; dividing by the
+// SIGNED proj[1][1] keeps the mapping convention-agnostic. The AABB bounds the
+// frustum-slice shape, so tests against it are conservative: over-include only,
+// never a false negative. This replaces the old screen-space projected-sphere
+// test entirely — with it go its two failure modes (the under-estimated
+// projected radius that caused hard tile-edge lighting seams, and the
+// behind-camera / near-plane-straddle special cases, which a view-space
+// distance test simply doesn't have).
+void froxelViewAABB(vec2 tileMin, vec2 tileMax, float z0, float z1,
+                    out vec3 mn, out vec3 mx) {
     vec2 ndcMin = tileMin / screenSize * 2.0 - 1.0;
     vec2 ndcMax = tileMax / screenSize * 2.0 - 1.0;
     float ip00 = 1.0 / cam.proj[0][0];
     float ip11 = 1.0 / cam.proj[1][1];
-    vec3 mn = vec3(1e30), mx = vec3(-1e30);
+    mn = vec3(1e30); mx = vec3(-1e30);
     for (int c = 0; c < 8; ++c) {
         float nx = ((c & 1) == 0) ? ndcMin.x : ndcMax.x;
         float ny = ((c & 2) == 0) ? ndcMin.y : ndcMax.y;
         float z  = ((c & 4) == 0) ? z0 : z1;
         vec3 pv = vec3(nx * z * ip00, ny * z * ip11, -z);
-        vec3 pw = (cam.invView * vec4(pv, 1.0)).xyz;
-        mn = min(mn, pw);
-        mx = max(mx, pw);
+        mn = min(mn, pv);
+        mx = max(mx, pv);
     }
-    sphereCenter = 0.5 * (mn + mx);
-    sphereRadius = length(mx - sphereCenter);
+}
+
+// Sphere vs AABB: squared distance from the closest point on the box.
+bool sphereAABBIntersect(vec3 center, float radius, vec3 mn, vec3 mx) {
+    vec3 d = center - clamp(center, mn, mx);
+    return dot(d, d) <= radius * radius;
 }
 
 // Cone (spot) vs sphere. Rejects froxels inside the range sphere but outside
@@ -190,17 +161,21 @@ void main() {
     }
     barrier();
 
-    mat4 viewProj = cam.proj * cam.view;
-    // Froxel world-space bounding sphere, computed once for the spot cone test.
-    vec3 froxelC; float froxelR;
-    froxelWorldSphere(tileMin, tileMax, sliceZ0, sliceZ1, froxelC, froxelR);
+    // Froxel bounds, computed once per cluster: the view-space AABB for the
+    // sphere tests, and (derived from it — view->world is rigid, lengths hold)
+    // the world-space bounding sphere for the spot cone test.
+    vec3 froxelMn, froxelMx;
+    froxelViewAABB(tileMin, tileMax, sliceZ0, sliceZ1, froxelMn, froxelMx);
+    vec3 froxelCV = 0.5 * (froxelMn + froxelMx);
+    float froxelR = length(froxelMx - froxelCV);
+    vec3 froxelC = (cam.invView * vec4(froxelCV, 1.0)).xyz;
 
     // Each thread tests a strided slice of each light list; hits are compacted
     // through the shared counters. Overflow slots are dropped (same cap
     // semantics as the serial version, minus its ascending order).
     for (uint i = lid; i < lightCount; i += WG_SIZE) {
-        if (sphereTileIntersection(pointLights[i].position, pointLights[i].radius, viewProj,
-                                   tileMin, tileMax, sliceZ0, sliceZ1)) {
+        vec3 pv = (cam.view * vec4(pointLights[i].position, 1.0)).xyz;
+        if (sphereAABBIntersect(pv, pointLights[i].radius, froxelMn, froxelMx)) {
             uint slot = atomicAdd(sPointCount, 1u);
             if (slot < MAX_LIGHTS_PER_TILE) sPoint[slot] = i;
         }
@@ -211,8 +186,8 @@ void main() {
     // win for narrow spots, which fill a small fraction of their range sphere).
     for (uint i = lid; i < cullSpotCount; i += WG_SIZE) {
         SpotLight sl = spotLights[i];
-        if (sphereTileIntersection(sl.position, sl.radius, viewProj,
-                                   tileMin, tileMax, sliceZ0, sliceZ1) &&
+        vec3 sv = (cam.view * vec4(sl.position, 1.0)).xyz;
+        if (sphereAABBIntersect(sv, sl.radius, froxelMn, froxelMx) &&
             spotConeIntersectsSphere(sl.position, normalize(sl.direction), sl.radius,
                                      sl.cosOuter, froxelC, froxelR)) {
             uint slot = atomicAdd(sSpotCount, 1u);
@@ -228,8 +203,8 @@ void main() {
         RectLight rl = rectLights[i];
         float halfDiag = length(vec2(rl.halfWidth, rl.halfHeight));
         float range = halfDiag + sqrt(max(rl.intensity, 0.0) / 0.01);
-        if (sphereTileIntersection(rl.position, range, viewProj,
-                                   tileMin, tileMax, sliceZ0, sliceZ1)) {
+        vec3 rv = (cam.view * vec4(rl.position, 1.0)).xyz;
+        if (sphereAABBIntersect(rv, range, froxelMn, froxelMx)) {
             uint slot = atomicAdd(sRectCount, 1u);
             if (slot < MAX_RECTS_PER_CLUSTER) sRect[slot] = i;
         }
