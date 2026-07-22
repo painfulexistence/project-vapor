@@ -1240,6 +1240,12 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("GpuCull",
         [](Renderer& r) { r.gpuCullPass(); }, PassFlags::RequiresCompute);
 
+    // Adaptive tessellation update (CBT classify/split/merge -> reduction ->
+    // indirect args -> leaf cache). No-op without tessellated meshes. Before
+    // Main so the Tess draw pass below consumes this frame's args.
+    renderGraph.addPass("TessUpdate",
+        [](Renderer& r) { r.tessUpdatePass(); }, PassFlags::RequiresCompute);
+
     // Screen-space contact shadows (Metal compute / Vulkan fullscreen frag).
     // Reads the pre-pass depth, so it runs after depth is available and before
     // Main consumes the result.
@@ -1249,6 +1255,12 @@ void Renderer::setupDefaultRenderGraph() {
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
+
+    // Adaptive tessellation draw (mesh/task path or instanced indirect path,
+    // per capability) into the HDR scene, depth-tested against Main. Before
+    // the sky so its depth writes keep the background out.
+    renderGraph.addPass("Tess",
+        [](Renderer& r) { r.tessRenderPass(); });
 
     // Sky/atmosphere fills the background (depth == far) before bloom, so the
     // bright sky and sun disk feed the bloom pyramid.
@@ -6840,6 +6852,10 @@ void Renderer::createRenderPipeline() {
                 meshletPrePassPipeline = rhi->createMeshPipeline(pp);
             }
         }
+
+        // Adaptive tessellation (CBT/LEB): compute chain + both draw paths
+        // (the mesh-shader path is skipped inside when unsupported).
+        createTessellationPipelines();
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
         // unlike the Vulkan twin's additive-blend pipeline.
         bloomUpsamplePipeline = makeMetalPass("shaders/3d_bloom_upsample.metal", "vertexMain", "fragmentMain",

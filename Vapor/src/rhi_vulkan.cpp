@@ -1582,6 +1582,20 @@ void RHI_Vulkan::drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY, Uint32 gr
     pfnCmdDrawMeshTasks(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
 }
 
+void RHI_Vulkan::drawMeshTasksIndirect(BufferHandle argsBuffer, size_t offset) {
+    if (currentCommandBuffer == VK_NULL_HANDLE || !pfnCmdDrawMeshTasksIndirect) {
+        return;
+    }
+    auto it = buffers.find(argsBuffer.id);
+    if (it == buffers.end()) {
+        return;
+    }
+    flushDescriptors();
+    // One VkDrawMeshTasksIndirectCommandEXT {x, y, z} read from the buffer.
+    pfnCmdDrawMeshTasksIndirect(currentCommandBuffer, it->second.buffer,
+                                static_cast<VkDeviceSize>(offset), 1, 3 * sizeof(Uint32));
+}
+
 void RHI_Vulkan::destroyPipeline(PipelineHandle handle) {
     auto it = pipelines.find(handle.id);
     if (it != pipelines.end()) {
@@ -2976,6 +2990,8 @@ void RHI_Vulkan::createLogicalDevice() {
 
     if (meshShadersEnabled) {
         pfnCmdDrawMeshTasks = (PFN_vkCmdDrawMeshTasksEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT");
+        pfnCmdDrawMeshTasksIndirect =
+            (PFN_vkCmdDrawMeshTasksIndirectEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksIndirectEXT");
         capabilities.meshShaders = pfnCmdDrawMeshTasks != nullptr;
         meshShadersEnabled = capabilities.meshShaders;
     }
@@ -3597,6 +3613,16 @@ void RHI_Vulkan::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCo
         flushComputeDescriptors();
         vkCmdDispatch(currentCommandBuffer, groupCountX, groupCountY, groupCountZ);
     }
+}
+
+void RHI_Vulkan::dispatchIndirect(BufferHandle argsBuffer, size_t offset) {
+    if (currentCommandBuffer == VK_NULL_HANDLE) return;
+    auto it = buffers.find(argsBuffer.id);
+    if (it == buffers.end()) return;
+    flushComputeDescriptors();
+    // Args buffer needs BufferUsage::Indirect (STORAGE | INDIRECT on Vulkan);
+    // computeBarrier() already covers indirect-command reads for the producer.
+    vkCmdDispatchIndirect(currentCommandBuffer, it->second.buffer, static_cast<VkDeviceSize>(offset));
 }
 
 void RHI_Vulkan::setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) {

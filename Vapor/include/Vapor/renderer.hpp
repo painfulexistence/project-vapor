@@ -7,6 +7,7 @@
 #include "graphics.hpp"
 #include "font_manager.hpp"
 #include "render_scene.hpp"
+#include "tessellation.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
 #include <functional>
@@ -1272,6 +1273,58 @@ private:
     BufferHandle meshMeshletRangeBuffer; // uvec2[meshId] = {meshletOffset, meshletCount}
     bool m_meshletsDirty = false;
     void ensureMeshletBuffers();  // (re)build meshlet GPU buffers from CPU data
+
+    // ------------------------------------------------------------------------
+    // Adaptive GPU tessellation (CBT/LEB — see cbt.hpp / tessellation.hpp and
+    // assets/shaders/3d_tess_*.metal). Opt-in per mesh via
+    // createTessellatedMesh: the mesh is fan-triangulated into LEB roots and
+    // subdivided on the GPU every frame against the screen-space LoD metric.
+    // The CBT update always runs in compute (TessUpdate pass); rendering forks
+    // by capability — mesh/task shaders when supported, otherwise an instanced
+    // vertex-pull draw fed by GPU-written indirect args. Metal-first, like the
+    // meshlet path: the pipelines only exist on backends whose shaders loaded.
+    // Implementation lives in src/tessellation.cpp.
+    // ------------------------------------------------------------------------
+    Uint32 createTessellatedMesh(const Mesh& mesh, const TessellationDesc& desc = {});
+    void destroyTessellatedMesh(Uint32 id);
+    void setTessellatedMeshTransform(Uint32 id, const glm::mat4& model);
+    // Split when a leaf's hypotenuse projects larger than this many pixels
+    // (leaf grid segments are ~1/8 of it — 64 px => ~8 px triangles).
+    float tessSplitPixels = 64.0f;
+    bool tessPreferMeshShaders = true;  // use the mesh/task path when supported
+    bool tessFreeze = false;            // pause split/merge (debug)
+    void tessUpdatePass();
+    void tessRenderPass();
+
+    struct TessInstance {
+        Uint32 id = 0;
+        Uint32 maxDepth = 0;
+        Uint32 rootDepth = 0;
+        Uint32 rootCount = 0;
+        Uint32 maxLeaves = 0;
+        float displacementScale = 0.0f;
+        glm::mat4 model = glm::mat4(1.0f);
+        BufferHandle cbtBuffer;       // CBT storage (counts + bitfield), GPU-resident
+        BufferHandle rootBuffer;      // TessRootGpu[]
+        BufferHandle argsBuffer;      // TessArgs (GPU-written indirect args)
+        BufferHandle leafDataBuffer;  // TessLeafDataGpu[maxLeaves] (compute path)
+    };
+    std::vector<TessInstance> m_tessInstances;
+    Uint32 m_nextTessMeshId = 1;
+    void createTessellationPipelines();  // called from the Metal init block
+    void ensureTessGridBuffers();
+    bool tessMeshPathActive() const;
+    TessParamsGpu tessFillParams(const TessInstance& t) const;
+    ComputePipelineHandle tessClassifyPipeline, tessReduceFirstPipeline,
+        tessReduceLevelPipeline, tessArgsPipeline, tessLeafPrepPipeline;
+    ShaderHandle tessClassifyShader, tessReduceFirstShader, tessReduceLevelShader,
+        tessArgsShader, tessLeafPrepShader;
+    ShaderHandle tessVertexShader, tessFragmentShader;
+    ShaderHandle tessObjectShader, tessMeshShader, tessMeshFragShader;
+    PipelineHandle tessRenderPipeline;  // instanced compute path
+    PipelineHandle tessMeshPipeline;    // object/mesh path
+    BufferHandle tessGridVertexBuffer, tessGridIndexBuffer;
+    Uint32 tessGridIndexCount = 0;
     BufferHandle lightCullDataBuffer;
     PipelineHandle sunFlarePipeline;
     ShaderHandle sunFlareVertexShader, sunFlareFragmentShader;
