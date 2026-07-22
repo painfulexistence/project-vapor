@@ -703,7 +703,7 @@ namespace Vapor {
                 const auto& t = attrView.get<TransformComponent>(entity);
                 const auto& a = attrView.get<ParticleAttractorComponent>(entity);
                 ParticleAttractor pa;
-                pa.position = t.position;
+                pa.position = glm::vec3(t.worldTransform[3]); // world position from transform matrix
                 pa.strength = a.strength;
                 field.attractors.push_back(pa);
                 if (field.attractors.size() >= MAX_PARTICLE_ATTRACTORS) break;
