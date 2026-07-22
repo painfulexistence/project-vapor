@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "meshlet_builder.hpp"  // runtime meshlet fallback in registerMesh
 #include "stats_log.hpp"
 #include "rhi_vulkan.hpp"
 #include <chrono>
@@ -736,8 +737,11 @@ void Renderer::shutdown() {
 // ============================================================================
 
 MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
-                                    const std::vector<Uint32>& indices) {
+                                    const std::vector<Uint32>& indices,
+                                    const Vapor::MeshletData* meshletData,
+                                    bool meshletLodEnabled) {
     RenderMesh mesh;
+    mesh.meshletLodEnabled = meshletLodEnabled;
 
     // Create vertex buffer
     if (!vertices.empty()) {
@@ -771,6 +775,47 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     m_mergedVertices.insert(m_mergedVertices.end(), vertices.begin(), vertices.end());
     m_mergedIndices.insert(m_mergedIndices.end(), indices.begin(), indices.end());
     m_mergedGeometryDirty = true;
+
+    // Fallback: if the mesh arrived without baked meshlets (e.g. loaded via
+    // loadGLTF instead of loadGLTFOptimized, or a pre-v3 cache) but the backend
+    // can use the meshlet path, build them now. One-time per mesh at load; the
+    // preferred path is the offline bake in loadGLTFOptimized.
+    Vapor::MeshletData builtMeshlets;
+    if ((!meshletData || !meshletData->isBuilt()) && capabilities.meshShaders && !indices.empty()) {
+        Vapor::Mesh tmp;
+        tmp.vertices = vertices;
+        tmp.indices = indices;
+        tmp.primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
+        MeshletBuilder::build(tmp);
+        if (tmp.meshletData.isBuilt()) {
+            builtMeshlets = std::move(tmp.meshletData);
+            meshletData = &builtMeshlets;
+        }
+    }
+
+    // Accumulate baked meshlets into the global meshlet buffers. meshletVertices
+    // are mesh-local (into `vertices`); rebase them into the merged vertex buffer
+    // by adding this mesh's vertexOffset, and rebase each meshlet's own offsets to
+    // the global arrays. Shared by every instance via the per-mesh range below.
+    if (meshletData && meshletData->isBuilt()) {
+        const Uint32 vtxBase = static_cast<Uint32>(m_globalMeshletVertices.size());
+        const Uint32 triBase = static_cast<Uint32>(m_globalMeshletTriangles.size());
+        mesh.meshletOffset = static_cast<Uint32>(m_globalMeshlets.size());
+        mesh.meshletCount  = static_cast<Uint32>(meshletData->meshlets.size());
+        for (const Vapor::Meshlet& src : meshletData->meshlets) {
+            Vapor::Meshlet m = src;
+            m.vertexOffset   += vtxBase;
+            m.triangleOffset += triBase;
+            m_globalMeshlets.push_back(m);
+        }
+        for (Uint32 mv : meshletData->meshletVertices)
+            m_globalMeshletVertices.push_back(mv + mesh.vertexOffset);  // -> merged VB
+        m_globalMeshletTriangles.insert(m_globalMeshletTriangles.end(),
+            meshletData->meshletTriangles.begin(), meshletData->meshletTriangles.end());
+        m_globalMeshletBounds.insert(m_globalMeshletBounds.end(),
+            meshletData->bounds.begin(), meshletData->bounds.end());
+        m_meshletsDirty = true;
+    }
 
     MeshId id = static_cast<MeshId>(meshes.size());
     meshes.push_back(mesh);
@@ -1034,8 +1079,8 @@ void Renderer::render() {
     // whether you are CPU- or GPU-bound.
     const auto _cpuFrameStart = std::chrono::high_resolution_clock::now();
 
-    // Option A: when the pre-pass runs fully GPU-driven (the indirect MDI
-    // pre-pass), EVERY geometry pass that consumed
+    // Option A: when the pre-pass runs fully GPU-driven (indirect MDI pre-pass or
+    // meshlet mesh-shader pre-pass), EVERY geometry pass that consumed
     // visibleDrawables is now GPU-driven or iterates the full frameDrawables set
     // (shadows, TLAS). The CPU frustum cull would just produce an unused list, so
     // skip it — that's the point. visibleDrawables stays empty; the HUD reports
@@ -1377,7 +1422,7 @@ void Renderer::sortDrawables() {
 
 void Renderer::updateBuffers() {
     // Populate the camera's frustum planes so the GPU cull pass can test bounds
-    // against them (object cull in Indirect mode).
+    // against them (object cull in Indirect mode, meshlet cull in Meshlet mode).
     // Only when a GPU-driven mode is active, to keep the default path's camera
     // data byte-identical.
     if (gpuDrivenActive()) {
@@ -1490,11 +1535,14 @@ void Renderer::updateBuffers() {
                                   : capabilities.multiDrawIndirect);
     const bool mdi = mdiLayoutActive();  // == bindlessMDI || plain-MDI (see helper)
     m_mdiInstanceLayout = mdi;  // pre-pass/shadow must match this layout (Metal)
-    // MDI addresses the merged vertex buffer, so build it (self-gates on
-    // m_mergedGeometryDirty).
-    if (mdi) ensureMergedGeometry();
-    // Bindless material table for the Bindless MDI mode (self-gates on dirty + caps).
-    if (bindlessMDI) ensureBindlessMaterialTable();
+    // MDI and the meshlet path both address the merged vertex buffer, so build it
+    // for either (self-gates on m_mergedGeometryDirty).
+    if (mdi || gpuDrivenMeshlet()) ensureMergedGeometry();
+    // Upload meshlet buffers (self-gates on mesh-shader support + dirty).
+    ensureMeshletBuffers();
+    // Bindless material table: shared by Bindless MDI and the meshlet path (its
+    // fragment samples the same table by materialID). Self-gates on dirty + caps.
+    if (bindlessMDI || gpuDrivenMeshlet()) ensureBindlessMaterialTable();
     m_materialRanges.clear();
 
     auto appendInstance = [&](Uint32 drawableIdx) {
@@ -1849,12 +1897,191 @@ void Renderer::mainRenderPass() {
                              bindlessMaterialTable.isValid() && mergedVertexBuffer.isValid() &&
                              totalInstanceCount > 0;
 
+    // Meshlet path (task/mesh shaders): per-cluster cull + LOD selection on the
+    // GPU, one drawMeshTasks per instance. Fragment shades textured albedo from
+    // the shared bindless material table (Step 1 of PBR parity — normal/metallic/
+    // roughness + analytic lights + IBL are the follow-up); the "Debug color" UI
+    // toggle switches to per-meshlet hashColor. Falls back to the paths below if
+    // the pipeline or any meshlet buffer is missing.
+    const bool useMeshlet = gpuDrivenMeshlet() && meshletPipeline.isValid() &&
+                            meshletBuffer.isValid() && meshletBoundsBuffer.isValid() &&
+                            meshletVertexBuffer.isValid() && meshletTriangleBuffer.isValid() &&
+                            mergedVertexBuffer.isValid() && totalInstanceCount > 0;
+
     // Count the geometry submissions issued below so the debug panel can show
     // which path actually ran (see FrameStats::mainDrawCalls / mainPath).
     Uint32 mainDrawCalls = 0;
-    lastFrameStats.mainPath = useBindless ? "BindlessMDI" : useMDI ? "MDI"
+    lastFrameStats.mainPath = useMeshlet ? "Meshlet" : useBindless ? "BindlessMDI" : useMDI ? "MDI"
                             : useGpuDriven ? "Indirect" : "CPU";
-    if (useBindless) {
+    if (useMeshlet) {
+        // Fragment shade mode for the whole meshlet block (fragment buffer 0 /
+        // Vulkan push-constant offset 64):
+        //   1 = per-meshlet debug hashColor (probes/synthetic/draw-all/UI toggle),
+        //   2 = textured albedo from the shared bindless material table,
+        //   0 = lambertian fallback (no material bind — bindless caps absent).
+        // Probes/synthetic/draw-all force hashColor so their hardcoded colors
+        // always show. Set once — it persists on the encoder across the binds
+        // below. The material table (buffer 13) is bound just after the pipeline.
+        const bool forceMeshletDebugColor =
+            meshletDrawAll || meshletSyntheticTri || meshletProbeData || meshletProbeVertex ||
+            meshletProbeXform || meshletProbeEmit || meshletProbeTopo;
+        Uint32 meshletShadeMode = (meshletDebugColor || forceMeshletDebugColor) ? 1u
+                                : bindlessMaterialTable.isValid()               ? 2u
+                                : 0u;
+        rhi->setFragmentBytes(&meshletShadeMode, sizeof(meshletShadeMode), 0);
+        // Lowest-level probe first (Metal): mesh-ONLY pipeline, zero inputs,
+        // green triangle on the left. See meshletSyntheticPipeline.
+        if (meshletSyntheticTri && meshletSyntheticPipeline.isValid()) {
+            rhi->bindPipeline(meshletSyntheticPipeline);
+            rhi->drawMeshTasks(1, 1, 1);
+            mainDrawCalls++;
+        }
+        // Debug probes also drop the depth test + face culling (NoDepth twin).
+        const bool noDepth = (meshletDrawAll || meshletSyntheticTri || meshletProbeData ||
+                              meshletProbeVertex || meshletProbeXform || meshletProbeEmit ||
+                              meshletProbeTopo) &&
+                             meshletPipelineNoDepth.isValid();
+        rhi->bindPipeline(noDepth ? meshletPipelineNoDepth : meshletPipeline);
+        // Shared bindless material table at fragment buffer(13) — the meshlet
+        // fragment samples albedo by materialID in shadeMode 2 (same table the
+        // Bindless-MDI PBR fragment uses). Bound whenever valid; modes 0/1 don't
+        // dereference it. Metal only: the Vulkan meshlet fragment has no such
+        // table (and the path is inactive on MoltenVK anyway).
+        if (backend == GraphicsBackend::Metal && bindlessMaterialTable.isValid()) {
+            rhi->bindTextureArgumentTable(bindlessMaterialTable);
+        }
+        // Full-PBR fragment inputs for shadeMode 2 (see 3d_meshlet.metal
+        // fragmentMain). Bound unconditionally on Metal so mode 2 always has
+        // valid handles; mode 0/1 return before dereferencing them. The light
+        // buffers hold the same C++ types the main PBR fragment binds
+        // (DirectionalLightData≡DirLight, PointLightData≡PointLight, ...), so
+        // the meshlet fragment reads them at its own buffer indices. Full forward
+        // shading parity: tiled point lights, RT-shadow near region + 3-cascade
+        // PSSM + cascade blend + RT↔PSSM cross-fade, SSCS, stochastic point/rect/
+        // spot shadows, screen-space AO on ambient, GIBS GI, the RT reflection/
+        // refraction composite, and triplanar/prototype UVs (mesh stage carries
+        // scaledLocalPos + localNormal). Vulkan meshlet uses MeshletDebug.frag.
+        if (backend == GraphicsBackend::Metal) {
+            rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+            rhi->setFragmentBuffer(2, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+            rhi->setFragmentBuffer(3, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
+            rhi->setFragmentBuffer(4, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
+            rhi->setFragmentBuffer(5, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
+            if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(6, rectLightBuffer);
+            if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(7, pssmDataBuffer, 0, sizeof(PSSMRenderData));
+            struct MeshletLightCounts { Uint32 pointCount, spotCount, rectCount, dirShadowOn; };
+            MeshletLightCounts lc{
+                std::min<Uint32>(static_cast<Uint32>(pointLights.size()), maxPointLights),
+                std::min<Uint32>(static_cast<Uint32>(spotLights.size()), maxSpotLights),
+                static_cast<Uint32>(rectLights.size()),
+                (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
+            };
+            rhi->setFragmentBytes(&lc, sizeof(lc), 8);
+            // Tiled point lights: same cluster buffer + tile grid the forward pass
+            // uses, so the meshlet fragment shades only the lights covering its
+            // tile instead of looping all of them (the main-pass cost driver).
+            if (clusterBuffer.isValid()) rhi->setFragmentBuffer(9, clusterBuffer);
+            struct MeshletTileParams { Uint32 gx, gy, gz; float sw, sh; };
+            MeshletTileParams tp{ clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ,
+                                  static_cast<float>(width), static_cast<float>(height) };
+            rhi->setFragmentBytes(&tp, sizeof(tp), 10);
+            // IBL + shadow + rect-video textures (constexpr-sampled in-shader, so
+            // the bound sampler is a formality). Defaults keep every slot valid
+            // even when a subsystem is off (a material's iblEnabled gates the
+            // cube reads; unbound cubes would still be UB to declare).
+            rhi->setTexture(0, 0, (m_iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, clampSampler);
+            rhi->setTexture(0, 1, (m_iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex, clampSampler);
+            rhi->setTexture(0, 2, (m_iblReady && brdfLUTTex.isValid()) ? brdfLUTTex : blackTex, clampSampler);
+            rhi->setTexture(0, 3, pssmShadowArrayTexture, shadowSampler);
+            rhi->setTexture(0, 4, whiteTex, defaultSampler);  // rect-light video (unused unless useVideoTexture)
+            // Point shadow (stochastic R channel; white = unshadowed when off) —
+            // same selection as the forward pass, denoised copy when available.
+            TextureHandle pointShadowTex =
+                (capabilities.raytracing && stochasticShadowsEnabled && stochasticShadowHistoryWritten &&
+                 stochasticShadowHistoryRT.isValid())
+                    ? ((stochasticShadowDenoiseRan && stochasticShadowDenoisedRT.isValid())
+                           ? stochasticShadowDenoisedRT : stochasticShadowHistoryRT)
+                    : whiteTex;
+            rhi->setTexture(0, 5, pointShadowTex, clampSampler);
+            // Screen-space AO / contact shadow / GI + RT reflection/refraction —
+            // same handles + runtime gates as the forward pass. Neutral defaults
+            // (white AO/SSCS, black GI/RT) keep every slot valid when off.
+            const bool reflOnM = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
+            const bool refrOnM = rtRefractionsEnabled && sceneHasTransmission &&
+                                 capabilities.raytracing && refractionRT.isValid();
+            const bool gibsOnM = capabilities.raytracing && gibsEnabled && giResultTexture.isValid();
+            rhi->setTexture(0, 6, (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex, clampSampler);
+            rhi->setTexture(0, 7, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
+            rhi->setTexture(0, 8, gibsOnM ? giResultTexture : blackTex, clampSampler);
+            rhi->setTexture(0, 9, reflOnM ? reflectionRT : blackTex, clampSampler);
+            rhi->setTexture(0, 10, refrOnM ? refractionRT : blackTex, clampSampler);
+            // RT hard-shadow near region (white when RT off -> near branch is a
+            // no-op since cascadeSplits.x/rtEnd is also 0, matching the forward pass).
+            rhi->setTexture(0, 11, (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, clampSampler);
+            struct MeshletShadeFlags { Uint32 shadowRGB, gibsOn; float reflOn, reflIntensity, refrOn, refrIntensity; };
+            MeshletShadeFlags sf{
+                (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u,
+                gibsOnM ? 1u : 0u,
+                reflOnM ? 1.0f : 0.0f, rtReflectionIntensity,
+                refrOnM ? 1.0f : 0.0f, rtRefractionIntensity,
+            };
+            rhi->setFragmentBytes(&sf, sizeof(sf), 11);
+        }
+        // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
+        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);
+        rhi->setVertexBuffer(3, meshletBuffer, 0, 0);
+        rhi->setVertexBuffer(4, meshletVertexBuffer, 0, 0);
+        rhi->setVertexBuffer(5, meshletTriangleBuffer, 0, 0);
+        rhi->setVertexBuffer(6, meshletBoundsBuffer, 0, 0);
+        rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
+        // Hi-Z occlusion for the meshlet object-stage cull (main pass): the same
+        // pyramid + OccParams the instance cull uses. The pre-pass (built before
+        // HiZBuild) produced the depth, so the pyramid is complete; the object
+        // shader culls meshlets whose bounds are fully behind it. Enabled follows
+        // the "Hi-Z occlusion" toggle — this is what makes it affect Meshlet mode.
+        // Metal only (object-stage textures; Vulkan meshlet is inactive).
+        if (backend == GraphicsBackend::Metal) {
+            struct MeshletOccParams { Uint32 enabled, mipCount; float hizW, hizH; } occ;
+            occ.enabled = (gpuOcclusionCulling && hizTexture.isValid()) ? 1u : 0u;
+            occ.mipCount = hizMipCount;
+            occ.hizW = float(hizWidth);
+            occ.hizH = float(hizHeight);
+            rhi->setVertexBytes(&occ, sizeof(occ), 10);  // -> object + mesh stage buffer(10)
+            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
+        }
+
+        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
+        // Negative-threshold debug sentinels (all skip cull in the task stage):
+        //   <= -6.5  topology probe    (read + validate meshletTriangles buffer 5)
+        //   <= -5.5  emission probe    (real vertex loop, hardcoded topology)
+        //   <= -4.5  transform probe   (clip-space landing of the first vertex)
+        //   <= -3.5  vertex-read probe (real position read -> colored triangle)
+        //   <= -2.5  count probe       (vertexCount/triangleCount validity)
+        //   <= -1.5  synthetic         (hardcoded triangle, no reads)
+        //   <  0     draw-all          (real geometry, cull off)
+        const float threshold = meshletProbeTopo ? -7.0f
+            : meshletProbeEmit ? -6.0f
+            : meshletProbeXform ? -5.0f
+            : meshletProbeVertex ? -4.0f
+            : meshletProbeData ? -3.0f
+            : meshletSyntheticTri ? -2.0f
+            : meshletDrawAll ? -1.0f
+            : meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
+            auto it = drawableToInstanceID.find(i);
+            if (it == drawableToInstanceID.end()) continue;
+            const RenderMesh& mesh = meshes[frameDrawables[i].mesh];
+            if (mesh.meshletCount == 0) continue;  // mesh without baked meshlets
+            // LOD off for this mesh -> threshold 0 selects only the finest
+            // clusters (full detail). Debug thresholds (negative) are left as-is.
+            float th = (threshold >= 0.0f && !mesh.meshletLodEnabled) ? 0.0f : threshold;
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th };
+            rhi->setVertexBytes(&params, sizeof(params), 8);
+            rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
+            mainDrawCalls++;
+        }
+    } else if (useBindless) {
         // Binding state set for mainPipeline above (camera/instances/lights/
         // system textures) carries over. Only the pipeline (bindless fragment),
         // the merged buffers, and the material table differ from the normal path.
@@ -2215,6 +2442,64 @@ void Renderer::prePass() {
     rp.clearDepth = 1.0f;
     rhi->beginRenderPass(rp);
 
+    // Meshlet Option A: GPU-driven depth+normal pre-pass via the SAME task+mesh
+    // shaders the main meshlet pass uses, so the pre-pass depth matches exactly
+    // what the main pass draws (its task-stage per-cluster cull decides
+    // visibility — there's no CPU-culled visibleDrawables to loop). One
+    // drawMeshTasks per instance, real LOD threshold (no debug probes here).
+    const bool meshletPrePass = gpuDrivenMeshlet() && gpuDrivenPrePass &&
+        meshletPrePassPipeline.isValid() &&
+        meshletBuffer.isValid() && meshletBoundsBuffer.isValid() &&
+        meshletVertexBuffer.isValid() && meshletTriangleBuffer.isValid() &&
+        mergedVertexBuffer.isValid() && totalInstanceCount > 0;
+    if (meshletPrePass) {
+        rhi->bindPipeline(meshletPrePassPipeline);
+        // Alpha-cutout inputs so the pre-pass discards a leaf's transparent holes
+        // (glTF MASK) instead of writing depth over them — without this the holes
+        // occlude the background and render as clear color. Mirrors the forward
+        // pre-pass. Metal only (Vulkan meshlet uses MeshletPrePass.frag).
+        if (backend == GraphicsBackend::Metal) {
+            Uint32 alphaMask = bindlessMaterialTable.isValid() ? 1u : 0u;
+            rhi->setFragmentBytes(&alphaMask, sizeof(alphaMask), 0);
+            if (bindlessMaterialTable.isValid()) {
+                rhi->setFragmentBuffer(2, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+                rhi->bindTextureArgumentTable(bindlessMaterialTable);
+            }
+        }
+        rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setVertexBuffer(2, instanceDataBuffer, 0, sizeof(Vapor::InstanceData) * totalInstanceCount);
+        rhi->setVertexBuffer(3, meshletBuffer, 0, 0);
+        rhi->setVertexBuffer(4, meshletVertexBuffer, 0, 0);
+        rhi->setVertexBuffer(5, meshletTriangleBuffer, 0, 0);
+        rhi->setVertexBuffer(6, meshletBoundsBuffer, 0, 0);
+        rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
+        // Occlusion OFF in the pre-pass: it must render EVERY frustum-visible
+        // meshlet so the Hi-Z it feeds is complete (occlusion-culling here would
+        // punch holes in the pyramid). objectMain reads occ at buffer(10), so it
+        // must be bound; bind the pyramid too to avoid an unbound-texture arg.
+        if (backend == GraphicsBackend::Metal) {
+            struct MeshletOccParams { Uint32 enabled, mipCount; float hizW, hizH; } occ{ 0u, 0u, 0.0f, 0.0f };
+            rhi->setVertexBytes(&occ, sizeof(occ), 10);
+            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
+        }
+        const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
+        struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
+        for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
+            auto it = drawableToInstanceID.find(i);
+            if (it == drawableToInstanceID.end()) continue;
+            const RenderMesh& mesh = meshes[frameDrawables[i].mesh];
+            if (mesh.meshletCount == 0) continue;  // mesh without baked meshlets
+            // Match the main pass's LOD choice so the depth lines up (threshold 0
+            // = finest clusters when this mesh has LOD disabled).
+            float th = mesh.meshletLodEnabled ? threshold : 0.0f;
+            MeshletParams params{ it->second, mesh.meshletOffset, mesh.meshletCount, th };
+            rhi->setVertexBytes(&params, sizeof(params), 8);
+            rhi->drawMeshTasks((mesh.meshletCount + 31) / 32, 1, 1);
+        }
+        rhi->endRenderPass();
+        return;
+    }
+
     rhi->bindPipeline(prePassPipeline);
     rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
@@ -2451,7 +2736,7 @@ void Renderer::gpuCullPass() {
         occ.hizH = float(hizHeight);
         rhi->setComputeBytes(&occ, sizeof(occ), 4);
         rhi->setComputeBuffer(5, mergedIndexBuffer, 0, 0);
-        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->setComputeSampledTexture(4, hizTexture, hizSampler);
         rhi->dispatch((n + 63) / 64, 1, 1);
         rhi->endComputePass();
         rhi->computeBarrier();  // ICB writes -> executeICB reads in Main
@@ -2500,10 +2785,10 @@ void Renderer::runGpuCull(BufferHandle argsBuffer, bool enableOcclusion) {
     // buffer index 4 (see GpuCull.comp / 3d_gpu_cull.metal).
     if (backend == GraphicsBackend::Metal) {
         rhi->setComputeBytes(&n, sizeof(Uint32), 3);
-        rhi->setComputeSampledTexture(4, hizTexture, clampSampler);
+        rhi->setComputeSampledTexture(4, hizTexture, hizSampler);
         rhi->setComputeBytes(&occ, sizeof(occ), 4);
     } else {
-        rhi->setComputeSampledTexture(0, hizTexture, clampSampler);
+        rhi->setComputeSampledTexture(0, hizTexture, hizSampler);
         rhi->setComputeBytes(&occ, sizeof(occ), 0);
     }
     rhi->dispatch((n + 63) / 64, 1, 1);
@@ -2535,11 +2820,58 @@ void Renderer::ensureMergedGeometry() {
     rhi->updateBuffer(mergedIndexBuffer, m_mergedIndices.data(), 0, ibDesc.size);
 
     m_mergedGeometryDirty = false;
+    // Complete these large one-time uploads before their staging retires (see
+    // ensureMeshletBuffers for the VUID this avoids).
+    rhi->flushUploads();
+}
+
+// (Re)upload the global meshlet buffers accumulated in registerMesh. Only on
+// mesh-shader-capable backends (nothing else consumes them). The Phase-C task/
+// mesh shaders read these; until then this just makes the data GPU-resident.
+void Renderer::ensureMeshletBuffers() {
+    if (!m_meshletsDirty || m_globalMeshlets.empty()) return;
+    if (!capabilities.meshShaders) return;
+
+    auto makeStorage = [&](BufferHandle& h, const void* data, size_t bytes) {
+        if (bytes == 0) return;
+        if (h.isValid()) rhi->destroyBuffer(h);
+        BufferDesc d;
+        d.size = bytes;
+        d.usage = BufferUsage::Storage;
+        d.memoryUsage = MemoryUsage::GPU;
+        h = rhi->createBuffer(d);
+        rhi->updateBuffer(h, data, 0, bytes);
+    };
+
+    makeStorage(meshletBuffer, m_globalMeshlets.data(),
+                m_globalMeshlets.size() * sizeof(Vapor::Meshlet));
+    makeStorage(meshletVertexBuffer, m_globalMeshletVertices.data(),
+                m_globalMeshletVertices.size() * sizeof(Uint32));
+    // u8 triangle indices, padded to a 4-byte multiple for buffer sizing.
+    {
+        std::vector<Uint8> tris = m_globalMeshletTriangles;
+        while (tris.size() % 4 != 0) tris.push_back(0);
+        makeStorage(meshletTriangleBuffer, tris.data(), tris.size());
+    }
+    makeStorage(meshletBoundsBuffer, m_globalMeshletBounds.data(),
+                m_globalMeshletBounds.size() * sizeof(Vapor::MeshletBounds));
+
+    // Per-mesh range table indexed by mesh id (all instances of a mesh share it).
+    std::vector<glm::uvec2> ranges;
+    ranges.reserve(meshes.size());
+    for (const RenderMesh& m : meshes)
+        ranges.push_back(glm::uvec2(m.meshletOffset, m.meshletCount));
+    makeStorage(meshMeshletRangeBuffer, ranges.data(), ranges.size() * sizeof(glm::uvec2));
+
+    m_meshletsDirty = false;
     // These are large one-time uploads recorded into the upload command stream.
     // Force them to complete now: otherwise an oversize staging buffer (retired
     // on a frame-counter timer) can be freed one frame before the upload command
     // buffer that reads it finishes (VUID-vkDestroyBuffer-buffer-00922).
     rhi->flushUploads();
+    fmt::print("Meshlet buffers uploaded: {} meshlets, {} verts, {} tris, {} meshes\n",
+               m_globalMeshlets.size(), m_globalMeshletVertices.size(),
+               m_globalMeshletTriangles.size() / 3, meshes.size());
 }
 
 // (Re)write the bindless material texture table for the ICB draw mode: one
@@ -3911,6 +4243,16 @@ void Renderer::skyAtmospherePass() {
     if (!colorRT.isValid() || !depthStencilRT.isValid() || !atmosphereDataBuffer.isValid()) {
         return;
     }
+    // Debug: the meshlet probes (synthetic / draw-all / data / vertex / xform /
+    // emit / topo) draw with depthWrite OFF, so this pass — which paints the sky
+    // over every pixel that has no geometry depth — would overdraw them and show
+    // a false blank. Skip the sky while any probe is active so the probe geometry
+    // is visible on a black background (only affects the meshlet debug path).
+    if (gpuDrivenMeshlet() &&
+        (meshletDrawAll || meshletSyntheticTri || meshletProbeData || meshletProbeVertex ||
+         meshletProbeXform || meshletProbeEmit || meshletProbeTopo)) {
+        return;
+    }
     RenderPassDesc rp;
     rp.name = "SkyAtmosphere";
     rp.colorAttachments.push_back(colorRT);
@@ -4871,6 +5213,20 @@ void Renderer::createDefaultResources() {
     clampSamplerDesc.addressModeW = AddressMode::ClampToEdge;
     clampSampler = rhi->createSampler(clampSamplerDesc);
 
+    // Hi-Z sampler: NEAREST + clamp. The pyramid stores the FARTHEST (max) depth
+    // per region; bilinear interpolation blends toward nearer neighbours and
+    // UNDER-estimates that max, so the occlusion test (minDepth > o) over-culls —
+    // most visible at the meshlet cull's fine per-cluster footprint, where a
+    // single fine-mip texel is interpolated (the reported false positives).
+    SamplerDesc hizSamplerDesc;
+    hizSamplerDesc.minFilter = FilterMode::Nearest;
+    hizSamplerDesc.magFilter = FilterMode::Nearest;
+    hizSamplerDesc.mipFilter = FilterMode::Nearest;
+    hizSamplerDesc.addressModeU = AddressMode::ClampToEdge;
+    hizSamplerDesc.addressModeV = AddressMode::ClampToEdge;
+    hizSamplerDesc.addressModeW = AddressMode::ClampToEdge;
+    hizSampler = rhi->createSampler(hizSamplerDesc);
+
     // Create default white texture (1x1 white pixel)
     {
         TextureDesc texDesc;
@@ -5608,6 +5964,66 @@ void Renderer::createRenderPipeline() {
             // Hi-Z reduce: fullscreen max-depth downsample into an R32F mip.
             hizReducePipeline        = makeFullscreenFragPipeline("shaders/HiZReduce.frag.spv",       hizReduceFS,           BlendMode::Opaque, PixelFormat::R32_FLOAT);
 
+            // Meshlet task/mesh pipeline (VK_EXT_mesh_shader). Draws into the
+            // main pass's HDR color + depth; LessOrEqual so it coexists with the
+            // PrePass depth. Skipped entirely without mesh-shader support.
+            if (capabilities.meshShaders) {
+                std::string ts = readFile("shaders/Meshlet.task.spv");
+                std::string ms = readFile("shaders/Meshlet.mesh.spv");
+                std::string fs = readFile("shaders/MeshletDebug.frag.spv");
+                if (!ts.empty() && !ms.empty() && !fs.empty()) {
+                    ShaderDesc d;
+                    d.stage = ShaderStage::Task;     d.code = ts.data(); d.codeSize = ts.size(); d.entryPoint = "main";
+                    meshletTaskShader = rhi->createShader(d);
+                    d.stage = ShaderStage::Mesh;     d.code = ms.data(); d.codeSize = ms.size();
+                    meshletMeshShader = rhi->createShader(d);
+                    d.stage = ShaderStage::Fragment; d.code = fs.data(); d.codeSize = fs.size();
+                    meshletFragShader = rhi->createShader(d);
+                    MeshPipelineDesc mp;
+                    mp.taskShader = meshletTaskShader;
+                    mp.meshShader = meshletMeshShader;
+                    mp.fragmentShader = meshletFragShader;
+                    mp.taskThreadgroupSize = 32;
+                    mp.meshThreadgroupSize = 128;  // one thread per vertex/triangle (see Metal block)
+                    mp.depthTest = true;
+                    mp.depthWrite = true;
+                    mp.depthCompareOp = CompareOp::LessOrEqual;
+                    mp.hasDepthAttachment = true;
+                    mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    meshletPipeline = rhi->createMeshPipeline(mp);
+                    // Debug twin without depth test OR face culling: used by the
+                    // "draw all meshlets" / synthetic-triangle probes to rule
+                    // out depth rejection and winding along with the cull.
+                    mp.depthTest = false;
+                    mp.depthWrite = false;
+                    mp.cullMode = CullMode::None;
+                    meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
+
+                    // Meshlet depth+normal pre-pass: same task+mesh shaders, MRT
+                    // fragment into the PrePass targets (normal + albedo + depth),
+                    // Less depth write (first writer). Keeps the meshlet pre-pass
+                    // on the exact geometry the main meshlet pass draws.
+                    std::string pf = readFile("shaders/MeshletPrePass.frag.spv");
+                    if (!pf.empty()) {
+                        ShaderDesc pd; pd.stage = ShaderStage::Fragment;
+                        pd.code = pf.data(); pd.codeSize = pf.size(); pd.entryPoint = "main";
+                        meshletPrePassFragShader = rhi->createShader(pd);
+                        MeshPipelineDesc pp;
+                        pp.taskShader = meshletTaskShader;
+                        pp.meshShader = meshletMeshShader;
+                        pp.fragmentShader = meshletPrePassFragShader;
+                        pp.taskThreadgroupSize = 32;
+                        pp.meshThreadgroupSize = 128;
+                        pp.depthTest = true;
+                        pp.depthWrite = true;
+                        pp.depthCompareOp = CompareOp::Less;
+                        pp.hasDepthAttachment = true;
+                        pp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::RGBA8_UNORM };
+                        meshletPrePassPipeline = rhi->createMeshPipeline(pp);
+                    }
+                }
+            }
+
             // IBL bake pipelines (GLSL twins of the Metal chain). iblCapturePass
             // is backend-agnostic (RHI calls + render-to-array-layer), so once
             // these exist it runs on Vulkan and fills the same cubemaps.
@@ -6107,6 +6523,81 @@ void Renderer::createRenderPipeline() {
         hizReducePipeline = makeMetalPass("shaders/3d_hiz_reduce.metal", "vertexMain", "fragmentMain",
                                           BlendMode::Opaque, { PixelFormat::R32_FLOAT }, false, CompareOp::Less);
 
+        // Meshlet object/mesh pipeline. Same render-state contract as the Vulkan
+        // twin: HDR color + depth, LessOrEqual against the PrePass depth.
+        if (capabilities.meshShaders) {
+            std::string code = readFile("shaders/3d_meshlet.metal");
+            if (!code.empty()) {
+                ShaderDesc d;
+                d.stage = ShaderStage::Task;     d.code = code.data(); d.codeSize = code.size(); d.entryPoint = "objectMain";
+                meshletTaskShader = rhi->createShader(d);
+                d.stage = ShaderStage::Mesh;     d.entryPoint = "meshMain";
+                meshletMeshShader = rhi->createShader(d);
+                d.stage = ShaderStage::Fragment; d.entryPoint = "fragmentMain";
+                meshletFragShader = rhi->createShader(d);
+                MeshPipelineDesc mp;
+                mp.taskShader = meshletTaskShader;
+                mp.meshShader = meshletMeshShader;
+                mp.fragmentShader = meshletFragShader;
+                mp.taskThreadgroupSize = 32;
+                // One mesh thread per vertex/triangle: size to MAX(maxVerts 64,
+                // maxTris 128). A mesh threadgroup smaller than the primitive
+                // count emits no valid output (see 3d_meshlet.metal meshMain).
+                mp.meshThreadgroupSize = 128;
+                mp.depthTest = true;
+                mp.depthWrite = true;
+                mp.depthCompareOp = CompareOp::LessOrEqual;
+                mp.hasDepthAttachment = true;
+                mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                meshletPipeline = rhi->createMeshPipeline(mp);
+                // Debug twin without depth test or face culling (see the
+                // Vulkan block).
+                mp.depthTest = false;
+                mp.depthWrite = false;
+                mp.cullMode = CullMode::None;
+                meshletPipelineNoDepth = rhi->createMeshPipeline(mp);
+                // Mesh-ONLY probe (no object stage/payload/buffers): drawn
+                // alongside the synthetic triangle to split "object->mesh
+                // amplification broken" from "encoder-level broken". Compiled out
+                // with the probe ladder (meshSynthetic is behind MESHLET_DEBUG_PROBES,
+                // so createShader would fail to find the entry point when off).
+                if constexpr (kMeshletDebugProbes) {
+                    d.stage = ShaderStage::Mesh; d.entryPoint = "meshSynthetic";
+                    meshletSyntheticShader = rhi->createShader(d);
+                    MeshPipelineDesc sp;
+                    sp.taskShader = {};  // mesh-only
+                    sp.meshShader = meshletSyntheticShader;
+                    sp.fragmentShader = meshletFragShader;
+                    sp.taskThreadgroupSize = 1;
+                    sp.meshThreadgroupSize = 64;
+                    sp.depthTest = false;
+                    sp.depthWrite = false;
+                    sp.cullMode = CullMode::None;
+                    sp.hasDepthAttachment = true;
+                    sp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    meshletSyntheticPipeline = rhi->createMeshPipeline(sp);
+                }
+
+                // Meshlet depth+normal pre-pass: same task+mesh shaders, MRT
+                // fragment into the PrePass targets (normal + albedo + depth),
+                // Less depth write (first writer). Keeps the meshlet pre-pass on
+                // the exact geometry the main meshlet pass draws.
+                d.stage = ShaderStage::Fragment; d.entryPoint = "fragmentPrePass";
+                meshletPrePassFragShader = rhi->createShader(d);
+                MeshPipelineDesc pp;
+                pp.taskShader = meshletTaskShader;
+                pp.meshShader = meshletMeshShader;
+                pp.fragmentShader = meshletPrePassFragShader;
+                pp.taskThreadgroupSize = 32;
+                pp.meshThreadgroupSize = 128;
+                pp.depthTest = true;
+                pp.depthWrite = true;
+                pp.depthCompareOp = CompareOp::Less;
+                pp.hasDepthAttachment = true;
+                pp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::RGBA8_UNORM };
+                meshletPrePassPipeline = rhi->createMeshPipeline(pp);
+            }
+        }
         // Native upsample blends in-shader (texBlend at texture(1)) — Opaque,
         // unlike the Vulkan twin's additive-blend pipeline.
         bloomUpsamplePipeline = makeMetalPass("shaders/3d_bloom_upsample.metal", "vertexMain", "fragmentMain",
@@ -6511,7 +7002,11 @@ void Renderer::stage(std::shared_ptr<RenderScene> scene) {
         // Register mesh if not already registered
         if (mesh->renderMeshId == UINT32_MAX) {
             if (!mesh->vertices.empty()) {
-                mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices);
+                // Fill the per-mesh LOD flag: the author's Mesh::meshletLodEnabled
+                // AND a density heuristic (LOD off for meshes too small to benefit).
+                const size_t triCount = (mesh->indices.empty() ? mesh->vertices.size() : mesh->indices.size()) / 3;
+                const bool lodOn = mesh->meshletLodEnabled && triCount >= meshletLodMinTriangles;
+                mesh->renderMeshId = registerMesh(mesh->vertices, mesh->indices, &mesh->meshletData, lodOn);
             } else if (mesh->vertexCount > 0 && mesh->indexCount > 0 &&
                        mesh->vertexOffset + mesh->vertexCount <= scene->vertices.size() &&
                        mesh->indexOffset + mesh->indexCount <= scene->indices.size()) {
@@ -6527,7 +7022,8 @@ void Renderer::stage(std::shared_ptr<RenderScene> scene) {
                 std::vector<Uint32> inds(
                     scene->indices.begin() + mesh->indexOffset,
                     scene->indices.begin() + mesh->indexOffset + mesh->indexCount);
-                mesh->renderMeshId = registerMesh(verts, inds);
+                // meshletData indices are mesh-local, matching this sliced range.
+                mesh->renderMeshId = registerMesh(verts, inds, &mesh->meshletData);
             }
         }
 
@@ -6884,6 +7380,71 @@ void Renderer::drawGraphicsImGui() {
         }
         if (gpuDrivenMode == GpuDrivenMode::BindlessMDI && !bindlessSelectable)
             gpuDrivenMode = GpuDrivenMode::Off;  // never stick on an unavailable mode
+        ImGui::SameLine();
+        // Meshlet (task/mesh shaders): needs mesh-shader support AND the Phase-C
+        // draw path. Disabled until both hold.
+        const bool meshletSelectable = capabilities.meshShaders && kMeshletDrawImplemented;
+        ImGui::BeginDisabled(!meshletSelectable);
+        if (ImGui::RadioButton("Meshlet", gpuDrivenMode == GpuDrivenMode::Meshlet))
+            gpuDrivenMode = GpuDrivenMode::Meshlet;
+        ImGui::EndDisabled();
+        if (!meshletSelectable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(capabilities.meshShaders ? "Meshlet draw path not yet implemented (Phase C)"
+                                                       : "Mesh shaders unsupported on this device");
+        }
+        if (gpuDrivenMode == GpuDrivenMode::Meshlet && !meshletSelectable)
+            gpuDrivenMode = GpuDrivenMode::Off;  // never stick on an unavailable mode
+        // Cluster-LOD error tolerance (pixels). Bigger = coarser LODs kick in
+        // sooner. Only meaningful while the meshlet path is drawing.
+        if (gpuDrivenMode == GpuDrivenMode::Meshlet) {
+            ImGui::SliderFloat("  LOD error (px)", &meshletLodPixelError, 0.1f, 16.0f, "%.1f",
+                               ImGuiSliderFlags_Logarithmic);
+            // Everyday toggle: full PBR (default) vs per-meshlet debug color for
+            // inspecting cluster boundaries. The probes below always force color.
+            ImGui::Checkbox("  Debug color (per-meshlet)", &meshletDebugColor);
+            // Deep bring-up diagnostics (probe ladder + GPU capture) — collapsed
+            // by default so the everyday panel stays clean.
+            if (ImGui::TreeNode("  Advanced debug")) {
+                // Diagnostic: emit EVERY meshlet (all LOD levels stacked, heavy
+                // overdraw). If the screen stays empty with this on, the problem is
+                // raster/depth/bindings, not the cull.
+                ImGui::Checkbox("Draw all meshlets (skip cull)", &meshletDrawAll);
+                // The probe ladder (fixed-triangle diagnostics + the mesh-only
+                // synthetic pipeline) is compiled out with MESHLET_DEBUG_PROBES /
+                // kMeshletDebugProbes; only surface its toggles when it's built.
+                if constexpr (kMeshletDebugProbes) {
+                    // Diagnostic: mesh stage draws one hardcoded triangle, zero buffer
+                    // reads. Visible triangle => dispatch/raster fine, bindings broken.
+                    ImGui::Checkbox("Synthetic triangle (skip buffers)", &meshletSyntheticTri);
+                    // Diagnostic: fixed triangle colored by the real payload+meshlet
+                    // read (R=vertexCount/64, G=triangleCount/128, B=mi). Yellowish =>
+                    // reads OK (bug is geometry/transform); black/wild/none => read bad.
+                    ImGui::Checkbox("Data probe (color = meshlet record)", &meshletProbeData);
+                    // Diagnostic: fixed triangle colored by the first real vertex
+                    // position. White => read OK (bug is transform/index); cyan =>
+                    // zero (buffer unbound); magenta => huge/NaN (VertexData stride).
+                    ImGui::Checkbox("Vertex-read probe (color = position)", &meshletProbeVertex);
+                    // Diagnostic: fixed triangle colored by clip-space landing of the
+                    // first vertex. White => transform OK (bug is topology/set_index);
+                    // missing R = behind camera, missing G = off-screen, missing B = bad Z.
+                    ImGui::Checkbox("Transform probe (color = clip landing)", &meshletProbeXform);
+                    // Diagnostic: real vertex loop, hardcoded topology. Cyan tris =>
+                    // vertex loop OK (bug is the index loop); blank => vertex emission.
+                    ImGui::Checkbox("Emission probe (real verts, fake topology)", &meshletProbeEmit);
+                    // Diagnostic: read + validate meshletTriangles(5). In-range non-degen
+                    // => buffer read OK (bug is set_index); no R => indices out of range.
+                    ImGui::Checkbox("Topology probe (color = index validity)", &meshletProbeTopo);
+                }
+                // One-shot GPU capture of the next frame -> .gputrace (open in Xcode).
+                // Needs the app relaunched with MTL_CAPTURE_ENABLED=1.
+                if (ImGui::Button("Capture next frame (.gputrace)")) {
+                    rhi->captureFrame("/tmp/vapor_meshlet.gputrace");
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(run with MTL_CAPTURE_ENABLED=1)");
+                ImGui::TreePop();
+            }
+        }
 
         // MDI is a sub-option of the plain Indirect method (single-call
         // multi-draw per material over the merged scene buffers; Vulkan
@@ -6896,8 +7457,10 @@ void Renderer::drawGraphicsImGui() {
         ImGui::EndDisabled();
         if (!mdiAvailable) gpuDrivenMDI = false;
 
-        // Hi-Z occlusion is orthogonal — it refines whichever GPU-driven mode is
-        // active (object cull in Indirect).
+        // Hi-Z occlusion refines whichever GPU-driven mode is active: the
+        // per-instance compute cull in Indirect/Bindless, and the per-meshlet
+        // object-stage cull in Meshlet (both sample the same pyramid, built from
+        // the pre-pass depth before the main pass).
         ImGui::BeginDisabled(!gpuDrivenActive());
         ImGui::Checkbox("Hi-Z occlusion culling", &gpuOcclusionCulling);
         ImGui::EndDisabled();
