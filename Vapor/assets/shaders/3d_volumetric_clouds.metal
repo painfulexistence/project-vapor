@@ -74,6 +74,11 @@ struct VolumetricCloudData {
     // Cloud ambient (sky-fill) tint, scaled by ambientIntensity. Weather
     // drives it: blue for clear, neutral gray overcast, storm green.
     float3 ambientColor;
+    float _pad9;
+    // Night key light: the moon (moonDir = -sunDirection) takes over as the sun
+    // sets. moonLightScale = moon lit brightness as a fraction of the sun term.
+    float3 moonColor;
+    float moonLightScale;
 };
 
 // ============================================================================
@@ -217,10 +222,9 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
 // Lighting Functions
 // ============================================================================
 
-// March towards sun to calculate shadow/transmittance
-float lightMarch(float3 worldPos, constant VolumetricCloudData& data) {
+// March toward an arbitrary light (sun by day, moon by night) for shadowing.
+float lightMarch(float3 worldPos, float3 lightDir, constant VolumetricCloudData& data) {
     float stepSize = data.cloudLayerThickness / float(data.lightSteps);
-    float3 lightDir = data.sunDirection;
 
     float transmittance = 1.0;
     float3 pos = worldPos;
@@ -241,18 +245,14 @@ float lightMarch(float3 worldPos, constant VolumetricCloudData& data) {
     return transmittance;
 }
 
-// Multi-scattering approximation (Schneider's method)
-float3 multiScatterApprox(float lightTransmittance, float cosTheta,
-                          constant VolumetricCloudData& data) {
-    // Direct light with phase function
+// Scattering contribution from ONE key light (colour × power), no ambient.
+// Called once for the sun and once for the moon; the caller weights each by
+// day/night and adds a single ambient term.
+float3 scatterFromLight(float3 lightColor, float lightPower, float lightTransmittance,
+                        float cosTheta, constant VolumetricCloudData& data) {
     float phase = phaseDualLobe(cosTheta, data.phaseG1, data.phaseG2, data.phaseBlend);
-    // sunLightScale < 1: clouds absorb/self-shadow, so their lit surface sits
-    // BELOW the clear-sky brightness instead of blooming over it.
-    float sunPower = data.sunIntensity * data.sunLightScale;
-    float3 directLight = data.sunColor * sunPower * phase * lightTransmittance;
+    float3 directLight = lightColor * lightPower * phase * lightTransmittance;
 
-    // Multi-scatter approximation (octaves of scattering)
-    // Each bounce: dimmer, more isotropic, less shadowed
     float3 multiScatter = float3(0.0);
     float attenuation = 0.3;
     float contribution = 0.4;
@@ -262,24 +262,43 @@ float3 multiScatterApprox(float lightTransmittance, float cosTheta,
     float scatterTransmittance = lightTransmittance;
 
     for (int i = 0; i < 4; i++) {
-        // Each bounce gets more ambient-like
         scatterPhase = mix(scatterPhase, 0.25, phaseAttenuation);  // More isotropic
         scatterTransmittance = mix(scatterTransmittance, 1.0, 0.7);  // Less shadow
-
-        multiScatter += contribution * scatterPhase * scatterTransmittance * data.sunColor;
-
+        multiScatter += contribution * scatterPhase * scatterTransmittance * lightColor;
         contribution *= attenuation;
     }
 
-    // Silver lining effect (bright edges when backlit)
+    // Silver lining (bright edges when backlit)
     float silverLining = pow(saturate(1.0 - lightTransmittance), data.silverLiningSpread);
-    silverLining *= saturate(-cosTheta * 0.5 + 0.5);  // Only when looking at sun
-    multiScatter += data.sunColor * data.silverLiningIntensity * silverLining;
+    silverLining *= saturate(-cosTheta * 0.5 + 0.5);
+    multiScatter += lightColor * data.silverLiningIntensity * silverLining;
 
-    // Ambient sky light
-    float3 ambient = data.ambientColor * data.ambientIntensity;
+    return directLight + multiScatter * lightPower;
+}
 
-    return directLight + multiScatter * sunPower + ambient;
+// Combined lighting: the sun fades out below the horizon while the moon
+// (antipodal, dim, cool) fades in, so night clouds are moonlit — not lit by a
+// phantom below-horizon sun. Ambient dims at night but keeps its tint.
+float3 cloudLighting(float3 worldPos, float3 rayDir, constant VolumetricCloudData& data) {
+    // sunLightScale < 1: clouds absorb/self-shadow, so the lit surface sits
+    // BELOW the clear-sky brightness instead of blooming over it.
+    float sunPower = data.sunIntensity * data.sunLightScale;
+    float dayFactor = smoothstep(-0.12, 0.08, data.sunDirection.y);  // 1 day, 0 night
+
+    float3 lum = data.ambientColor * data.ambientIntensity * mix(0.3, 1.0, dayFactor);
+
+    if (dayFactor > 0.01) {
+        float tr = lightMarch(worldPos, data.sunDirection, data);
+        lum += scatterFromLight(data.sunColor, sunPower, tr,
+                                dot(rayDir, data.sunDirection), data) * dayFactor;
+    }
+    if (dayFactor < 0.99) {
+        float3 moonDir = -data.sunDirection;  // antipodal, matches TimeOfDaySystem
+        float tr = lightMarch(worldPos, moonDir, data);
+        lum += scatterFromLight(data.moonColor, sunPower * data.moonLightScale, tr,
+                                dot(rayDir, moonDir), data) * (1.0 - dayFactor);
+    }
+    return lum;
 }
 
 // ============================================================================
@@ -337,11 +356,8 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
         float density = sampleCloudDensity(pos, data, false);
 
         if (density > 0.001) {
-            // Calculate lighting
-            float lightTransmittance = lightMarch(pos, data);
-
-            // Multi-scattering approximation
-            float3 luminance = multiScatterApprox(lightTransmittance, cosTheta, data);
+            // Sun-by-day / moon-by-night key lighting + ambient.
+            float3 luminance = cloudLighting(pos, rayDir, data);
 
             // Beer-powder effect
             float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * data.powderStrength +

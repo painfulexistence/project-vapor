@@ -4992,6 +4992,11 @@ void Renderer::volumetricCloudPass() {
     // Shared atmosphere sun intensity (the value the clouds were tuned
     // against) — NOT the struct default, which is brighter.
     cloudSettings.sunIntensity = atmosphereData.sunIntensity;
+    // Night key light: the shader fades the sun out below the horizon and lights
+    // the deck with the moon (moonDir = -sunDirection). Colour tracks the Sky's
+    // moon so the moonlit clouds match the visible moon; moonLightScale stays a
+    // panel tunable.
+    cloudSettings.moonColor = glm::vec3(nightSkyData.moonColor);
     // windSpeed is the cloud's per-medium scroll coefficient; the shared wind
     // strength scales it so the WindFieldComponent drives the scroll rate.
     cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
@@ -7948,6 +7953,8 @@ void Renderer::drawGraphicsImGui() {
         ImGui::ColorEdit3("Ambient Color", &cloudSettings.ambientColor.x);
         // Cloud-specific sun scale (< 1: clouds occlude — darker than the sky).
         ImGui::DragFloat("Sun Light Scale", &cloudSettings.sunLightScale, 0.01f, 0.0f, 2.0f);
+        // Moonlit-cloud brightness at night, as a fraction of the sun term.
+        ImGui::DragFloat("Moon Light Scale", &cloudSettings.moonLightScale, 0.005f, 0.0f, 1.0f);
         ImGui::DragFloat("Silver Lining", &cloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
         // RHI-only extras (kept from the original Effects panel)
         ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);

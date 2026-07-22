@@ -468,6 +468,11 @@ struct alignas(16) VolumetricCloudRenderData {
     // drives it (blue clear sky / gray overcast / storm green).
     glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
     float _pad9 = 0.0f;
+    // Night key light: the moon (moonDir = -sunDirection) takes over as the sun
+    // sets. Colour from the Sky/night-sky moon; moonLightScale = moon lit
+    // brightness as a fraction of the sun term.
+    glm::vec3 moonColor = glm::vec3(0.92f, 0.93f, 1.0f);
+    float moonLightScale = 0.15f;
 };
 
 // IBL capture parameters (mirror of the Metal IBLCaptureData).

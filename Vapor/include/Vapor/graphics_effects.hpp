@@ -159,6 +159,9 @@ struct alignas(16) VolumetricCloudData {
     // Cloud ambient (sky-fill) tint, scaled by ambientIntensity.
     glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
     float _pad9 = 0.0f;
+    // Night key light (moonDir = -sunDirection); see VolumetricCloudRenderData.
+    glm::vec3 moonColor = glm::vec3(0.92f, 0.93f, 1.0f);
+    float moonLightScale = 0.15f;
 };
 
 // ── Light Scattering (God Rays) ───────────────────────────────────────────

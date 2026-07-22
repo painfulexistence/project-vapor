@@ -53,6 +53,8 @@ layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     vec2 _p8;
     vec3 ambientColor;  // unread here; layout twin of CloudRaymarch.frag
     float _p9;
+    vec3 moonColor;
+    float moonLightScale;
 };
 
 void main() {

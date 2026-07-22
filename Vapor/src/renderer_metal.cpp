@@ -1736,6 +1736,8 @@ public:
         cloudData->powderStrength = r.volumetricCloudSettings.powderStrength;
         cloudData->sunLightScale = r.volumetricCloudSettings.sunLightScale;
         cloudData->ambientColor = r.volumetricCloudSettings.ambientColor;
+        cloudData->moonColor = r.volumetricCloudSettings.moonColor;
+        cloudData->moonLightScale = r.volumetricCloudSettings.moonLightScale;
         cloudData->windDirection = r.volumetricCloudSettings.windDirection;
         cloudData->windSpeed = r.volumetricCloudSettings.windSpeed;
         cloudData->primarySteps = r.volumetricCloudSettings.primarySteps;
