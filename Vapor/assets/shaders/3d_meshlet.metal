@@ -72,6 +72,53 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
     return e / d * (cam.proj[1][1] * 0.5);
 }
 
+// Hi-Z occlusion params (object buffer 10). Mirror of 3d_gpu_cull.metal's
+// OccParams — same max-depth pyramid + conventions, so the meshlet cull occludes
+// against the exact Hi-Z the instance cull uses.
+struct MeshletOccParams {
+    uint  occlusionEnabled;
+    uint  hizMipCount;
+    float2 hizSize;   // mip-0 dimensions in texels
+};
+
+// Per-meshlet Hi-Z occlusion test — a verbatim port of 3d_gpu_cull.metal's
+// occludedByHiZ, fed the meshlet's world-space bounding box (sphere AABB).
+// Standard [0,1] depth; compares the box's nearest depth against the farthest
+// occluder over its screen footprint. Conservative: any doubt keeps the meshlet.
+static bool meshletOccludedByHiZ(device const CameraData& cam, float3 aabbMin, float3 aabbMax,
+                                 texture2d<float> hiz, sampler hizSampler, MeshletOccParams occ) {
+    float4x4 vp = cam.proj * cam.view;
+    float2 uvMin = float2(1.0);
+    float2 uvMax = float2(0.0);
+    float minDepth = 1.0;
+    for (int i = 0; i < 8; ++i) {
+        float3 corner = float3((i & 1) != 0 ? aabbMax.x : aabbMin.x,
+                               (i & 2) != 0 ? aabbMax.y : aabbMin.y,
+                               (i & 4) != 0 ? aabbMax.z : aabbMin.z);
+        float4 clip = vp * float4(corner, 1.0);
+        if (clip.w <= 0.0) return false;
+        float3 ndc = clip.xyz / clip.w;
+        float2 uv = ndc.xy * 0.5 + 0.5;
+        uvMin = min(uvMin, uv);
+        uvMax = max(uvMax, uv);
+        minDepth = min(minDepth, ndc.z);
+    }
+    if (uvMax.x < 0.0 || uvMin.x > 1.0 || uvMax.y < 0.0 || uvMin.y > 1.0) return false;
+    uvMin = clamp(uvMin, 0.0, 1.0);
+    uvMax = clamp(uvMax, 0.0, 1.0);
+    float2 hMin = float2(uvMin.x, 1.0 - uvMax.y);
+    float2 hMax = float2(uvMax.x, 1.0 - uvMin.y);
+    float2 sizePx = (hMax - hMin) * occ.hizSize;
+    float lvl = ceil(log2(max(max(sizePx.x, sizePx.y), 1.0)));
+    lvl = clamp(lvl, 0.0, float(occ.hizMipCount - 1u));
+    float o = 0.0;
+    o = max(o, hiz.sample(hizSampler, float2(hMin.x, hMin.y), level(lvl)).r);
+    o = max(o, hiz.sample(hizSampler, float2(hMax.x, hMin.y), level(lvl)).r);
+    o = max(o, hiz.sample(hizSampler, float2(hMin.x, hMax.y), level(lvl)).r);
+    o = max(o, hiz.sample(hizSampler, float2(hMax.x, hMax.y), level(lvl)).r);
+    return minDepth > o;
+}
+
 [[object]] void objectMain(
     object_data MeshletPayload& payload [[payload]],
     mesh_grid_properties grid,
@@ -79,6 +126,12 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
     device const InstanceData*  instances [[buffer(2)]],
     device const MeshletBounds* bounds    [[buffer(6)]],
     constant MeshletParams&     params    [[buffer(8)]],
+    // Hi-Z occlusion (main pass only; the pre-pass binds occ with
+    // occlusionEnabled 0 so the pyramid it FEEDS is complete). buffer(9) is left
+    // free for the survivor-stats counter on its own branch.
+    constant MeshletOccParams&  occ        [[buffer(10)]],
+    texture2d<float>            hiz        [[texture(0)]],
+    sampler                     hizSampler [[sampler(0)]],
     uint tid [[thread_position_in_threadgroup]],
     uint gid [[threadgroup_position_in_grid]]
 ) {
@@ -121,6 +174,19 @@ static float projectError(float4 sphere, float error, float4x4 model, float maxS
             bool thisFineEnough = (b.refined < 0) ||
                 (projectError(b.lodSphere, b.lodError, model, maxScale, cam) <= params.errorThreshold);
             visible = parentTooCoarse && thisFineEnough;
+        }
+
+        // Hi-Z occlusion: cull the cluster if its world bounding box is entirely
+        // behind the depth pyramid the pre-pass built. Main pass only (the
+        // pre-pass passes occlusionEnabled 0 so it draws every frustum-visible
+        // meshlet, keeping the pyramid complete). This is the layer that made the
+        // "Hi-Z occlusion" toggle actually affect the meshlet path.
+        if (visible && !cullBypass && occ.occlusionEnabled != 0u) {
+            float3 aabbMin = wc - wr;
+            float3 aabbMax = wc + wr;
+            if (meshletOccludedByHiZ(cam, aabbMin, aabbMax, hiz, hizSampler, occ)) {
+                visible = false;
+            }
         }
     }
 

@@ -1639,6 +1639,17 @@ void RHI_Metal::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, Sa
     }
 }
 
+void RHI_Metal::setObjectTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
+    auto texIt = textures.find(texture.id);
+    auto samplerIt = samplers.find(sampler.id);
+    if (texIt != textures.end() && currentRenderEncoder) {
+        currentRenderEncoder->setObjectTexture(texIt->second.texture.get(), binding);
+    }
+    if (samplerIt != samplers.end() && currentRenderEncoder && binding < 16) {
+        currentRenderEncoder->setObjectSamplerState(samplerIt->second.sampler.get(), binding);
+    }
+}
+
 void RHI_Metal::setVertexBytes(const void* data, size_t size, Uint32 binding) {
     if (currentRenderEncoder && data && size > 0) {
         if (currentPipelineIsMesh) {

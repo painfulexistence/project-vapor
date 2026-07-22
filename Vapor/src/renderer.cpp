@@ -2024,6 +2024,21 @@ void Renderer::mainRenderPass() {
         rhi->setVertexBuffer(5, meshletTriangleBuffer, 0, 0);
         rhi->setVertexBuffer(6, meshletBoundsBuffer, 0, 0);
         rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
+        // Hi-Z occlusion for the meshlet object-stage cull (main pass): the same
+        // pyramid + OccParams the instance cull uses. The pre-pass (built before
+        // HiZBuild) produced the depth, so the pyramid is complete; the object
+        // shader culls meshlets whose bounds are fully behind it. Enabled follows
+        // the "Hi-Z occlusion" toggle — this is what makes it affect Meshlet mode.
+        // Metal only (object-stage textures; Vulkan meshlet is inactive).
+        if (backend == GraphicsBackend::Metal) {
+            struct MeshletOccParams { Uint32 enabled, mipCount; float hizW, hizH; } occ;
+            occ.enabled = (gpuOcclusionCulling && hizTexture.isValid()) ? 1u : 0u;
+            occ.mipCount = hizMipCount;
+            occ.hizW = float(hizWidth);
+            occ.hizH = float(hizHeight);
+            rhi->setVertexBytes(&occ, sizeof(occ), 10);  // -> object + mesh stage buffer(10)
+            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, clampSampler);
+        }
 
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
         // Negative-threshold debug sentinels (all skip cull in the task stage):
@@ -2444,6 +2459,15 @@ void Renderer::prePass() {
         rhi->setVertexBuffer(5, meshletTriangleBuffer, 0, 0);
         rhi->setVertexBuffer(6, meshletBoundsBuffer, 0, 0);
         rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
+        // Occlusion OFF in the pre-pass: it must render EVERY frustum-visible
+        // meshlet so the Hi-Z it feeds is complete (occlusion-culling here would
+        // punch holes in the pyramid). objectMain reads occ at buffer(10), so it
+        // must be bound; bind the pyramid too to avoid an unbound-texture arg.
+        if (backend == GraphicsBackend::Metal) {
+            struct MeshletOccParams { Uint32 enabled, mipCount; float hizW, hizH; } occ{ 0u, 0u, 0.0f, 0.0f };
+            rhi->setVertexBytes(&occ, sizeof(occ), 10);
+            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, clampSampler);
+        }
         const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
         for (Uint32 i = 0; i < frameDrawables.size(); ++i) {
@@ -7381,8 +7405,10 @@ void Renderer::drawGraphicsImGui() {
         ImGui::EndDisabled();
         if (!mdiAvailable) gpuDrivenMDI = false;
 
-        // Hi-Z occlusion is orthogonal — it refines whichever GPU-driven mode is
-        // active (object cull in Indirect, meshlet cull in Meshlet).
+        // Hi-Z occlusion refines whichever GPU-driven mode is active: the
+        // per-instance compute cull in Indirect/Bindless, and the per-meshlet
+        // object-stage cull in Meshlet (both sample the same pyramid, built from
+        // the pre-pass depth before the main pass).
         ImGui::BeginDisabled(!gpuDrivenActive());
         ImGui::Checkbox("Hi-Z occlusion culling", &gpuOcclusionCulling);
         ImGui::EndDisabled();
