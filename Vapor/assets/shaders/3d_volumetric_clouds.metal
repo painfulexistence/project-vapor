@@ -494,9 +494,10 @@ fragment float4 cloudTemporalResolve(
     // Sample history
     float4 history = historyCloud.sample(linearSampler, prevUV);
 
-    // Validity check
+    // Validity check (prevClip.w > 0 rejects behind-camera reprojections —
+    // parity with CloudTemporal.frag).
     bool validHistory = prevUV.x >= 0.0 && prevUV.x <= 1.0 &&
-                        prevUV.y >= 0.0 && prevUV.y <= 1.0;
+                        prevUV.y >= 0.0 && prevUV.y <= 1.0 && prevClip.w > 0.0;
 
     // Neighborhood clamping for anti-ghosting
     float4 minBound = current;
