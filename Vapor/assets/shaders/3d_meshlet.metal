@@ -492,8 +492,15 @@ static float meshletDirShadow(float3 worldPos, float3 N, float3 sunDir, float vi
 }
 
 // Per-material light counts + a directional-shadow enable, packed to avoid a
-// pile of single-uint buffers. (pointCount, spotCount, rectCount, dirShadowOn).
+// pile of single-uint buffers. pointCount is unused now that point lights come
+// from the tiled clusters (kept for layout stability / fallback).
 struct MeshletLightCounts { uint pointCount; uint spotCount; uint rectCount; uint dirShadowOn; };
+
+// Clustered point-light tile lookup params (mirrors the forward pass's
+// screenSize @4 / gridSize @5): screen size to derive the tile UV, grid dims to
+// index the cluster buffer. gridSize is a 2D tile grid here (Z unused, matching
+// the main pass's tileIndex = x + y*gridX).
+struct MeshletTileParams { uint gridX; uint gridY; uint gridZ; float screenW; float screenH; };
 
 fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              constant uint&              shadeMode  [[buffer(0)]],
@@ -505,17 +512,20 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              const device RectLight*     rectLights [[buffer(6)]],
                              constant PSSMData&          pssmData   [[buffer(7)]],
                              constant MeshletLightCounts& counts    [[buffer(8)]],
+                             const device Cluster*       clusters   [[buffer(9)]],
+                             constant MeshletTileParams& tile       [[buffer(10)]],
                              // Shared bindless material table (buffer 13), same
                              // handle the Bindless-MDI PBR fragment consumes.
                              const device MeshletMaterialTexs* materialTexs [[buffer(13)]],
                              // System textures for IBL + directional shadow +
-                             // rect-light video. Direct args are legal here (the
-                             // meshlet pipeline is NOT an ICB pipeline).
+                             // point shadow + rect-light video. Direct args are
+                             // legal here (the meshlet pipeline is NOT an ICB pipeline).
                              texturecube<float, access::sample>   irradianceMap  [[texture(0)]],
                              texturecube<float, access::sample>   prefilterMap   [[texture(1)]],
                              texture2d<float, access::sample>     brdfLUT        [[texture(2)]],
                              depth2d_array<float, access::sample> pssmShadowMaps [[texture(3)]],
-                             texture2d<float, access::sample>     rectLightVideo [[texture(4)]]) {
+                             texture2d<float, access::sample>     rectLightVideo [[texture(4)]],
+                             texture2d<float, access::sample>     pointShadowTex [[texture(5)]]) {
     // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes / UI toggle),
     //            0 = lambertian fallback (no material bind — bindless caps absent),
     //            2 = full PBR from the shared material table + analytic lights + IBL.
@@ -574,11 +584,22 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
         : 1.0;
     result += CalculateDirectionalLight(dirLights[0], norm, T, B, viewDir, surf) * shadow;
 
-    // Analytic point / spot / rect lights (loop-all — unshadowed, matching the
-    // Vulkan forward path; the tiled-cluster + RGB-shadow refinements are the
-    // main pass's Metal-only extras).
-    for (uint i = 0; i < counts.pointCount; ++i)
-        result += CalculatePointLight(pointLights[i], norm, T, B, viewDir, surf, in.worldPosition);
+    // Tiled point lights: index the cluster the fragment falls in and shade only
+    // that tile's lights (same lookup as the forward pass — was a loop over ALL
+    // point lights, which dominated the meshlet main pass). Point shadow comes
+    // from the stochastic-shadow R channel (white when off -> no-op).
+    constexpr sampler screenSampler(address::clamp_to_edge, filter::linear);
+    float2 screenUV = in.position.xy / float2(tile.screenW, tile.screenH);
+    uint tileX = uint(screenUV.x * float(tile.gridX));
+    uint tileY = uint((1.0 - screenUV.y) * float(tile.gridY));
+    uint tileIndex = tileX + tileY * tile.gridX;
+    const device Cluster& cell = clusters[tileIndex];
+    float pointShadow = pointShadowTex.sample(screenSampler, screenUV).r;
+    for (uint i = 0; i < cell.lightCount; ++i) {
+        uint li = cell.lightIndices[i];
+        result += CalculatePointLight(pointLights[li], norm, T, B, viewDir, surf, in.worldPosition) * pointShadow;
+    }
+    // Spot / rect stay loop-all (scenes carry only a handful), unshadowed.
     for (uint i = 0; i < counts.spotCount; ++i)
         result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition);
     for (uint i = 0; i < counts.rectCount; ++i)

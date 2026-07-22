@@ -1944,10 +1944,11 @@ void Renderer::mainRenderPass() {
         // valid handles; mode 0/1 return before dereferencing them. The light
         // buffers hold the same C++ types the main PBR fragment binds
         // (DirectionalLightData≡DirLight, PointLightData≡PointLight, ...), so
-        // the meshlet fragment reads them at its own buffer indices. Shadows,
-        // point/spot/rect lights are a simplified subset of the main pass
-        // (single-cascade PCF, unshadowed analytic lights) — full parity is a
-        // follow-up. Vulkan meshlet uses MeshletDebug.frag and skips all this.
+        // the meshlet fragment reads them at its own buffer indices. Point
+        // lights use the same tiled clusters + stochastic point shadow as the
+        // forward pass; the directional shadow is a simpler single-cascade PCF
+        // (no RT/SSCS/cross-fade) and spot/rect stay unshadowed loop-all — the
+        // remaining parity gaps. Vulkan meshlet uses MeshletDebug.frag, skips this.
         if (backend == GraphicsBackend::Metal) {
             rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setFragmentBuffer(2, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
@@ -1964,6 +1965,14 @@ void Renderer::mainRenderPass() {
                 (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
             };
             rhi->setFragmentBytes(&lc, sizeof(lc), 8);
+            // Tiled point lights: same cluster buffer + tile grid the forward pass
+            // uses, so the meshlet fragment shades only the lights covering its
+            // tile instead of looping all of them (the main-pass cost driver).
+            if (clusterBuffer.isValid()) rhi->setFragmentBuffer(9, clusterBuffer);
+            struct MeshletTileParams { Uint32 gx, gy, gz; float sw, sh; };
+            MeshletTileParams tp{ clusterGridSizeX, clusterGridSizeY, clusterGridSizeZ,
+                                  static_cast<float>(width), static_cast<float>(height) };
+            rhi->setFragmentBytes(&tp, sizeof(tp), 10);
             // IBL + shadow + rect-video textures (constexpr-sampled in-shader, so
             // the bound sampler is a formality). Defaults keep every slot valid
             // even when a subsystem is off (a material's iblEnabled gates the
@@ -1973,6 +1982,15 @@ void Renderer::mainRenderPass() {
             rhi->setTexture(0, 2, (m_iblReady && brdfLUTTex.isValid()) ? brdfLUTTex : blackTex, clampSampler);
             rhi->setTexture(0, 3, pssmShadowArrayTexture, shadowSampler);
             rhi->setTexture(0, 4, whiteTex, defaultSampler);  // rect-light video (unused unless useVideoTexture)
+            // Point shadow (stochastic R channel; white = unshadowed when off) —
+            // same selection as the forward pass, denoised copy when available.
+            TextureHandle pointShadowTex =
+                (capabilities.raytracing && stochasticShadowsEnabled && stochasticShadowHistoryWritten &&
+                 stochasticShadowHistoryRT.isValid())
+                    ? ((stochasticShadowDenoiseRan && stochasticShadowDenoisedRT.isValid())
+                           ? stochasticShadowDenoisedRT : stochasticShadowHistoryRT)
+                    : whiteTex;
+            rhi->setTexture(0, 5, pointShadowTex, clampSampler);
         }
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
         rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
