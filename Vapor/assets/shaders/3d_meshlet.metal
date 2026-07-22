@@ -465,21 +465,14 @@ static float3 hashColor(uint x) {
     }
 }
 
-// Compact directional (PSSM) shadow for the meshlet path: pick the cascade by
-// view-space depth, project into its light space, 4-tap Poisson PCF with a
-// per-cascade slope-scaled bias. A deliberately simpler subset of the main PBR
-// pass's RT↔PSSM cross-fade (no RT shadow, no cascade blend, no SSCS) — enough
-// to ground meshlet geometry with sun shadows. Returns 1.0 (lit) when unbound.
-static float meshletDirShadow(float3 worldPos, float3 N, float3 sunDir, float viewZ,
-                              constant PSSMData& pssm,
-                              depth2d_array<float, access::sample> shadowMaps) {
-    int ci = 0;
-    if      (viewZ > pssm.cascadeSplits.z) ci = 2;
-    else if (viewZ > pssm.cascadeSplits.y) ci = 1;
+// One PSSM cascade: project into its light space, 4-tap Poisson PCF with a
+// per-cascade slope-scaled bias (same math as the forward pass's sampleCascade).
+static float meshletSampleCascade(float3 worldPos, float ndl, int ci,
+                                  constant PSSMData& pssm,
+                                  depth2d_array<float, access::sample> shadowMaps) {
     float4 lsPos = pssm.lightSpaceMatrices[ci] * float4(worldPos, 1.0);
     float3 proj  = lsPos.xyz / lsPos.w;
     float2 uv    = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
-    float  ndl   = max(dot(N, sunDir), 0.0);
     float  slope = clamp(1.0 - ndl, 0.0, 1.0);
     float  bias  = 0.002 * float(ci + 1) * (1.0 + 2.0 * slope);
     float  ref   = proj.z - bias;
@@ -491,10 +484,46 @@ static float meshletDirShadow(float3 worldPos, float3 N, float3 sunDir, float vi
     return s * 0.25;
 }
 
+// Directional (PSSM) shadow: select the cascade by view-space depth and blend
+// across the split (matches the forward pass's 3-cascade PSSM + cascadeBlend).
+// The RT-shadow near region + RT↔PSSM cross-fade remain forward-pass-only.
+static float meshletDirShadow(float3 worldPos, float ndl, float viewZ,
+                              constant PSSMData& pssm,
+                              depth2d_array<float, access::sample> shadowMaps) {
+    int ci = 0;
+    if      (viewZ > pssm.cascadeSplits.z) ci = 2;
+    else if (viewZ > pssm.cascadeSplits.y) ci = 1;
+    float sh = meshletSampleCascade(worldPos, ndl, ci, pssm, shadowMaps);
+    float cb = pssm.cascadeBlendRange;
+    if (cb > 0.0 && ci < 2) {
+        float cascadeEnd = (ci == 0) ? pssm.cascadeSplits.y : pssm.cascadeSplits.z;
+        float blendStart = cascadeEnd - cb;
+        if (viewZ > blendStart && viewZ < cascadeEnd) {
+            float next = meshletSampleCascade(worldPos, ndl, ci + 1, pssm, shadowMaps);
+            float t = (viewZ - blendStart) / cb;
+            sh = mix(sh, next, smoothstep(0.0, 1.0, t));
+        }
+    }
+    return sh;
+}
+
 // Per-material light counts + a directional-shadow enable, packed to avoid a
 // pile of single-uint buffers. pointCount is unused now that point lights come
 // from the tiled clusters (kept for layout stability / fallback).
 struct MeshletLightCounts { uint pointCount; uint spotCount; uint rectCount; uint dirShadowOn; };
+
+// Screen-space effect gates + params (mirrors the forward pass's runtime flags).
+// shadowRGB: the point-shadow texture carries R point / G rect / B spot channels
+// (stochastic format). gibsOn: sample GIBS GI instead of IBL. refl/refr: RT
+// reflection/refraction composite enable + intensity.
+struct MeshletShadeFlags {
+    uint  shadowRGB;
+    uint  gibsOn;
+    float reflOn;
+    float reflIntensity;
+    float refrOn;
+    float refrIntensity;
+};
 
 // Clustered point-light tile lookup params (mirrors the forward pass's
 // screenSize @4 / gridSize @5): screen size to derive the tile UV, grid dims to
@@ -514,18 +543,25 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              constant MeshletLightCounts& counts    [[buffer(8)]],
                              const device Cluster*       clusters   [[buffer(9)]],
                              constant MeshletTileParams& tile       [[buffer(10)]],
+                             constant MeshletShadeFlags& flags      [[buffer(11)]],
                              // Shared bindless material table (buffer 13), same
                              // handle the Bindless-MDI PBR fragment consumes.
                              const device MeshletMaterialTexs* materialTexs [[buffer(13)]],
                              // System textures for IBL + directional shadow +
-                             // point shadow + rect-light video. Direct args are
-                             // legal here (the meshlet pipeline is NOT an ICB pipeline).
+                             // point shadow + rect-light video + screen-space AO/
+                             // SSCS/GI/RT. Direct args are legal here (the meshlet
+                             // pipeline is NOT an ICB pipeline).
                              texturecube<float, access::sample>   irradianceMap  [[texture(0)]],
                              texturecube<float, access::sample>   prefilterMap   [[texture(1)]],
                              texture2d<float, access::sample>     brdfLUT        [[texture(2)]],
                              depth2d_array<float, access::sample> pssmShadowMaps [[texture(3)]],
                              texture2d<float, access::sample>     rectLightVideo [[texture(4)]],
-                             texture2d<float, access::sample>     pointShadowTex [[texture(5)]]) {
+                             texture2d<float, access::sample>     pointShadowTex [[texture(5)]],
+                             texture2d<float, access::sample>     texAO          [[texture(6)]],
+                             texture2d<float, access::sample>     texSSCS        [[texture(7)]],
+                             texture2d<float, access::sample>     gibsGI         [[texture(8)]],
+                             texture2d<float, access::sample>     texReflection  [[texture(9)]],
+                             texture2d<float, access::sample>     texRefraction  [[texture(10)]]) {
     // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes / UI toggle),
     //            0 = lambertian fallback (no material bind — bindless caps absent),
     //            2 = full PBR from the shared material table + analytic lights + IBL.
@@ -573,43 +609,74 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     float3x3 TBN = float3x3(T, B, N);
     float3 norm = normalize(TBN * normalize(tex.normal.sample(s, in.uv).rgb * 2.0 - 1.0));
     float3 viewDir = normalize(camera.position - in.worldPosition);
+    constexpr sampler screenSampler(address::clamp_to_edge, filter::linear);
+    float2 screenUV = in.position.xy / float2(tile.screenW, tile.screenH);
 
     float3 result = float3(0.0);
 
-    // Directional sun + PSSM shadow.
+    // Directional sun + PSSM shadow, tightened by the screen-space contact
+    // shadow (min() = shadowed if either says so, matching the forward pass).
     float3 sunDir = normalize(-dirLights[0].direction);
     float viewZ = abs((camera.view * float4(in.worldPosition, 1.0)).z);
+    float ndlSun = max(dot(norm, sunDir), 0.0);
     float shadow = counts.dirShadowOn != 0u
-        ? meshletDirShadow(in.worldPosition, norm, sunDir, viewZ, pssmData, pssmShadowMaps)
+        ? meshletDirShadow(in.worldPosition, ndlSun, viewZ, pssmData, pssmShadowMaps)
         : 1.0;
+    shadow = min(shadow, texSSCS.sample(screenSampler, screenUV).r);
     result += CalculateDirectionalLight(dirLights[0], norm, T, B, viewDir, surf) * shadow;
 
     // Tiled point lights: index the cluster the fragment falls in and shade only
     // that tile's lights (same lookup as the forward pass — was a loop over ALL
-    // point lights, which dominated the meshlet main pass). Point shadow comes
-    // from the stochastic-shadow R channel (white when off -> no-op).
-    constexpr sampler screenSampler(address::clamp_to_edge, filter::linear);
-    float2 screenUV = in.position.xy / float2(tile.screenW, tile.screenH);
+    // point lights, which dominated the meshlet main pass). Point/rect/spot
+    // shadow ride the stochastic texture's R/G/B channels when that format is
+    // active (shadowRGB); otherwise white -> unshadowed.
+    float pointShadow = pointShadowTex.sample(screenSampler, screenUV).r;
+    float rectShadow  = (flags.shadowRGB != 0u) ? pointShadowTex.sample(screenSampler, screenUV).g : 1.0;
+    float spotShadow  = (flags.shadowRGB != 0u) ? pointShadowTex.sample(screenSampler, screenUV).b : 1.0;
     uint tileX = uint(screenUV.x * float(tile.gridX));
     uint tileY = uint((1.0 - screenUV.y) * float(tile.gridY));
     uint tileIndex = tileX + tileY * tile.gridX;
     const device Cluster& cell = clusters[tileIndex];
-    float pointShadow = pointShadowTex.sample(screenSampler, screenUV).r;
     for (uint i = 0; i < cell.lightCount; ++i) {
         uint li = cell.lightIndices[i];
         result += CalculatePointLight(pointLights[li], norm, T, B, viewDir, surf, in.worldPosition) * pointShadow;
     }
-    // Spot / rect stay loop-all (scenes carry only a handful), unshadowed.
     for (uint i = 0; i < counts.spotCount; ++i)
-        result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition);
+        result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition) * spotShadow;
     for (uint i = 0; i < counts.rectCount; ++i)
-        result += CalculateRectLight(rectLights[i], norm, in.worldPosition, viewDir, surf, rectLightVideo);
+        result += CalculateRectLight(rectLights[i], norm, in.worldPosition, viewDir, surf, rectLightVideo) * rectShadow;
 
-    // Ambient: IBL when the material opts in, else a minimal constant term.
-    if (material.iblEnabled > 0.5)
-        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT);
+    // Ambient (screen-space AO attenuates indirect only): GIBS GI when enabled,
+    // else IBL when the material opts in, else a minimal constant term.
+    float screenAO = texAO.sample(screenSampler, screenUV).r;
+    if (flags.gibsOn != 0u)
+        result += gibsGI.sample(screenSampler, screenUV).rgb * surf.ao * screenAO;
+    else if (material.iblEnabled > 0.5)
+        result += CalculateIBL(norm, viewDir, surf, irradianceMap, prefilterMap, brdfLUT) * screenAO;
     else
-        result += float3(0.03) * surf.ao * surf.color;
+        result += float3(0.03) * surf.ao * surf.color * screenAO;
+
+    // RT mirror reflections (Fresnel-weighted, roughness-faded — same as main).
+    if (flags.reflOn > 0.5) {
+        float3 refl = texReflection.sample(screenSampler, screenUV).rgb;
+        float NdotV = max(dot(norm, viewDir), 0.0);
+        float3 F0r = mix(float3(0.04), surf.color, surf.metallic);
+        float3 Fr = FresnelSchlickRoughness(NdotV, F0r, surf.roughness);
+        float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
+        result += refl * Fr * roughFade * flags.reflIntensity * screenAO;
+    }
+
+    // RT refractions (KHR_materials_transmission): mix in the transmitted
+    // radiance by the material's transmission factor (same BTDF as main).
+    if (flags.refrOn > 0.5 && material.transmission > 0.0) {
+        float3 refr = texRefraction.sample(screenSampler, screenUV).rgb;
+        float NdotV = max(dot(norm, viewDir), 0.0);
+        float3 F0t = mix(float3(0.04), surf.color, surf.metallic);
+        float3 Ft = FresnelSchlickRoughness(NdotV, F0t, surf.roughness);
+        float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
+        float3 transmitted = refr * surf.color * (1.0 - Ft) * flags.refrIntensity;
+        result = mix(result, transmitted, material.transmission * roughFade);
+    }
 
     result += surf.emission;
     return float4(result, 1.0);

@@ -1944,11 +1944,12 @@ void Renderer::mainRenderPass() {
         // valid handles; mode 0/1 return before dereferencing them. The light
         // buffers hold the same C++ types the main PBR fragment binds
         // (DirectionalLightData≡DirLight, PointLightData≡PointLight, ...), so
-        // the meshlet fragment reads them at its own buffer indices. Point
-        // lights use the same tiled clusters + stochastic point shadow as the
-        // forward pass; the directional shadow is a simpler single-cascade PCF
-        // (no RT/SSCS/cross-fade) and spot/rect stay unshadowed loop-all — the
-        // remaining parity gaps. Vulkan meshlet uses MeshletDebug.frag, skips this.
+        // the meshlet fragment reads them at its own buffer indices. Near-full
+        // forward parity now: tiled point lights, 3-cascade PSSM + cascade blend,
+        // SSCS, stochastic point/rect/spot shadows, screen-space AO on ambient,
+        // GIBS GI, and the RT reflection/refraction composite. Remaining gaps:
+        // the RT-shadow near region + RT↔PSSM cross-fade, and triplanar UVs.
+        // Vulkan meshlet uses MeshletDebug.frag and skips all this.
         if (backend == GraphicsBackend::Metal) {
             rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setFragmentBuffer(2, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
@@ -1991,6 +1992,26 @@ void Renderer::mainRenderPass() {
                            ? stochasticShadowDenoisedRT : stochasticShadowHistoryRT)
                     : whiteTex;
             rhi->setTexture(0, 5, pointShadowTex, clampSampler);
+            // Screen-space AO / contact shadow / GI + RT reflection/refraction —
+            // same handles + runtime gates as the forward pass. Neutral defaults
+            // (white AO/SSCS, black GI/RT) keep every slot valid when off.
+            const bool reflOnM = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
+            const bool refrOnM = rtRefractionsEnabled && sceneHasTransmission &&
+                                 capabilities.raytracing && refractionRT.isValid();
+            const bool gibsOnM = capabilities.raytracing && gibsEnabled && giResultTexture.isValid();
+            rhi->setTexture(0, 6, (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex, clampSampler);
+            rhi->setTexture(0, 7, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
+            rhi->setTexture(0, 8, gibsOnM ? giResultTexture : blackTex, clampSampler);
+            rhi->setTexture(0, 9, reflOnM ? reflectionRT : blackTex, clampSampler);
+            rhi->setTexture(0, 10, refrOnM ? refractionRT : blackTex, clampSampler);
+            struct MeshletShadeFlags { Uint32 shadowRGB, gibsOn; float reflOn, reflIntensity, refrOn, refrIntensity; };
+            MeshletShadeFlags sf{
+                (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u,
+                gibsOnM ? 1u : 0u,
+                reflOnM ? 1.0f : 0.0f, rtReflectionIntensity,
+                refrOnM ? 1.0f : 0.0f, rtRefractionIntensity,
+            };
+            rhi->setFragmentBytes(&sf, sizeof(sf), 11);
         }
         // Bindings mirror Meshlet.task/.mesh and 3d_meshlet.metal.
         rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
