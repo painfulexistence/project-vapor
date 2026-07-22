@@ -482,7 +482,15 @@ fragment float4 fragmentMain(
     //     result += CalculatePointLight(pointLights[lightIndex], norm, T, B, viewDir, surf, in.worldPosition.xyz);
     // }
 
-    uint tileIndex = tileX + tileY * gridSize.x;
+    // 3D cluster: logarithmic depth slice, same mapping the culler writes
+    // (this realizes the tileZ sketch commented above):
+    //   slice k spans [near * (far/near)^(k/Z), near * (far/near)^((k+1)/Z))
+    float depthVS = -(camera.view * in.worldPosition).z;  // RH: forward = -z
+    uint tileZ = uint(clamp(
+        log(max(depthVS, camera.near) / camera.near)
+            / log(camera.far / camera.near) * float(gridSize.z),
+        0.0, float(gridSize.z) - 1.0));
+    uint tileIndex = tileX + tileY * gridSize.x + tileZ * gridSize.x * gridSize.y;
     // Reference, not copy: Cluster is ~1KB (lightIndices[256]); copying it per
     // fragment spills to stack and reads the whole struct from device memory.
     const device Cluster& tile = clusters[tileIndex];
@@ -501,17 +509,26 @@ fragment float4 fragmentMain(
     // read G as 0, so the flag keeps them fully lit there instead of black.
     {
         float rectShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).g : 1.0;
-        for (uint i = 0; i < rectLightCount; i++) {
-            result += CalculateRectLight(rectLights[i], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo) * rectShadow;
+        // Clustered rect list. rectLightCount == 0 on paths whose culler does
+        // not write the spot/rect tail (legacy native cull), so stale cluster
+        // data is never dereferenced.
+        uint clusterRects = min(tile.rectCount, 32u);  // MAX_RECTS_PER_CLUSTER
+        for (uint slot = 0; slot < clusterRects; slot++) {
+            uint ri = tile.rectIndices[slot];
+            if (ri >= rectLightCount) continue;  // culler/frame mismatch guard
+            result += CalculateRectLight(rectLights[ri], norm, in.worldPosition.xyz, viewDir, surf, rectLightVideo) * rectShadow;
         }
     }
 
-    // Spot lights (loop-all; typical scenes carry a handful, so no clustering).
+    // Spot lights via the culled cluster list (same tile as the point loop).
     // Shadowed by the stochastic pass's B channel under the same flag.
     {
         float spotShadow = (spotRectParams.y & 1u) ? texPointShadow.sample(s, screenUV).b : 1.0;
-        for (uint i = 0; i < spotRectParams.x; i++) {
-            result += CalculateSpotLight(spotLights[i], norm, T, B, viewDir, surf, in.worldPosition.xyz) * spotShadow;
+        uint clusterSpots = min(tile.spotCount, 64u);  // MAX_SPOTS_PER_CLUSTER
+        for (uint slot = 0; slot < clusterSpots; slot++) {
+            uint si = tile.spotIndices[slot];
+            if (si >= spotRectParams.x) continue;  // culler/frame mismatch guard
+            result += CalculateSpotLight(spotLights[si], norm, T, B, viewDir, surf, in.worldPosition.xyz) * spotShadow;
         }
     }
 

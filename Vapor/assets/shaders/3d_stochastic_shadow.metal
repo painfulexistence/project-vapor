@@ -49,13 +49,19 @@ kernel void computeMain(
     float3 worldPos = (camera.invView * viewPos).xyz;
     float3 worldNormal = normalize(normalTexture.read(tid).xyz);
 
-    // Find tile cluster — match PBR shader convention exactly (2D tile, Y flipped)
+    // Find the 3D cluster — match the PBR shader convention exactly (Y flipped,
+    // logarithmic depth slice; see 3d_tile_light_cull.metal for the mapping).
     uint gridX = gridDims.x;
     uint gridY = gridDims.y;
     uint tileX = uint(uv.x * float(gridX));
     uint tileY = uint((1.0 - uv.y) * float(gridY));
+    float depthVS = -viewPos.z;  // RH: forward = -z (viewPos reconstructed above)
+    uint tileZ = uint(clamp(
+        log(max(depthVS, camera.near) / camera.near)
+            / log(camera.far / camera.near) * float(gridDims.z),
+        0.0, float(gridDims.z) - 1.0));
 
-    uint clusterIdx = tileX + tileY * gridX;
+    uint clusterIdx = tileX + tileY * gridX + tileZ * gridX * gridY;
     const device Cluster& cluster = clusters[clusterIdx];
     uint lightCount = cluster.lightCount;
 

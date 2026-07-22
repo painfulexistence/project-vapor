@@ -1,0 +1,226 @@
+#version 450
+// Clustered light culling (Vulkan RHI). One invocation per 3D cluster (x, y
+// screen tile + log depth slice); fills the Cluster buffer for RHIMain.frag.
+// SSBOs throughout (the RHI compute descriptor set is storage-buffer only),
+// and the PointLight layout matches Vapor::PointLightData (48-byte stride).
+
+// One workgroup per 3D cluster, 64 threads cooperating: each thread tests a
+// strided slice of the light list and pushes hits through a shared-memory
+// atomic. The old shape (1 thread/workgroup looping every light serially) left
+// 31/32 SIMD lanes idle per group.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+const uint WG_SIZE = 64u;
+
+const uint MAX_LIGHTS_PER_TILE = 256; // must match graphics.hpp
+const uint MAX_SPOTS_PER_CLUSTER = 64u;
+const uint MAX_RECTS_PER_CLUSTER = 32u;
+
+struct Cluster {
+    vec4 mn;
+    vec4 mx;
+    uint lightCount;
+    uint lightIndices[MAX_LIGHTS_PER_TILE];
+    uint spotCount;
+    uint spotIndices[MAX_SPOTS_PER_CLUSTER];
+    uint rectCount;
+    uint rectIndices[MAX_RECTS_PER_CLUSTER];
+};
+
+// Must match Vapor::SpotLight (std430, 64 bytes).
+struct SpotLight {
+    vec3 position;  float _pad0;
+    vec3 direction; float _pad1;
+    vec3 color;     float _pad2;
+    float radius;   float cosInner; float cosOuter; float intensity;
+};
+// Must match Vapor::RectLight (std430 packs the scalars into the vec3 tails).
+struct RectLight {
+    vec3 position;  float halfWidth;
+    vec3 rright;    float halfHeight;
+    vec3 up;        float intensity;
+    vec3 color;     uint useVideoTexture;
+};
+
+// Must match Vapor::PointLightData (stride 48).
+struct PointLight {
+    vec3 position;
+    float _pad1;
+    vec3 color;
+    float _pad2;
+    float intensity;
+    float radius;
+    vec2 _pad3;
+};
+
+// Must match Vapor::CameraRenderData.
+struct CameraData {
+    mat4 proj; mat4 view; mat4 invProj; mat4 invView;
+    float nearPlane; float farPlane; vec2 _pad;
+    vec3 position; float _pad2;
+    vec4 frustumPlanes[6];
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData cam; };
+layout(std430, set = 0, binding = 3) readonly buffer PointLightBuffer { PointLight pointLights[]; };
+// Must match Vapor::LightCullData.
+layout(std430, set = 0, binding = 4) readonly buffer LightCullBuf {
+    vec2 screenSize;
+    vec2 _pad1;
+    uvec3 gridSize;
+    uint lightCount;
+    uint cullSpotCount;
+    uint cullRectCount;
+};
+layout(std430, set = 0, binding = 5) restrict buffer ClusterBuffer { Cluster tiles[]; };
+layout(std430, set = 0, binding = 6) readonly buffer SpotLightBuffer { SpotLight spotLights[]; };
+layout(std430, set = 0, binding = 7) readonly buffer RectLightBuffer { RectLight rectLights[]; };
+
+// View-space AABB of this froxel (screen tile x depth slice). Corners are
+// exact in view space: ndc.xy at forward distance z is
+// (ndc.x*z/proj00, ndc.y*z/proj11, -z) — camera looks down -Z; dividing by the
+// SIGNED proj[1][1] keeps the mapping convention-agnostic. The AABB bounds the
+// frustum-slice shape, so tests against it are conservative: over-include only,
+// never a false negative. This replaces the old screen-space projected-sphere
+// test entirely — with it go its two failure modes (the under-estimated
+// projected radius that caused hard tile-edge lighting seams, and the
+// behind-camera / near-plane-straddle special cases, which a view-space
+// distance test simply doesn't have).
+void froxelViewAABB(vec2 tileMin, vec2 tileMax, float z0, float z1,
+                    out vec3 mn, out vec3 mx) {
+    vec2 ndcMin = tileMin / screenSize * 2.0 - 1.0;
+    vec2 ndcMax = tileMax / screenSize * 2.0 - 1.0;
+    float ip00 = 1.0 / cam.proj[0][0];
+    float ip11 = 1.0 / cam.proj[1][1];
+    mn = vec3(1e30); mx = vec3(-1e30);
+    for (int c = 0; c < 8; ++c) {
+        float nx = ((c & 1) == 0) ? ndcMin.x : ndcMax.x;
+        float ny = ((c & 2) == 0) ? ndcMin.y : ndcMax.y;
+        float z  = ((c & 4) == 0) ? z0 : z1;
+        vec3 pv = vec3(nx * z * ip00, ny * z * ip11, -z);
+        mn = min(mn, pv);
+        mx = max(mx, pv);
+    }
+}
+
+// Sphere vs AABB: squared distance from the closest point on the box.
+bool sphereAABBIntersect(vec3 center, float radius, vec3 mn, vec3 mx) {
+    vec3 d = center - clamp(center, mn, mx);
+    return dot(d, d) <= radius * radius;
+}
+
+// Cone (spot) vs sphere. Rejects froxels inside the range sphere but outside
+// the cone — the "cull cone against sphere" test (Bart Wronski / Frostbite):
+// angle cull (closest approach exceeds sphere radius), front cull (past the
+// range), back cull (behind the apex). dir points FROM the light; cosHalf is
+// the OUTER half-angle cosine.
+bool spotConeIntersectsSphere(vec3 origin, vec3 dir, float range, float cosHalf,
+                              vec3 sc, float sr) {
+    float sinHalf = sqrt(max(0.0, 1.0 - cosHalf * cosHalf));
+    vec3 V = sc - origin;
+    float Vlen = length(V);
+    float V1 = dot(V, dir);
+    float distClosest = cosHalf * sqrt(max(0.0, Vlen * Vlen - V1 * V1)) - V1 * sinHalf;
+    bool angleCull = distClosest > sr;
+    bool frontCull = V1 > sr + range;
+    bool backCull  = V1 < -sr;
+    return !(angleCull || frontCull || backCull);
+}
+
+// Cooperative compaction state: hits are pushed via atomicAdd, then the whole
+// group copies the compacted lists out. Index order within a list is therefore
+// nondeterministic — every consumer (PBR sum, stochastic pick) is order-
+// independent, so that costs nothing.
+shared uint sPointCount;
+shared uint sSpotCount;
+shared uint sRectCount;
+shared uint sPoint[MAX_LIGHTS_PER_TILE];
+shared uint sSpot[MAX_SPOTS_PER_CLUSTER];
+shared uint sRect[MAX_RECTS_PER_CLUSTER];
+
+void main() {
+    // 3D cluster index: (x, y) screen tile x logarithmic depth slice z.
+    // The slice mapping MUST match the readers (RHIMain.frag and the Metal
+    // PBR/point-shadow shaders): slice k spans
+    //   [near * (far/near)^(k/Z), near * (far/near)^((k+1)/Z))
+    uint tileIndex = gl_WorkGroupID.x + gl_WorkGroupID.y * gridSize.x
+                   + gl_WorkGroupID.z * gridSize.x * gridSize.y;
+    uint lid = gl_LocalInvocationIndex;
+
+    vec2 tileSize = screenSize / vec2(gridSize.xy);
+    vec2 tileMin = vec2(gl_WorkGroupID.xy) * tileSize;
+    vec2 tileMax = vec2(gl_WorkGroupID.xy + uvec2(1)) * tileSize;
+
+    float zRatio = cam.farPlane / cam.nearPlane;
+    float sliceZ0 = cam.nearPlane * pow(zRatio, float(gl_WorkGroupID.z) / float(gridSize.z));
+    float sliceZ1 = cam.nearPlane * pow(zRatio, float(gl_WorkGroupID.z + 1u) / float(gridSize.z));
+
+    if (lid == 0u) {
+        sPointCount = 0u;
+        sSpotCount = 0u;
+        sRectCount = 0u;
+    }
+    barrier();
+
+    // Froxel bounds, computed once per cluster: the view-space AABB for the
+    // sphere tests, and (derived from it — view->world is rigid, lengths hold)
+    // the world-space bounding sphere for the spot cone test.
+    vec3 froxelMn, froxelMx;
+    froxelViewAABB(tileMin, tileMax, sliceZ0, sliceZ1, froxelMn, froxelMx);
+    vec3 froxelCV = 0.5 * (froxelMn + froxelMx);
+    float froxelR = length(froxelMx - froxelCV);
+    vec3 froxelC = (cam.invView * vec4(froxelCV, 1.0)).xyz;
+
+    // Each thread tests a strided slice of each light list; hits are compacted
+    // through the shared counters. Overflow slots are dropped (same cap
+    // semantics as the serial version, minus its ascending order).
+    for (uint i = lid; i < lightCount; i += WG_SIZE) {
+        vec3 pv = (cam.view * vec4(pointLights[i].position, 1.0)).xyz;
+        if (sphereAABBIntersect(pv, pointLights[i].radius, froxelMn, froxelMx)) {
+            uint slot = atomicAdd(sPointCount, 1u);
+            if (slot < MAX_LIGHTS_PER_TILE) sPoint[slot] = i;
+        }
+    }
+
+    // Spot lights: the range-sphere test is a cheap pre-reject, then the cone
+    // test drops froxels inside the sphere but outside the actual cone (a big
+    // win for narrow spots, which fill a small fraction of their range sphere).
+    for (uint i = lid; i < cullSpotCount; i += WG_SIZE) {
+        SpotLight sl = spotLights[i];
+        vec3 sv = (cam.view * vec4(sl.position, 1.0)).xyz;
+        if (sphereAABBIntersect(sv, sl.radius, froxelMn, froxelMx) &&
+            spotConeIntersectsSphere(sl.position, normalize(sl.direction), sl.radius,
+                                     sl.cosOuter, froxelC, froxelR)) {
+            uint slot = atomicAdd(sSpotCount, 1u);
+            if (slot < MAX_SPOTS_PER_CLUSTER) sSpot[slot] = i;
+        }
+    }
+
+    // Rect area lights carry no range field (pure inverse-square falloff), so
+    // derive a conservative cull sphere: the rect's half-diagonal plus the
+    // distance where intensity/d^2 falls under a 1% cutoff. Never over-culls;
+    // tune the cutoff to tighten.
+    for (uint i = lid; i < cullRectCount; i += WG_SIZE) {
+        RectLight rl = rectLights[i];
+        float halfDiag = length(vec2(rl.halfWidth, rl.halfHeight));
+        float range = halfDiag + sqrt(max(rl.intensity, 0.0) / 0.01);
+        vec3 rv = (cam.view * vec4(rl.position, 1.0)).xyz;
+        if (sphereAABBIntersect(rv, range, froxelMn, froxelMx)) {
+            uint slot = atomicAdd(sRectCount, 1u);
+            if (slot < MAX_RECTS_PER_CLUSTER) sRect[slot] = i;
+        }
+    }
+    barrier();
+
+    // Cooperative write-out of the compacted lists.
+    uint pointsOut = min(sPointCount, MAX_LIGHTS_PER_TILE);
+    uint spotsOut  = min(sSpotCount, MAX_SPOTS_PER_CLUSTER);
+    uint rectsOut  = min(sRectCount, MAX_RECTS_PER_CLUSTER);
+    for (uint i = lid; i < pointsOut; i += WG_SIZE) tiles[tileIndex].lightIndices[i] = sPoint[i];
+    for (uint i = lid; i < spotsOut;  i += WG_SIZE) tiles[tileIndex].spotIndices[i] = sSpot[i];
+    for (uint i = lid; i < rectsOut;  i += WG_SIZE) tiles[tileIndex].rectIndices[i] = sRect[i];
+    if (lid == 0u) {
+        tiles[tileIndex].lightCount = pointsOut;
+        tiles[tileIndex].spotCount = spotsOut;
+        tiles[tileIndex].rectCount = rectsOut;
+    }
+}
