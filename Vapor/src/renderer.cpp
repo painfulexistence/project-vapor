@@ -2600,7 +2600,7 @@ void Renderer::normalResolvePass() {
 }
 
 // Clustered point-light culling on both backends: the Metal branch fills the
-// Metal PBR shader's cluster contract (3d_cluster_light_cull.metal), the Vulkan
+// Metal PBR shader's cluster contract (3d_light_cull.metal), the Vulkan
 // branch runs LightCull.comp for RHIMain.frag's tiled point-light loop.
 void Renderer::lightCullingPass() {
     if (!clusterBuffer.isValid()) return;
@@ -6443,7 +6443,7 @@ void Renderer::createRenderPipeline() {
         prefilterPipeline  = makeIblPipeline("shaders/3d_prefilter_envmap.metal", prefilterVS, prefilterFS);
         brdfLUTPipeline    = makeIblPipeline("shaders/3d_brdf_lut.metal", brdfVS, brdfFS);
 
-        std::string tcCode = readFile("shaders/3d_cluster_light_cull.metal");
+        std::string tcCode = readFile("shaders/3d_light_cull.metal");
         if (!tcCode.empty()) {
             ShaderDesc d; d.stage = ShaderStage::Compute; d.code = tcCode.data();
             d.codeSize = tcCode.size(); d.entryPoint = "computeMain";

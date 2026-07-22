@@ -3269,9 +3269,7 @@ auto Renderer_Metal::createResources() -> void {
     }
 
     postProcessPipeline = createPipeline("shaders/3d_post_process.metal", false, true, 1);
-    buildClustersPipeline = createComputePipeline("shaders/3d_cluster_build.metal");
-    cullLightsPipeline = createComputePipeline("shaders/3d_light_cull.metal");
-    lightCullingPipeline = createComputePipeline("shaders/3d_cluster_light_cull.metal");
+    lightCullingPipeline = createComputePipeline("shaders/3d_light_cull.metal");
     normalResolvePipeline = createComputePipeline("shaders/3d_normal_resolve.metal");
     velocityPipeline = createComputePipeline("shaders/3d_velocity.metal");
     if (m_supportsRaytracing) raytraceShadowPipeline = createComputePipeline("shaders/3d_raytrace_shadow.metal");

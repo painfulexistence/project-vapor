@@ -593,8 +593,6 @@ protected:
     NS::SharedPtr<MTL::RenderPipelineState> equirectToCubemapPipeline;
     NS::SharedPtr<MTL::RenderPipelineState> postProcessPipeline;
 
-    NS::SharedPtr<MTL::ComputePipelineState> buildClustersPipeline;
-    NS::SharedPtr<MTL::ComputePipelineState> cullLightsPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> lightCullingPipeline;
     NS::SharedPtr<MTL::ComputePipelineState> normalResolvePipeline;
     NS::SharedPtr<MTL::ComputePipelineState> velocityPipeline;

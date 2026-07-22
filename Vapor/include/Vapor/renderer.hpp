@@ -858,8 +858,6 @@ private:
     static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)
 
     // Compute pipelines
-    ComputePipelineHandle buildClustersPipeline;
-    ComputePipelineHandle cullLightsPipeline;
     ComputePipelineHandle lightCullingPipeline;
     ComputePipelineHandle normalResolvePipeline;
     ComputePipelineHandle raytraceShadowPipeline;
