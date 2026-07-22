@@ -4768,6 +4768,15 @@ void Renderer::microVoxelGICompositePass() {
         ? voxelGIAtrousRT[(microVoxelGIAtrousIterations - 1) & 1]
         : voxelGIAccumRT[voxelGICur];
 
+    // The GI accumulate/à-trous passes leave their final targets as compute
+    // storage images (VK_IMAGE_LAYOUT_GENERAL) — the last write is never
+    // sampled by a later compute pass, so nothing transitions them back.
+    // setTexture below samples them as SHADER_READ_ONLY; move them there first
+    // (between passes, before beginRenderPass) or Vulkan validation trips on
+    // the layout mismatch. No-op on Metal.
+    rhi->prepareTextureForSampling(denoised);
+    rhi->prepareTextureForSampling(voxelGIAccumRT[voxelGICur]);
+
     RenderPassDesc rp;
     rp.name = "MicroVoxelGIComposite";
     rp.colorAttachments.push_back(tempColorRT);
