@@ -11,6 +11,9 @@
 layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out float outTransmittance;
 
+// Baked tileable Perlin-Worley base shape (same volume the raymarch samples).
+layout(set = 2, binding = 0) uniform sampler3D shapeNoiseTex;
+
 // Must match Vapor::VolumetricCloudRenderData (std430) — CloudRaymarch twin.
 layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
     mat4 invViewProj;
@@ -96,36 +99,6 @@ float valueNoise3D(vec3 p) {
         w.z);
 }
 
-float gradientNoise3D(vec3 p) {
-    vec3 pi = floor(p);
-    vec3 pf = fract(p);
-    vec3 w = pf * pf * pf * (pf * (pf * 6.0 - 15.0) + 10.0);
-    float n000 = dot(hash33(pi + vec3(0,0,0)) * 2.0 - 1.0, pf - vec3(0,0,0));
-    float n100 = dot(hash33(pi + vec3(1,0,0)) * 2.0 - 1.0, pf - vec3(1,0,0));
-    float n010 = dot(hash33(pi + vec3(0,1,0)) * 2.0 - 1.0, pf - vec3(0,1,0));
-    float n110 = dot(hash33(pi + vec3(1,1,0)) * 2.0 - 1.0, pf - vec3(1,1,0));
-    float n001 = dot(hash33(pi + vec3(0,0,1)) * 2.0 - 1.0, pf - vec3(0,0,1));
-    float n101 = dot(hash33(pi + vec3(1,0,1)) * 2.0 - 1.0, pf - vec3(1,0,1));
-    float n011 = dot(hash33(pi + vec3(0,1,1)) * 2.0 - 1.0, pf - vec3(0,1,1));
-    float n111 = dot(hash33(pi + vec3(1,1,1)) * 2.0 - 1.0, pf - vec3(1,1,1));
-    return mix(mix(mix(n000, n100, w.x), mix(n010, n110, w.x), w.y),
-               mix(mix(n001, n101, w.x), mix(n011, n111, w.x), w.y), w.z);
-}
-
-float worleyNoise3D(vec3 p) {
-    vec3 pi = floor(p);
-    vec3 pf = fract(p);
-    float minDist = 1.0;
-    for (int z = -1; z <= 1; z++)
-    for (int y = -1; y <= 1; y++)
-    for (int x = -1; x <= 1; x++) {
-        vec3 offset = vec3(x, y, z);
-        vec3 diff = offset + hash33(pi + offset) - pf;
-        minDist = min(minDist, dot(diff, diff));
-    }
-    return sqrt(minDist);
-}
-
 float remap(float value, float inMin, float inMax, float outMin, float outMax) {
     return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
 }
@@ -142,13 +115,7 @@ float cloudHeightGradient(float heightFraction, float type) {
 
 float sampleCloudShape(vec3 worldPos) {
     vec3 samplePos = worldPos + windOffset;
-    vec3 shapeUV = samplePos * shapeNoiseScale * 0.0001;
-    float perlin = gradientNoise3D(shapeUV * 4.0) * 0.5 + 0.5;
-    float worley1 = 1.0 - worleyNoise3D(shapeUV * 4.0);
-    float worley2 = 1.0 - worleyNoise3D(shapeUV * 8.0);
-    float worley3 = 1.0 - worleyNoise3D(shapeUV * 16.0);
-    float worleyFBM = worley1 * 0.625 + worley2 * 0.25 + worley3 * 0.125;
-    return saturate(remap(perlin, worleyFBM - 1.0, 1.0, 0.0, 1.0));
+    return texture(shapeNoiseTex, samplePos * (shapeNoiseScale * 0.0001)).r;
 }
 
 vec2 sampleWeather(vec3 worldPos) {

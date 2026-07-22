@@ -10,6 +10,12 @@ layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out vec4 outCloud;
 
 layout(set = 2, binding = 0) uniform sampler2D sceneDepth;
+// Baked tileable noise volumes (renderer createCloudNoiseTextures): one
+// trilinear fetch replaces the old per-sample procedural Perlin-Worley loops.
+// Octave frequencies are baked at the old shader ratios, so the UV scales
+// below are unchanged. Repeat sampler — the tiles wrap.
+layout(set = 2, binding = 1) uniform sampler3D shapeNoiseTex;   // 128^3 Perlin-Worley base
+layout(set = 2, binding = 2) uniform sampler3D detailNoiseTex;  // 32^3 Worley FBM erosion
 
 // Must match Vapor::VolumetricCloudRenderData (std430).
 layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
@@ -110,20 +116,6 @@ float gradientNoise3D(vec3 p) {
                mix(mix(n001, n101, w.x), mix(n011, n111, w.x), w.y), w.z);
 }
 
-float worleyNoise3D(vec3 p) {
-    vec3 pi = floor(p);
-    vec3 pf = fract(p);
-    float minDist = 1.0;
-    for (int z = -1; z <= 1; z++)
-    for (int y = -1; y <= 1; y++)
-    for (int x = -1; x <= 1; x++) {
-        vec3 offset = vec3(x, y, z);
-        vec3 diff = offset + hash33(pi + offset) - pf;
-        minDist = min(minDist, dot(diff, diff));
-    }
-    return sqrt(minDist);
-}
-
 float remap(float value, float inMin, float inMax, float outMin, float outMax) {
     return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
 }
@@ -162,13 +154,7 @@ float cloudHeightGradient(float heightFraction, float type) {
 
 float sampleCloudShape(vec3 worldPos) {
     vec3 samplePos = worldPos + windOffset;
-    vec3 shapeUV = samplePos * shapeNoiseScale * 0.0001;
-    float perlin = gradientNoise3D(shapeUV * 4.0) * 0.5 + 0.5;
-    float worley1 = 1.0 - worleyNoise3D(shapeUV * 4.0);
-    float worley2 = 1.0 - worleyNoise3D(shapeUV * 8.0);
-    float worley3 = 1.0 - worleyNoise3D(shapeUV * 16.0);
-    float worleyFBM = worley1 * 0.625 + worley2 * 0.25 + worley3 * 0.125;
-    return saturate(remap(perlin, worleyFBM - 1.0, 1.0, 0.0, 1.0));
+    return texture(shapeNoiseTex, samplePos * (shapeNoiseScale * 0.0001)).r;
 }
 
 // Curl-ish vector noise: three decorrelated gradient noises. Not a true
@@ -189,11 +175,7 @@ float sampleCloudDetail(vec3 worldPos) {
         samplePos += curlDistort(samplePos * (curlNoiseScale * 0.002)) *
                      (curlNoiseStrength * 300.0);
     }
-    vec3 detailUV = samplePos * detailNoiseScale * 0.001;
-    float d1 = 1.0 - worleyNoise3D(detailUV * 2.0);
-    float d2 = 1.0 - worleyNoise3D(detailUV * 4.0);
-    float d3 = 1.0 - worleyNoise3D(detailUV * 8.0);
-    return d1 * 0.625 + d2 * 0.25 + d3 * 0.125;
+    return texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.001)).r;
 }
 
 vec2 sampleWeather(vec3 worldPos) {

@@ -109,27 +109,17 @@ float cloudHeightGradient(float heightFraction, float cloudType) {
     return saturate(gradient);
 }
 
-// Sample base cloud shape
-float sampleCloudShape(float3 worldPos, constant VolumetricCloudData& data) {
-    // Apply wind offset
+// Baked tileable noise volumes (renderer createCloudNoiseTextures): one
+// trilinear fetch replaces the old per-sample procedural Perlin-Worley loops.
+// Octave frequencies are baked at the old shader ratios, so the UV scales
+// below are unchanged.
+constexpr sampler cloudNoiseSampler(address::repeat, filter::linear);
+
+// Sample base cloud shape (128^3 Perlin-Worley volume)
+float sampleCloudShape(float3 worldPos, constant VolumetricCloudData& data,
+                       texture3d<float, access::sample> shapeTex) {
     float3 samplePos = worldPos + data.windOffset;
-
-    // Sample base shape noise (low frequency)
-    float3 shapeUV = samplePos * data.shapeNoiseScale * 0.0001;  // Scale to reasonable UV
-
-    // Procedural noise combination (Perlin-Worley)
-    float perlin = gradientNoise3D(shapeUV * 4.0) * 0.5 + 0.5;
-    float worley1 = 1.0 - worleyNoise3D(shapeUV * 4.0);
-    float worley2 = 1.0 - worleyNoise3D(shapeUV * 8.0);
-    float worley3 = 1.0 - worleyNoise3D(shapeUV * 16.0);
-
-    // Combine Worley octaves
-    float worleyFBM = worley1 * 0.625 + worley2 * 0.25 + worley3 * 0.125;
-
-    // Perlin-Worley: use Perlin to warp Worley
-    float baseShape = remap(perlin, worleyFBM - 1.0, 1.0, 0.0, 1.0);
-
-    return saturate(baseShape);
+    return shapeTex.sample(cloudNoiseSampler, samplePos * (data.shapeNoiseScale * 0.0001)).r;
 }
 
 // Curl-ish vector noise: three decorrelated gradient noises. Not a true
@@ -141,8 +131,9 @@ float3 curlDistort(float3 p) {
                   gradientNoise3D(p + float3(-23.144, 9.271, 61.043)));
 }
 
-// Sample cloud detail
-float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data) {
+// Sample cloud detail (32^3 Worley-FBM volume)
+float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data,
+                        texture3d<float, access::sample> detailTex) {
     // Apply wind (detail moves faster)
     float3 samplePos = worldPos + data.windOffset * 1.5;
 
@@ -154,17 +145,7 @@ float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data) {
                      (data.curlNoiseStrength * 300.0);
     }
 
-    // High frequency detail noise
-    float3 detailUV = samplePos * data.detailNoiseScale * 0.001;
-
-    // Multi-octave Worley for detail
-    float detail1 = 1.0 - worleyNoise3D(detailUV * 2.0);
-    float detail2 = 1.0 - worleyNoise3D(detailUV * 4.0);
-    float detail3 = 1.0 - worleyNoise3D(detailUV * 8.0);
-
-    float detail = detail1 * 0.625 + detail2 * 0.25 + detail3 * 0.125;
-
-    return detail;
+    return detailTex.sample(cloudNoiseSampler, samplePos * (data.detailNoiseScale * 0.001)).r;
 }
 
 // Sample weather map (procedural for now, could be texture)
@@ -185,8 +166,11 @@ float2 sampleWeather(float3 worldPos, constant VolumetricCloudData& data) {
     return float2(coverage * data.cloudCoverage, cloudType);
 }
 
-// Main cloud density function
-float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bool useCheap) {
+// Main cloud density function. The cheap path never samples detailTex, so
+// callers without a detail volume (the shadow map) may pass shapeTex twice.
+float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bool useCheap,
+                         texture3d<float, access::sample> shapeTex,
+                         texture3d<float, access::sample> detailTex) {
     // Calculate height fraction within cloud layer
     float height = worldPos.y;
     float heightFraction = saturate((height - data.cloudLayerBottom) / data.cloudLayerThickness);
@@ -205,7 +189,7 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
     float heightGradient = cloudHeightGradient(heightFraction, cloudType);
 
     // Base shape
-    float baseShape = sampleCloudShape(worldPos, data);
+    float baseShape = sampleCloudShape(worldPos, data, shapeTex);
 
     // Apply coverage (remapping creates hard edges)
     float baseCloud = remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0);
@@ -216,7 +200,7 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
     }
 
     // Detail erosion (expensive, only for primary rays)
-    float detail = sampleCloudDetail(worldPos, data);
+    float detail = sampleCloudDetail(worldPos, data, detailTex);
 
     // Erode edges with detail noise
     float erosion = data.erosionStrength * (1.0 - heightFraction) * 0.5;
@@ -230,7 +214,9 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
 // ============================================================================
 
 // March toward an arbitrary light (sun by day, moon by night) for shadowing.
-float lightMarch(float3 worldPos, float3 lightDir, constant VolumetricCloudData& data) {
+float lightMarch(float3 worldPos, float3 lightDir, constant VolumetricCloudData& data,
+                 texture3d<float, access::sample> shapeTex,
+                 texture3d<float, access::sample> detailTex) {
     float stepSize = data.cloudLayerThickness / float(data.lightSteps);
 
     float transmittance = 1.0;
@@ -242,7 +228,7 @@ float lightMarch(float3 worldPos, float3 lightDir, constant VolumetricCloudData&
         // Early exit if above cloud layer
         if (pos.y > data.cloudLayerTop) break;
 
-        float density = sampleCloudDensity(pos, data, true);  // Cheap sample for light march
+        float density = sampleCloudDensity(pos, data, true, shapeTex, detailTex);  // Cheap sample
         transmittance *= beerLambert(density, stepSize);
 
         // Early exit if fully occluded
@@ -286,7 +272,9 @@ float3 scatterFromLight(float3 lightColor, float lightPower, float lightTransmit
 // Combined lighting: the sun fades out below the horizon while the moon
 // (antipodal, dim, cool) fades in, so night clouds are moonlit — not lit by a
 // phantom below-horizon sun. Ambient dims at night but keeps its tint.
-float3 cloudLighting(float3 worldPos, float3 rayDir, constant VolumetricCloudData& data) {
+float3 cloudLighting(float3 worldPos, float3 rayDir, constant VolumetricCloudData& data,
+                     texture3d<float, access::sample> shapeTex,
+                     texture3d<float, access::sample> detailTex) {
     // sunLightScale < 1: clouds absorb/self-shadow, so the lit surface sits
     // BELOW the clear-sky brightness instead of blooming over it.
     float sunPower = data.sunIntensity * data.sunLightScale;
@@ -295,13 +283,13 @@ float3 cloudLighting(float3 worldPos, float3 rayDir, constant VolumetricCloudDat
     float3 lum = data.ambientColor * data.ambientIntensity * mix(0.3, 1.0, dayFactor);
 
     if (dayFactor > 0.01) {
-        float tr = lightMarch(worldPos, data.sunDirection, data);
+        float tr = lightMarch(worldPos, data.sunDirection, data, shapeTex, detailTex);
         lum += scatterFromLight(data.sunColor, sunPower, tr,
                                 dot(rayDir, data.sunDirection), data) * dayFactor;
     }
     if (dayFactor < 0.99) {
         float3 moonDir = -data.sunDirection;  // antipodal, matches TimeOfDaySystem
-        float tr = lightMarch(worldPos, moonDir, data);
+        float tr = lightMarch(worldPos, moonDir, data, shapeTex, detailTex);
         lum += scatterFromLight(data.moonColor, sunPower * data.moonLightScale, tr,
                                 dot(rayDir, moonDir), data) * (1.0 - dayFactor);
     }
@@ -331,7 +319,9 @@ float2 cloudLayerIntersection(float3 rayOrigin, float3 rayDir, constant Volumetr
 
 // Main cloud ray march
 float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
-                      constant VolumetricCloudData& data, float blueNoise) {
+                      constant VolumetricCloudData& data, float blueNoise,
+                      texture3d<float, access::sample> shapeTex,
+                      texture3d<float, access::sample> detailTex) {
     // Find cloud layer intersection
     float2 tRange = cloudLayerIntersection(rayOrigin, rayDir, data);
 
@@ -360,11 +350,11 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     for (uint i = 0; i < data.primarySteps && t < tRange.y; i++) {
         float3 pos = rayOrigin + rayDir * t;
 
-        float density = sampleCloudDensity(pos, data, false);
+        float density = sampleCloudDensity(pos, data, false, shapeTex, detailTex);
 
         if (density > 0.001) {
             // Sun-by-day / moon-by-night key lighting + ambient.
-            float3 luminance = cloudLighting(pos, rayDir, data);
+            float3 luminance = cloudLighting(pos, rayDir, data, shapeTex, detailTex);
 
             // Beer-powder effect
             float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * data.powderStrength +
@@ -427,6 +417,8 @@ fragment float4 cloudFragment(
     CloudVertexOut in [[stage_in]],
     texture2d<float, access::sample> sceneColor [[texture(0)]],
     texture2d<float, access::sample> sceneDepth [[texture(1)]],
+    texture3d<float, access::sample> shapeNoiseTex [[texture(2)]],
+    texture3d<float, access::sample> detailNoiseTex [[texture(3)]],
     constant VolumetricCloudData& data [[buffer(0)]],
     constant CameraData& camera [[buffer(1)]]
 ) {
@@ -451,7 +443,8 @@ fragment float4 cloudFragment(
     float blueNoise = temporalJitter(in.position.xy, data.frameIndex);
 
     // Ray march clouds
-    float4 cloudData = raymarchClouds(data.cameraPosition, rayDir, maxDist, data, blueNoise);
+    float4 cloudData = raymarchClouds(data.cameraPosition, rayDir, maxDist, data, blueNoise,
+                                  shapeNoiseTex, detailNoiseTex);
 
     // Composite
     float3 result = color.rgb * cloudData.a + cloudData.rgb;
@@ -466,6 +459,8 @@ fragment float4 cloudFragment(
 fragment float4 cloudFragmentLowRes(
     CloudVertexOut in [[stage_in]],
     texture2d<float, access::sample> sceneDepth [[texture(0)]],
+    texture3d<float, access::sample> shapeNoiseTex [[texture(1)]],
+    texture3d<float, access::sample> detailNoiseTex [[texture(2)]],
     constant VolumetricCloudData& data [[buffer(0)]],
     constant CameraData& camera [[buffer(1)]]
 ) {
@@ -488,7 +483,8 @@ fragment float4 cloudFragmentLowRes(
     float blueNoise = temporalJitter(in.position.xy, data.frameIndex);
 
     // Ray march
-    float4 cloudData = raymarchClouds(data.cameraPosition, rayDir, maxDist, data, blueNoise);
+    float4 cloudData = raymarchClouds(data.cameraPosition, rayDir, maxDist, data, blueNoise,
+                                  shapeNoiseTex, detailNoiseTex);
 
     return cloudData;
 }
@@ -564,6 +560,7 @@ constant float kCloudShadowSnap = 16.0;
 
 fragment float4 cloudShadowMap(
     CloudVertexOut in [[stage_in]],
+    texture3d<float, access::sample> shapeTex [[texture(0)]],
     constant VolumetricCloudData& data [[buffer(0)]],
     constant CameraData& camera [[buffer(1)]]
 ) {
@@ -584,7 +581,7 @@ fragment float4 cloudShadowMap(
     float tau = 0.0;
     for (int i = 0; i < STEPS; i++) {
         float3 pos = world + data.sunDirection * (t0 + (float(i) + 0.5) * stepLen);
-        tau += sampleCloudDensity(pos, data, true) * stepLen;
+        tau += sampleCloudDensity(pos, data, true, shapeTex, shapeTex) * stepLen;
     }
     return float4(mix(1.0, exp(-tau), dayFactor));
 }

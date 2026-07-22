@@ -781,6 +781,11 @@ private:
     // Top-down sun transmittance over a camera-centered region (CloudShadow
     // pass); the PBR passes multiply the sun term by it.
     TextureHandle cloudShadowRT;
+    // Baked tileable cloud noise volumes (CPU-generated once at init): one
+    // trilinear fetch replaces the per-sample procedural Perlin-Worley loops.
+    TextureHandle cloudShapeNoiseTex;   // 128^3 R8: combined Perlin-Worley base shape
+    TextureHandle cloudDetailNoiseTex;  // 32^3 R8: Worley FBM erosion detail
+    void createCloudNoiseTextures();
     // Cloud-shadow blend strength (panel). Pushed as 0 while the clouds pass
     // is disabled, so the ground never shows shadows from an invisible deck.
     float m_cloudShadowStrength = 0.8f;

@@ -5185,6 +5185,8 @@ void Renderer::cloudShadowPass() {
     rp.loadColor.push_back(false);
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(cloudShadowPipeline);
+    // Cheap density only needs the shape volume (repeat sampler).
+    rhi->setTexture(0, 0, cloudShapeNoiseTex, defaultSampler);
     rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
     // Camera for the region center (same slots as the raymarch pass).
     if (backend == GraphicsBackend::Metal) {
@@ -5248,6 +5250,9 @@ void Renderer::volumetricCloudPass() {
         rhi->beginRenderPass(rp);
         rhi->bindPipeline(cloudRaymarchPipeline);
         rhi->setTexture(0, 0, depthStencilRT, clampSampler);
+        // Baked noise volumes (repeat sampler — the tiles wrap).
+        rhi->setTexture(0, 1, cloudShapeNoiseTex, defaultSampler);
+        rhi->setTexture(0, 2, cloudDetailNoiseTex, defaultSampler);
         rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
         // cloudFragmentLowRes reads the camera at buffer(1) on Metal; the
         // GLSL twin declares it at set-relative binding 3.
@@ -5441,6 +5446,117 @@ void Renderer::postProcessPass() {
     rhi->endRenderPass();
 }
 
+// ── Baked cloud noise (CPU, tileable) ───────────────────────────────────────
+// Wrapped-lattice Perlin/Worley so the volumes tile seamlessly under the
+// repeat sampler. The relative octave frequencies (shape 4/8/16, detail 2/4/8)
+// match the old in-shader procedural math, so the shader-side UV scales are
+// unchanged — one trilinear fetch replaces ~100 hash ops per density sample.
+namespace {
+    uint32_t cnHash(uint32_t x) {
+        x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+        return x;
+    }
+    uint32_t cnHash3(int x, int y, int z, uint32_t seed) {
+        return cnHash(uint32_t(x) * 73856093u ^ uint32_t(y) * 19349663u ^
+                      uint32_t(z) * 83492791u ^ seed);
+    }
+    float cnFloat(uint32_t h) { return float(h & 0xFFFFFFu) / 16777216.0f; }
+    int cnWrap(int c, int period) { return ((c % period) + period) % period; }
+
+    // Worley distance over a wrapped lattice of `period` cells; p in cell units.
+    float tileableWorley(const glm::vec3& p, int period, uint32_t seed) {
+        glm::ivec3 base(glm::floor(p));
+        float minD2 = 1e9f;
+        for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            glm::ivec3 c = base + glm::ivec3(dx, dy, dz);
+            uint32_t h = cnHash3(cnWrap(c.x, period), cnWrap(c.y, period), cnWrap(c.z, period), seed);
+            glm::vec3 fp = glm::vec3(c) + glm::vec3(cnFloat(h), cnFloat(cnHash(h)), cnFloat(cnHash(cnHash(h))));
+            glm::vec3 d = fp - p;
+            minD2 = std::min(minD2, glm::dot(d, d));
+        }
+        return std::sqrt(minD2);
+    }
+
+    // Perlin gradient noise over a wrapped lattice; p in cell units, ~[-1, 1].
+    float tileablePerlin(const glm::vec3& p, int period, uint32_t seed) {
+        glm::ivec3 i0(glm::floor(p));
+        glm::vec3 f = p - glm::vec3(i0);
+        glm::vec3 w = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+        float n[8];
+        for (int k = 0; k < 8; ++k) {
+            glm::ivec3 off(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            glm::ivec3 c = i0 + off;
+            uint32_t h = cnHash3(cnWrap(c.x, period), cnWrap(c.y, period), cnWrap(c.z, period), seed);
+            glm::vec3 g(cnFloat(h) * 2.0f - 1.0f,
+                        cnFloat(cnHash(h)) * 2.0f - 1.0f,
+                        cnFloat(cnHash(cnHash(h))) * 2.0f - 1.0f);
+            float len = glm::length(g);
+            if (len > 1e-5f) g /= len;
+            n[k] = glm::dot(g, f - glm::vec3(off));
+        }
+        float x00 = n[0] + (n[1] - n[0]) * w.x;
+        float x10 = n[2] + (n[3] - n[2]) * w.x;
+        float x01 = n[4] + (n[5] - n[4]) * w.x;
+        float x11 = n[6] + (n[7] - n[6]) * w.x;
+        float y0 = x00 + (x10 - x00) * w.y;
+        float y1 = x01 + (x11 - x01) * w.y;
+        return y0 + (y1 - y0) * w.z;
+    }
+}
+
+void Renderer::createCloudNoiseTextures() {
+    // Shape 128^3: combined Perlin-Worley base (perlin remapped by Worley FBM),
+    // octaves at 4/8/16 cells per tile — same relative frequencies as the old
+    // shapeUV*4/8/16 shader math, so one tile spans 1.0 of the shape UV.
+    {
+        const int N = 128;
+        std::vector<uint8_t> data(size_t(N) * N * N);
+        size_t i = 0;
+        for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x, ++i) {
+            glm::vec3 uvw = (glm::vec3(x, y, z) + 0.5f) / float(N);
+            float perlin = tileablePerlin(uvw * 4.0f, 4, 0x51u) * 0.5f + 0.5f;
+            float w1 = 1.0f - tileableWorley(uvw * 4.0f, 4, 0xA1u);
+            float w2 = 1.0f - tileableWorley(uvw * 8.0f, 8, 0xB2u);
+            float w3 = 1.0f - tileableWorley(uvw * 16.0f, 16, 0xC3u);
+            float fbm = w1 * 0.625f + w2 * 0.25f + w3 * 0.125f;
+            float v = glm::clamp((perlin - (fbm - 1.0f)) / (1.0f - (fbm - 1.0f)), 0.0f, 1.0f);
+            data[i] = uint8_t(v * 255.0f + 0.5f);
+        }
+        TextureDesc d;
+        d.width = N; d.height = N; d.depth = N;
+        d.format = PixelFormat::R8_UNORM;
+        d.usage = TextureUsage::Sampled;
+        cloudShapeNoiseTex = rhi->createTexture(d);
+        rhi->updateTexture(cloudShapeNoiseTex, data.data(), data.size());
+    }
+    // Detail 32^3: Worley FBM erosion at 2/4/8 cells per tile (old detailUV*2/4/8).
+    {
+        const int N = 32;
+        std::vector<uint8_t> data(size_t(N) * N * N);
+        size_t i = 0;
+        for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x, ++i) {
+            glm::vec3 uvw = (glm::vec3(x, y, z) + 0.5f) / float(N);
+            float d1 = 1.0f - tileableWorley(uvw * 2.0f, 2, 0xD4u);
+            float d2 = 1.0f - tileableWorley(uvw * 4.0f, 4, 0xE5u);
+            float d3 = 1.0f - tileableWorley(uvw * 8.0f, 8, 0xF6u);
+            float v = glm::clamp(d1 * 0.625f + d2 * 0.25f + d3 * 0.125f, 0.0f, 1.0f);
+            data[i] = uint8_t(v * 255.0f + 0.5f);
+        }
+        TextureDesc d;
+        d.width = N; d.height = N; d.depth = N;
+        d.format = PixelFormat::R8_UNORM;
+        d.usage = TextureUsage::Sampled;
+        cloudDetailNoiseTex = rhi->createTexture(d);
+        rhi->updateTexture(cloudDetailNoiseTex, data.data(), data.size());
+    }
+}
+
 void Renderer::createDefaultResources() {
     // Create default sampler
     SamplerDesc samplerDesc;
@@ -5451,6 +5567,9 @@ void Renderer::createDefaultResources() {
     samplerDesc.addressModeV = AddressMode::Repeat;
     samplerDesc.addressModeW = AddressMode::Repeat;
     defaultSampler = rhi->createSampler(samplerDesc);
+
+    // Baked cloud noise volumes (one-time; ~1-2 s of CPU FBM at startup).
+    createCloudNoiseTextures();
 
     // Shadow-map sampler: nearest + clamp. Manual PCF does its own 3x3 filtering,
     // so point sampling is both correct (no bilinear blending of depth values)

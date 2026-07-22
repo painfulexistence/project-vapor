@@ -169,7 +169,7 @@ struct alignas(16) VolumetricCloudData {
     float _pad6;
     float windSpeed = 80.0f;
     float time = 0.0f;
-    Uint32 primarySteps = 64;
+    Uint32 primarySteps = 96;
     Uint32 lightSteps = 6;
     glm::vec2 screenSize;
     glm::vec2 _pad7;
