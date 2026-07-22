@@ -40,12 +40,17 @@ namespace Vapor {
 // supplies the world-space placement.
 // ============================================================================
 
+// Uploaded verbatim as 2 uints per entry; the shader decode contract
+// (MicroVoxel.frag / 3d_microvoxel.metal, little-endian byte order) is
+//   word0 = r | g<<8 | b<<16 | emission<<24
+//   word1 = reflectivity | roughness<<8 | transmission<<16 | ior<<24
 struct VoxelMaterial {
     Uint8 r = 0, g = 0, b = 0;
     Uint8 emission = 0;      // 0..255 self-illumination, scaled by emissiveStrength
-    Uint8 reflectivity = 0;  // 0..255 mirror F0
-    Uint8 roughness = 0;     // reserved for glossy reflection jitter
-    Uint8 pad0 = 0, pad1 = 0;
+    Uint8 reflectivity = 0;  // 0..255 mirror F0 (opaque path; glass derives F from ior)
+    Uint8 roughness = 0;     // 0..255 glossy jitter: blurs reflection AND refraction (frosted)
+    Uint8 transmission = 0;  // 0..255 dielectric transmission; >0 = the BTDF (glass) path
+    Uint8 ior = 0;           // index of refraction, encoded (actual = 1.0 + ior/255), so 1.0..2.0
 };
 static_assert(sizeof(VoxelMaterial) == 8, "GPU palette layout: 8 bytes per material");
 

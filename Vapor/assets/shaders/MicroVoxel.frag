@@ -48,7 +48,8 @@ layout(std430, set = 1, binding = 0) readonly buffer ParamsBuf {
 layout(std430, set = 1, binding = 1) readonly buffer PageBuf { uint pageTable[]; };
 layout(std430, set = 1, binding = 2) readonly buffer BrickBuf { uint brickPool[]; };
 // 256 materials, 2 words each: word0 = R|G<<8|B<<16|emission<<24,
-// word1 = reflectivity|roughness<<8 (VoxelMaterial's byte layout).
+// word1 = reflectivity|roughness<<8|transmission<<16|ior<<24
+// (VoxelMaterial's byte layout; ior decodes to 1.0 + b/255).
 layout(std430, set = 1, binding = 3) readonly buffer PaletteBuf { uint palette[]; };
 
 const uint PAGE_EMPTY = 0xFFFFFFFFu;
@@ -269,13 +270,122 @@ float faceAO(ivec3 cell, vec3 normal, vec3 hitLocal, float voxelSize) {
     return mix(mix(aoNN, aoPN, u), mix(aoNP, aoPP, u), v);
 }
 
-void decodeMaterial(uint mat, out vec3 albedo, out float emission, out float reflectivity) {
+void decodeMaterial(uint mat, out vec3 albedo, out float emission, out float reflectivity,
+                    out float roughness, out float transmission, out float ior) {
     uint base = (uint(extra0.w) + mat) * 2u;
     uint w0 = palette[base];
     uint w1 = palette[base + 1u];
     albedo = vec3(float(w0 & 0xFFu), float((w0 >> 8u) & 0xFFu), float((w0 >> 16u) & 0xFFu)) / 255.0;
     emission = float((w0 >> 24u) & 0xFFu) / 255.0;
     reflectivity = float(w1 & 0xFFu) / 255.0;
+    roughness = float((w1 >> 8u) & 0xFFu) / 255.0;
+    transmission = float((w1 >> 16u) & 0xFFu) / 255.0;
+    ior = 1.0 + float((w1 >> 24u) & 0xFFu) / 255.0;  // encoded range 1.0..2.0
+}
+
+// Transmission byte of a cell's material, without the full decode — the glass
+// march below asks this per voxel to know when it leaves the medium.
+float voxelTransmission(uint mat) {
+    if (mat == 0u) return -1.0;  // air, not a medium
+    return float((palette[(uint(extra0.w) + mat) * 2u + 1u] >> 16u) & 0xFFu) / 255.0;
+}
+
+// Interleaved gradient noise — a stable per-pixel [0,1) that trades temporal
+// sizzle for a fixed dither pattern (there is no temporal accumulation over
+// the primary pass, so a static pattern reads better than white noise).
+float mvIGN(vec2 px) {
+    return fract(52.9829189 * fract(0.06711056 * px.x + 0.00583715 * px.y));
+}
+
+// Glossy jitter: tilt `dir` inside a roughness^2-scaled cone (the byte the
+// palette always reserved for this). Clamped back above the surface so a
+// jittered reflection never dives through its own face.
+vec3 glossyDir(vec3 dir, vec3 faceN, float roughness, vec2 px) {
+    if (roughness < 0.02) return dir;
+    float u1 = mvIGN(px) - 0.5;
+    float u2 = mvIGN(px + vec2(17.0, 31.0)) - 0.5;
+    vec3 t1 = normalize(cross(dir, abs(dir.y) < 0.98 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 t2 = cross(dir, t1);
+    float cone = roughness * roughness * 0.6;
+    vec3 j = normalize(dir + (t1 * u1 + t2 * u2) * cone);
+    float below = dot(j, faceN);
+    if (below < 0.02) j = normalize(j + faceN * (0.02 - below));
+    return j;
+}
+
+// Radiance along a secondary ray (reflection or the scene behind glass):
+// opaque hit shaded with the same stylized sun + sky + emission the primary
+// surface uses; miss returns sky. One bounce only — secondary hits do not
+// recurse into their own reflections/transmission.
+vec3 secondaryRadiance(vec3 ro, vec3 rd) {
+    Hit h;
+    if (raycast(ro, rd, 1e9, h)) {
+        vec3 a; float e, refl, rough, trans, ior;
+        decodeMaterial(h.mat, a, e, refl, rough, trans, ior);
+        float ndl = max(dot(h.normal, sunDirection.xyz), 0.0);
+        return a * (sunColor.xyz * sunColor.w * INV_PI * ndl + skyRadiance(h.normal))
+             + a * e * gridDim.w;
+    }
+    return skyRadiance(rd);
+}
+
+// The BTDF: march THROUGH the transmissive medium voxel-by-voxel from the
+// entry hit, accumulating the in-glass path length for Beer-Lambert, then
+// bend out at the first glass->air face (total internal reflection continues
+// straight — the one-bounce approximation) and gather the scene behind with
+// the normal two-level DDA. An opaque voxel inside the medium terminates the
+// march and is shaded directly. `mediumAlbedo` tints the absorption.
+vec3 transmitRadiance(vec3 entryPos, vec3 tdir, float ior, vec3 mediumAlbedo, float voxelSize) {
+    const int MAX_GLASS_STEPS = 128;  // 6.4 m of glass at 5 cm voxels
+    const float BEER_K = 3.0;         // absorption strength per meter
+
+    // Voxel-level DDA inside the medium (brick skipping is useless here — every
+    // step is inside solid transmissive voxels).
+    vec3 p = entryPos + tdir * (voxelSize * 1e-3);
+    ivec3 cell = ivec3(floor(p / voxelSize));
+    ivec3 stepDir = ivec3(sign(tdir));
+    vec3 invD = 1.0 / tdir;
+    vec3 tDelta = abs(vec3(voxelSize) * invD);
+    vec3 stepPos = vec3(greaterThan(tdir, vec3(0.0)));
+    vec3 tMax = ((vec3(cell) + stepPos) * voxelSize - entryPos) * invD;
+    float t = 0.0;
+    vec3 exitN = vec3(0.0);
+
+    for (int i = 0; i < MAX_GLASS_STEPS; i++) {
+        // Advance to the next voxel boundary.
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            t = tMax.x; tMax.x += tDelta.x; cell.x += stepDir.x;
+            exitN = vec3(-float(stepDir.x), 0.0, 0.0);
+        } else if (tMax.y < tMax.z) {
+            t = tMax.y; tMax.y += tDelta.y; cell.y += stepDir.y;
+            exitN = vec3(0.0, -float(stepDir.y), 0.0);
+        } else {
+            t = tMax.z; tMax.z += tDelta.z; cell.z += stepDir.z;
+            exitN = vec3(0.0, 0.0, -float(stepDir.z));
+        }
+        uint mat = voxelMat(cell);
+        float trans = voxelTransmission(mat);
+        if (trans > 0.001) continue;  // still inside the medium (stacked glass blends)
+
+        vec3 beer = exp(-(vec3(1.0) - mediumAlbedo) * BEER_K * t);
+        if (mat != 0u) {
+            // Opaque voxel embedded in / behind the glass: shade it at this face.
+            vec3 a; float e, refl, rough, tr, io;
+            decodeMaterial(mat, a, e, refl, rough, tr, io);
+            float ndl = max(dot(exitN, sunDirection.xyz), 0.0);
+            vec3 lit = a * (sunColor.xyz * sunColor.w * INV_PI * ndl + skyRadiance(exitN))
+                     + a * e * gridDim.w;
+            return lit * beer;
+        }
+        // Glass -> air: bend out (eta = ior/1.0). TIR keeps the direction — the
+        // cheap approximation instead of bouncing back into the medium.
+        vec3 outDir = refract(tdir, exitN, ior);
+        if (dot(outDir, outDir) < 1e-6) outDir = tdir;
+        vec3 exitPos = entryPos + tdir * t;
+        return secondaryRadiance(exitPos + outDir * (voxelSize * 0.51), outDir) * beer;
+    }
+    // Step cap: medium thicker than the budget — fully absorbed sky.
+    return skyRadiance(tdir) * exp(-(vec3(1.0) - mediumAlbedo) * BEER_K * t);
 }
 
 // ============================================================================
@@ -296,8 +406,9 @@ void main() {
     vec3 hitWorld = hitLocal + volumeOrigin.xyz;
 
     vec3 albedo;
-    float emission, reflectivity;
-    decodeMaterial(hit.mat, albedo, emission, reflectivity);
+    float emission, reflectivity, roughness, transmission, ior;
+    decodeMaterial(hit.mat, albedo, emission, reflectivity, roughness, transmission, ior);
+    vec3 rawAlbedo = albedo;  // pre-hash palette color; tints Beer absorption
     // Per-voxel hash variation keeps large same-material surfaces alive.
     albedo *= mix(1.0, 0.85 + 0.3 * voxelHash(hit.cell), ambientGround.w);
 
@@ -321,27 +432,38 @@ void main() {
     // AO fully attenuates the ambient term but only 30% of direct sun, so
     // corners stay readable in full sunlight (the original's stylized mix).
     vec3 color = albedo * (direct * (0.7 + 0.3 * ao) + indirect * ao);
-    color += albedo * emission * gridDim.w;  // after AO: emissives stay bright
 
-    // Mirror reflections for reflective palette entries (Fresnel-blended).
-    if (params.z > 0.5 && reflectivity > 0.001) {
-        vec3 rdir = reflect(rd, hit.normal);
-        vec3 rorigin = hitLocal + hit.normal * voxelSize * 0.51;
-        vec3 refl;
-        Hit rh;
-        if (raycast(rorigin, rdir, 1e9, rh)) {
-            vec3 rAlbedo;
-            float rEmission, rRefl;
-            decodeMaterial(rh.mat, rAlbedo, rEmission, rRefl);
-            float rNdl = max(dot(rh.normal, sunDir), 0.0);
-            refl = rAlbedo * (sunColor.xyz * sunColor.w * INV_PI * rNdl + skyRadiance(rh.normal))
-                 + rAlbedo * rEmission * gridDim.w;
+    // Secondary rays (params.z toggles both): roughness-jittered glossy
+    // reflection, and for transmissive palette entries the full BTDF —
+    // Fresnel-split reflection + refraction with Beer-Lambert absorption.
+    if (params.z > 0.5 && (transmission > 0.001 || reflectivity > 0.001)) {
+        vec2 px = gl_FragCoord.xy;
+        float cosI = max(dot(-rd, hit.normal), 0.0);
+        vec3 rdir = glossyDir(reflect(rd, hit.normal), hit.normal, roughness, px);
+        vec3 refl = secondaryRadiance(hitLocal + hit.normal * voxelSize * 0.51, rdir);
+        if (transmission > 0.001) {
+            // Dielectric: Fresnel from the IOR splits the energy.
+            float f0 = (ior - 1.0) / (ior + 1.0);
+            f0 *= f0;
+            float F = f0 + (1.0 - f0) * pow(1.0 - cosI, 5.0);
+            vec3 tdir = refract(rd, hit.normal, 1.0 / ior);
+            vec3 trans;
+            if (dot(tdir, tdir) < 1e-6) {
+                trans = refl;  // grazing entry TIR: everything reflects
+            } else {
+                tdir = glossyDir(tdir, -hit.normal, roughness, px + vec2(7.0, 13.0));  // frosted
+                trans = transmitRadiance(hitLocal, tdir, ior, rawAlbedo, voxelSize);
+            }
+            vec3 glass = F * refl + (1.0 - F) * trans;
+            color = mix(color, glass, transmission);
         } else {
-            refl = skyRadiance(rdir);
+            float f = reflectivity + (1.0 - reflectivity) * pow(1.0 - cosI, 5.0);
+            color = mix(color, refl, clamp(f, 0.0, 1.0));
         }
-        float f = reflectivity + (1.0 - reflectivity) * pow(1.0 - max(dot(-rd, hit.normal), 0.0), 5.0);
-        color = mix(color, refl, clamp(f, 0.0, 1.0));
     }
+    // Emission after the secondary mix: an emissive surface glows regardless of
+    // how reflective/transmissive it is (the crystal keeps its inner light).
+    color += albedo * emission * gridDim.w;
 
     // Debug views: 1=albedo 2=normal 3=ao 4=shadow 6=material index.
     int debugMode = int(params.y);

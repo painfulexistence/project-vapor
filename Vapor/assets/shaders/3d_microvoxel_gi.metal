@@ -135,8 +135,8 @@ kernel void microVoxelGIKernel(
     if (mvRaycastScene(volumes, v, volumeCount, crossVol, pageTable, brickPool,
                        bounceOrigin, bounceDir, 1e9f, bh, bhVol)) {
         float3 bAlbedo;
-        float bEmission, bRefl;
-        mvDecodeMaterial(volumes[bhVol], palette, bh.mat, bAlbedo, bEmission, bRefl);
+        float bEmission, bRefl, bRough, bTrans, bIor;
+        mvDecodeMaterial(volumes[bhVol], palette, bh.mat, bAlbedo, bEmission, bRefl, bRough, bTrans, bIor);
         // Sun at the bounce hit with a full (cross-volume) shadow ray; the
         // 0.3 sky term stands in for further bounces. Emissive voxels act as
         // area lights.

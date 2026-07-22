@@ -103,6 +103,12 @@ void VoxelWorld::setDefaultPalette() {
         palette[idx].reflectivity = reflectivity;
         palette[idx].roughness = roughness;
     };
+    // Dielectric transmission (the BTDF path): iorByte encodes actual IOR as
+    // 1.0 + iorByte/255 (glass 1.5 -> 128, crystal 1.55 -> 140).
+    auto setGlass = [this](Uint8 idx, Uint8 transmission, Uint8 iorByte) {
+        palette[idx].transmission = transmission;
+        palette[idx].ior = iorByte;
+    };
     for (int i = 9; i < 256; i++) set(static_cast<Uint8>(i), 128, 128, 128);
     set(MatGrass, 64, 140, 46);
     set(MatDirt, 107, 77, 46);
@@ -110,13 +116,16 @@ void VoxelWorld::setDefaultPalette() {
     set(MatSnow, 235, 240, 250);
     set(MatSand, 204, 184, 122);
     set(MatOre, 242, 191, 64);
-    set(MatCrystal, 115, 191, 242, 160);  // cool cyan glow
+    set(MatCrystal, 115, 191, 242, 110);  // cool cyan; emission dimmed now light passes through
     set(MatGlow, 255, 140, 48, 255);      // warm glowstone, full emission
-    // Reflective materials: crystals are near-mirror; ore and snow catch a
-    // faint sheen. Everything else stays matte.
-    setParams(MatCrystal, 210, 20);
+    // Reflective materials: ore and snow catch a roughness-jittered sheen.
     setParams(MatOre, 90, 60);
     setParams(MatSnow, 40, 120);
+    // Crystals are the transmission showcase: near-clear cyan glass (Fresnel
+    // reflection comes from the IOR on the glass path, so reflectivity here
+    // only matters if transmission is ever zeroed).
+    setParams(MatCrystal, 210, 20);
+    setGlass(MatCrystal, 200, 140);
 }
 
 float VoxelWorld::terrainHeight(int x, int z) const {

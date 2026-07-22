@@ -4,7 +4,9 @@
 #include "Vapor/voxel_world.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -534,4 +536,55 @@ TEST_CASE("non-cubic grids generate and stay in bounds", "[voxel_world]") {
     // Out-of-bounds queries are air, never a crash.
     REQUIRE(world.voxelAt({ -1, 0, 0 }) == 0);
     REQUIRE(world.voxelAt({ 128, 0, 0 }) == 0);
+}
+
+TEST_CASE("palette words match the shader decode contract (incl. transmission/ior)", "[voxel_world]") {
+    using Vapor::VoxelMaterial;
+    // The renderer uploads the palette verbatim as 2 uints per entry and the
+    // shaders (MicroVoxel.frag / 3d_microvoxel.metal) decode
+    //   word0 = r | g<<8 | b<<16 | emission<<24
+    //   word1 = reflectivity | roughness<<8 | transmission<<16 | ior<<24
+    // Lock the byte placement so a struct reorder can't silently shift the
+    // GPU-side decode.
+    static_assert(sizeof(VoxelMaterial) == 8);
+    static_assert(offsetof(VoxelMaterial, r) == 0);
+    static_assert(offsetof(VoxelMaterial, emission) == 3);
+    static_assert(offsetof(VoxelMaterial, reflectivity) == 4);
+    static_assert(offsetof(VoxelMaterial, roughness) == 5);
+    static_assert(offsetof(VoxelMaterial, transmission) == 6);
+    static_assert(offsetof(VoxelMaterial, ior) == 7);
+
+    VoxelMaterial m;
+    m.r = 0x11; m.g = 0x22; m.b = 0x33; m.emission = 0x44;
+    m.reflectivity = 0x55; m.roughness = 0x66; m.transmission = 0x77; m.ior = 0x88;
+    uint32_t words[2];
+    std::memcpy(words, &m, sizeof(words));
+    REQUIRE(((words[0] >> 0) & 0xFFu) == 0x11u);
+    REQUIRE(((words[0] >> 8) & 0xFFu) == 0x22u);
+    REQUIRE(((words[0] >> 16) & 0xFFu) == 0x33u);
+    REQUIRE(((words[0] >> 24) & 0xFFu) == 0x44u);
+    REQUIRE(((words[1] >> 0) & 0xFFu) == 0x55u);
+    REQUIRE(((words[1] >> 8) & 0xFFu) == 0x66u);
+    REQUIRE(((words[1] >> 16) & 0xFFu) == 0x77u);
+    REQUIRE(((words[1] >> 24) & 0xFFu) == 0x88u);
+}
+
+TEST_CASE("default palette makes the crystal a transmissive dielectric", "[voxel_world]") {
+    VoxelWorld world;
+    world.configure(glm::ivec3(64, 64, 64), 0.05f, 1u << 16);
+    world.generate(1337u);
+    const auto& pal = world.paletteData();
+    // Crystal: the glass showcase — transmissive, IOR ~1.55 (byte 140), near
+    // clear, still faintly emissive.
+    REQUIRE(pal[VoxelWorld::MatCrystal].transmission == 200);
+    REQUIRE(pal[VoxelWorld::MatCrystal].ior == 140);
+    REQUIRE(pal[VoxelWorld::MatCrystal].roughness == 20);
+    REQUIRE(pal[VoxelWorld::MatCrystal].emission > 0);
+    // Rough-sheen materials keep their glossy-jitter roughness, opaque.
+    REQUIRE(pal[VoxelWorld::MatSnow].roughness == 120);
+    REQUIRE(pal[VoxelWorld::MatSnow].transmission == 0);
+    REQUIRE(pal[VoxelWorld::MatOre].roughness == 60);
+    // Air (0) stays inert on every channel the shader reads.
+    REQUIRE(pal[0].transmission == 0);
+    REQUIRE(pal[0].reflectivity == 0);
 }

@@ -8917,7 +8917,7 @@ void Renderer::drawGraphicsImGui() {
             microVoxelSettings.sunDirection.w = sunShadow ? 1.0f : 0.0f;
         }
         bool reflections = microVoxelSettings.params.z > 0.5f;
-        if (ImGui::Checkbox("Reflections", &reflections)) {
+        if (ImGui::Checkbox("Secondary rays (reflection + glass)", &reflections)) {
             microVoxelSettings.params.z = reflections ? 1.0f : 0.0f;
         }
         ImGui::SliderFloat("AO strength", &microVoxelSettings.params.x, 0.0f, 1.0f);
