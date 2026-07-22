@@ -267,10 +267,13 @@ namespace Vapor {
         float fogDensityMul    = 1.0f;      // multiplies VolumetricFogComponent density
         float windMul          = 1.0f;      // multiplies WindFieldComponent strength
         float iblDim           = 1.0f;      // scales the baked environment (IBL) ambience
-        // Multiplies the renderer's cloud sunLightScale: the artistic stand-in
-        // for the extinction depth the 6-step light march can't afford — storm
-        // decks read darker than self-shadowing alone provides.
-        float cloudSunMul      = 1.0f;
+        // Dims the cloud deck's own lit brightness (multiplies the renderer's
+        // cloud sunLightScale): the artistic stand-in for the extinction depth
+        // the 6-step light march can't afford — storm decks read darker than
+        // self-shadowing alone provides. Parallel to sunDim/iblDim, but a
+        // distinct quantity: this is the cloud (the occluder), those are the
+        // ground under it. 1.0 = clear.
+        float cloudDim         = 1.0f;
         // Cloud ambient (sky-fill) tint: blue under a clear sky, neutral gray
         // overcast, sickly green in a supercell thunderstorm.
         glm::vec3 cloudAmbientColor = glm::vec3(0.5f, 0.6f, 0.9f);
@@ -282,10 +285,10 @@ namespace Vapor {
             // ambient 0.001); storms raise coverage/density, drop the ceiling
             // and flatten toward stratus. Ambient stays in the tuned ~0.001-0.01
             // range — it is a full-sky glow, not a per-cloud fill.
-            // cloudSun multiplies the panel base sunLightScale (0.85): storms
+            // cloudDim multiplies the panel base sunLightScale (0.85): storms
             // steepen it hard so the deck's ABSOLUTE lit brightness stays dark
             // (0.85 x 0.12 ≈ 0.10) even though the base is bright for clear skies.
-            //                     coverage density type   bottom   top      ambient sunDim fogMul windMul iblDim cloudSun ambientTint
+            //                     coverage density type   bottom   top      ambient sunDim fogMul windMul iblDim cloudDim ambientTint
             case WeatherState::Cloudy:       return { 0.45f, 0.35f, 0.40f, 1600.0f, 10000.0f, 0.002f, 0.80f, 1.2f, 1.3f, 0.85f, 0.80f, {0.55f, 0.60f, 0.78f} };
             case WeatherState::Overcast:     return { 0.75f, 0.50f, 0.20f, 1000.0f,  6000.0f, 0.004f, 0.40f, 1.6f, 1.6f, 0.50f, 0.42f, {0.55f, 0.57f, 0.62f} };
             case WeatherState::Rain:         return { 0.85f, 0.65f, 0.15f,  800.0f,  5000.0f, 0.003f, 0.25f, 2.2f, 2.0f, 0.40f, 0.30f, {0.45f, 0.50f, 0.58f} };
@@ -309,7 +312,7 @@ namespace Vapor {
         r.fogDensityMul    = L(a.fogDensityMul,    b.fogDensityMul);
         r.windMul          = L(a.windMul,          b.windMul);
         r.iblDim           = L(a.iblDim,           b.iblDim);
-        r.cloudSunMul      = L(a.cloudSunMul,      b.cloudSunMul);
+        r.cloudDim         = L(a.cloudDim,         b.cloudDim);
         r.cloudAmbientColor = a.cloudAmbientColor + (b.cloudAmbientColor - a.cloudAmbientColor) * t;
         return r;
     }

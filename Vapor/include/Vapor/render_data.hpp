@@ -407,9 +407,9 @@ struct CloudsRenderData {
     float layerBottom = 2000.0f;  // meters
     float layerTop = 12000.0f;
     float ambientIntensity = 0.001f;
-    // Multiplies the renderer's panel-tuned sunLightScale (never replaces it):
-    // weather darkens the deck beyond what self-shadowing provides.
-    float sunScale = 1.0f;
+    // Dims the cloud deck's lit brightness — multiplies the renderer's
+    // panel-tuned sunLightScale (never replaces it). 1.0 = clear.
+    float cloudDim = 1.0f;
     // Cloud ambient (sky-fill) tint, scaled by ambientIntensity.
     glm::vec3 ambientColor = glm::vec3(0.5f, 0.6f, 0.9f);
 };
@@ -448,7 +448,7 @@ struct alignas(16) VolumetricCloudRenderData {
     float phaseBlend = 0.3f;
     float powderStrength = 0.5f;
     // Cloud-specific scale on the shared sunIntensity. A sunlit cloud is nearly
-    // white, so the clear-sky base is high; weather's cloudSunMul steepens it
+    // white, so the clear-sky base is high; weather's cloudDim steepens it
     // down for overcast/storm decks (which also self-shadow via density).
     float sunLightScale = 0.85f;
     glm::vec3 windDirection = glm::vec3(1.0f, 0.0f, 0.0f);

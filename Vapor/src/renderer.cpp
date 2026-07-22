@@ -4951,7 +4951,7 @@ void Renderer::setClouds(const CloudsRenderData& clouds) {
         std::max(1.0f, clouds.layerTop - clouds.layerBottom);
     cloudSettings.ambientIntensity   = clouds.ambientIntensity;
     cloudSettings.ambientColor       = clouds.ambientColor;
-    m_cloudSunMul                    = clouds.sunScale;
+    m_cloudDim                       = clouds.cloudDim;
 }
 
 void Renderer::setIBLIntensity(float intensity) {
@@ -5000,10 +5000,10 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 4),
                                          std::max(1u, rhi->getSwapchainHeight() / 4));
     cloudSettings.cloudLayerThickness = cloudSettings.cloudLayerTop - cloudSettings.cloudLayerBottom;
-    // Upload a copy with the weather sun multiplier folded in — the panel's
+    // Upload a copy with the weather cloud-dim folded in — the panel's
     // sunLightScale stays authoritative in cloudSettings itself.
     VolumetricCloudRenderData uploadSettings = cloudSettings;
-    uploadSettings.sunLightScale *= m_cloudSunMul;
+    uploadSettings.sunLightScale *= m_cloudDim;
     rhi->updateBuffer(cloudDataBuffer, &uploadSettings, 0, sizeof(uploadSettings));
 
     // Pass 1: quarter-res raymarch -> cloudRT.

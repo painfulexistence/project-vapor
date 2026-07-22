@@ -771,9 +771,9 @@ private:
     // Weather-driven environment dimming (setIBLIntensity). Vulkan: rides in
     // LightCullData (set1 b5); Metal: fragment bytes at buffer(20).
     float m_iblIntensity = 1.0f;
-    // Weather multiplier on the panel-tuned cloud sunLightScale (setClouds
-    // sunScale) — applied at upload time so the panel value stays authoritative.
-    float m_cloudSunMul = 1.0f;
+    // Weather dim on the panel-tuned cloud sunLightScale (setClouds cloudDim)
+    // — applied at upload time so the panel value stays authoritative.
+    float m_cloudDim = 1.0f;
 
     // GPU particle system (self-contained orbital demo + ECS emitters).
     static constexpr Uint32 MAX_PARTICLES = 3'000'000;
