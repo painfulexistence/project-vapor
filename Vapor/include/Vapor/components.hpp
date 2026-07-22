@@ -6,6 +6,7 @@
 #include "physics_3d.hpp"
 #include "render_data.hpp"   // SkyType
 #include "vehicle_controller.hpp"
+#include "voxel_world.hpp"   // VoxelVolumeComponent's shared_ptr<VoxelWorld> needs the complete type
 #include <entt/entt.hpp>
 #include <functional>
 #include <glm/glm.hpp>
@@ -44,6 +45,7 @@ namespace Vapor {
     struct MeshRendererComponent {
         std::vector<std::shared_ptr<Mesh>> meshes;
         bool visible = true;
+        bool castShadow = true;  // off = skipped by the shadow passes (see Drawable)
     };
 
     // ============================================================================
@@ -242,6 +244,22 @@ namespace Vapor {
         // sun direction the IBL was last baked for (runtime, inspector-hidden).
         float iblSunThresholdDeg = 5.0f;
         Hidden<glm::vec3> _lastIblSunDir = {glm::vec3(0.0f)};
+    };
+
+    // A raymarched micro-voxel volume (see voxel_world.hpp). VoxelVolumeSystem
+    // creates and generates the VoxelWorld on first sight (chunk jobs on the
+    // task scheduler, so big worlds stream in without blocking a frame) and
+    // pushes the live volume list to the renderer every frame. The entity's
+    // TransformComponent places it: the grid is centered over the position in
+    // x/z and rises from its y, translation only — like the original.
+    struct VoxelVolumeComponent {
+        glm::ivec3 gridDim = glm::ivec3(256, 256, 256);  // voxels; multiples of 8
+        float voxelSize = 0.05f;                         // meters per voxel (5 cm)
+        Uint32 seed = 1337u;
+        Uint32 brickCapacity = 262144u;                  // pool budget (x 576 bytes)
+        bool regenerate = false;   // set true (e.g. from the inspector) to rebuild
+        Hidden<std::shared_ptr<VoxelWorld>> world = {};  // owned; created by the system
+        Hidden<Uint32> _generatedSeed = {0u};            // seed the world was built with
     };
 
     // ── Weather ──────────────────────────────────────────────────────────────

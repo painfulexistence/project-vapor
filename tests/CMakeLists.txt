@@ -168,6 +168,25 @@ target_link_libraries(test_file_system PRIVATE
 target_compile_features(test_file_system PRIVATE cxx_std_20)
 target_compile_options(test_file_system PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Voxel world tests (pure logic, no GPU) ────────────────────────────────
+# Compiles voxel_world.cpp directly instead of linking Vapor so the suite
+# stays free of GPU/physics dependencies. Includes a dense transcription of
+# the original Atmospheric generator as a voxel-for-voxel oracle.
+add_executable(test_voxel_world
+    voxel_world_test.cpp
+    ${CMAKE_SOURCE_DIR}/Vapor/src/voxel_world.cpp
+)
+target_include_directories(test_voxel_world PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+    ${CMAKE_SOURCE_DIR}/Vapor/include/Vapor
+)
+target_link_libraries(test_voxel_world PRIVATE
+    Catch2::Catch2WithMain
+    glm::glm
+)
+target_compile_features(test_voxel_world PRIVATE cxx_std_20)
+target_compile_options(test_voxel_world PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── Particle ECS system tests (emitter state machine, render packets, forces) ─
 # Links Vapor so the REAL Vapor::Particle* systems are under test (not a stub);
 # a recording mock IRenderer stands in for the GPU. No engine assets needed —
@@ -210,6 +229,7 @@ include(CTest)
 include(Catch)
 # Run each test from its executable's directory so that SDL_GetBasePath()
 # (used by readFile) resolves asset paths correctly.
+
 catch_discover_tests(test_action_system   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_action_system>")
 catch_discover_tests(test_ecs_transform   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ecs_transform>")
 catch_discover_tests(test_fsm_system      WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_fsm_system>")
@@ -224,3 +244,4 @@ catch_discover_tests(test_meshlet_builder    WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_cbt                WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_cbt>")
 catch_discover_tests(test_particle_system    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_particle_system>")
 catch_discover_tests(test_scene_blueprint    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_blueprint>")
+catch_discover_tests(test_voxel_world        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_voxel_world>")

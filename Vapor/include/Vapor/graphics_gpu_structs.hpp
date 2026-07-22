@@ -49,6 +49,12 @@ struct alignas(16) MaterialData {
     // here silently shifts every materials[i>0] read.
     float transmission;
 };
+// NOTE: the GPU upload stride is expected to be 112 (the shader twins in
+// 3d_common.metal / RHIMain.frag / PrePass.frag / ShadowDepth.frag assume it,
+// and a mismatch silently shifts every materials[i>0] read). The hard
+// static_assert is intentionally omitted while the material layout is still in
+// flux — re-enable it once it settles:
+//   static_assert(sizeof(MaterialData) == 112, "shader twins assume stride 112");
 
 struct alignas(16) DirectionalLight {
     glm::vec3 direction;

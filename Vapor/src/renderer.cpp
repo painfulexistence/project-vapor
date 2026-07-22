@@ -1,6 +1,7 @@
 #include "renderer.hpp"
 #include "meshlet_builder.hpp"  // runtime meshlet fallback in registerMesh
 #include "stats_log.hpp"
+#include "voxel_world.hpp"
 #include "rhi_vulkan.hpp"
 #include <chrono>
 #ifdef __APPLE__
@@ -284,6 +285,21 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         volDesc.usage = BufferUsage::Uniform;
         volDesc.memoryUsage = MemoryUsage::CPUtoGPU;
         createFrameSlottedBuffer(volumeDataBuffer, volDesc, &volumeSettings, sizeof(volumeSettings));
+
+        // MicroVoxel per-volume params: one 256-byte slice per volume, bound at
+        // an offset per draw (the stride satisfies storage-buffer offset
+        // alignment on both backends). Rewritten every frame -> frame-slotted.
+        BufferDesc mvDesc;
+        mvDesc.size = sizeof(MicroVoxelRenderData) * MAX_VOXEL_VOLUMES;
+        mvDesc.usage = BufferUsage::Uniform;
+        mvDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(microVoxelDataBuffer, mvDesc);
+
+        BufferDesc mvGiDesc;
+        mvGiDesc.size = sizeof(MicroVoxelGIRenderData);
+        mvGiDesc.usage = BufferUsage::Uniform;
+        mvGiDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+        createFrameSlottedBuffer(microVoxelGIParamsBuffer, mvGiDesc);
 
         // Procedural 64^3 test density grid (radial-falloff smoke puff shaped
         // by trilinear value noise) so the volume raymarch pass has something
@@ -695,6 +711,16 @@ void Renderer::shutdown() {
             rhi->destroyBuffer(materialUniformBuffer);
         }
 
+        // MicroVoxel shared GPU buffers (page tables / brick pool / palettes).
+        if (voxelPageTableBuffer.isValid()) rhi->destroyBuffer(voxelPageTableBuffer);
+        if (voxelBrickPoolBuffer.isValid()) rhi->destroyBuffer(voxelBrickPoolBuffer);
+        if (voxelPaletteBuffer.isValid()) rhi->destroyBuffer(voxelPaletteBuffer);
+        voxelPageTableBuffer = {};
+        voxelBrickPoolBuffer = {};
+        voxelPaletteBuffer = {};
+        voxelVolumes.clear();
+        pendingVoxelVolumes.clear();
+
         // Destroy meshes
         for (auto& mesh : meshes) {
             if (mesh.vertexBuffer.isValid()) {
@@ -724,7 +750,6 @@ void Renderer::shutdown() {
                 rhi->destroySampler(texture.sampler);
             }
         }
-
         // Destroy shaders
         if (vertexShader.isValid()) {
             rhi->destroyShader(vertexShader);
@@ -1258,9 +1283,33 @@ void Renderer::setupDefaultRenderGraph() {
 
     // Adaptive tessellation draw (mesh/task path or instanced indirect path,
     // per capability) into the HDR scene, depth-tested against Main. Before
-    // the sky so its depth writes keep the background out.
+    // the sky so its depth writes keep the background out — and before the
+    // voxel pass, so raymarched voxels depth-composite against tessellated
+    // geometry exactly like the rest of the raster scene.
     renderGraph.addPass("Tess",
         [](Renderer& r) { r.tessRenderPass(); });
+
+    // Raymarched micro-voxel volumes (VoxelVolumeComponent). Box-rasterized
+    // two-level DDA that writes true hit depth into depthStencilRT, so it must
+    // run after Main (loads scene color+depth) and before SkyAtmosphere —
+    // the sky then fills only pixels neither raster nor voxels claimed, and
+    // every later depth-reading pass (fog, clouds, god rays, sun flare)
+    // treats voxels as ordinary scene geometry.
+    renderGraph.addPass("MicroVoxel",
+        [](Renderer& r) { r.microVoxelPass(); });
+
+    // Traced voxel GI: half-res 1-bounce trace + temporal accumulation over
+    // the voxel G-buffer (no primary re-trace — the original GL version
+    // re-marched every GI pixel), a-trous denoise, then a fullscreen
+    // composite adding albedo * gi * ao to voxel pixels via the
+    // colorRT/tempColorRT swap. The trace/denoise stages need compute; the
+    // composite no-ops with them.
+    renderGraph.addPass("MicroVoxelGI",
+        [](Renderer& r) { r.microVoxelGIPass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("MicroVoxelGIDenoise",
+        [](Renderer& r) { r.microVoxelGIDenoisePass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("MicroVoxelGIComposite",
+        [](Renderer& r) { r.microVoxelGICompositePass(); });
 
     // Sky/atmosphere fills the background (depth == far) before bloom, so the
     // bright sky and sun disk feed the bloom pyramid.
@@ -2261,8 +2310,19 @@ void Renderer::mainRenderPass() {
             bindMaterial(materialId);
         }
 
-        // Draw all drawables with this material
-        for (Uint32 drawableIdx : drawableIndices) {
+        // Draw all drawables with this material. On the Vulkan CPU path,
+        // consecutive drawables that share a mesh AND occupy consecutive
+        // instance slots collapse into ONE instanced draw: the vertex shader
+        // reads instances[instanceID + gl_InstanceIndex], so pushing the run's
+        // first slot and drawing instanceCount = runLen indexes the whole run.
+        // (Instance slots are assigned in visible order, so entities spawned
+        // grouped by mesh — the MicroVoxel flora — form long runs; a cull gap
+        // just splits a run.) Metal keeps per-object draws: its vertexMain
+        // takes [[base_instance]], not [[instance_id]], so every instance of a
+        // batched draw would read the same InstanceData.
+        const bool canBatchRuns = backend == GraphicsBackend::Vulkan && !useGpuDriven;
+        for (size_t di = 0; di < drawableIndices.size();) {
+            const Uint32 drawableIdx = drawableIndices[di];
             const Drawable& drawable = frameDrawables[drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
 
@@ -2270,9 +2330,25 @@ void Renderer::mainRenderPass() {
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) {
                 fmt::print("Warning: drawable {} not found in instance ID map\n", drawableIdx);
+                ++di;
                 continue;
             }
             Uint32 correctInstanceID = it->second;
+
+            // Extend the run while the mesh matches and instance slots stay
+            // consecutive (indexed draws only — the non-indexed fallback is rare
+            // enough to keep per-object).
+            Uint32 runLen = 1;
+            if (canBatchRuns && mesh.indexBuffer.isValid()) {
+                while (di + runLen < drawableIndices.size()) {
+                    const Uint32 nextIdx = drawableIndices[di + runLen];
+                    if (frameDrawables[nextIdx].mesh != drawable.mesh) break;
+                    auto nit = drawableToInstanceID.find(nextIdx);
+                    if (nit == drawableToInstanceID.end() ||
+                        nit->second != correctInstanceID + runLen) break;
+                    ++runLen;
+                }
+            }
 
             // Bind vertex buffer (binding 3 for Metal shader)
             if (mesh.vertexBuffer.isValid()) {
@@ -2302,13 +2378,14 @@ void Renderer::mainRenderPass() {
                                              correctInstanceID * sizeof(Vapor::DrawCommand),
                                              1, sizeof(Vapor::DrawCommand));
                 } else {
-                    rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+                    rhi->drawIndexed(mesh.indexCount, runLen, 0, 0, 0);
                 }
                 mainDrawCalls++;
             } else if (mesh.vertexBuffer.isValid()) {
                 rhi->draw(mesh.vertexCount, 1, 0, 0);
                 mainDrawCalls++;
             }
+            di += runLen;
         }
     }
     }  // end !useMDI (per-object / CPU path)
@@ -2617,21 +2694,39 @@ void Renderer::prePass() {
     const bool prePullsMerged = backend == GraphicsBackend::Metal &&
                                 m_mdiInstanceLayout && mergedVertexBuffer.isValid();
     if (prePullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
-    for (Uint32 drawableIdx : visibleDrawables) {
+    // Vulkan's pre-pass vertex shader is RHIMain.vert (instances[instanceID +
+    // gl_InstanceIndex]), so the same-mesh consecutive-slot run batching the
+    // Main pass does applies here too (see mainRenderPass). Metal stays
+    // per-object ([[base_instance]] semantics).
+    const bool preBatchRuns = backend == GraphicsBackend::Vulkan;
+    for (size_t vi = 0; vi < visibleDrawables.size();) {
+        const Uint32 drawableIdx = visibleDrawables[vi];
         const Drawable& drawable = frameDrawables[drawableIdx];
         const RenderMesh& mesh = meshes[drawable.mesh];
         auto it = drawableToInstanceID.find(drawableIdx);
-        if (it == drawableToInstanceID.end()) continue;
+        if (it == drawableToInstanceID.end()) { ++vi; continue; }
         Uint32 iid = it->second;
+        Uint32 runLen = 1;
+        if (preBatchRuns && mesh.indexBuffer.isValid()) {
+            while (vi + runLen < visibleDrawables.size()) {
+                const Uint32 nextIdx = visibleDrawables[vi + runLen];
+                if (frameDrawables[nextIdx].mesh != drawable.mesh ||
+                    frameDrawables[nextIdx].material != drawable.material) break;
+                auto nit = drawableToInstanceID.find(nextIdx);
+                if (nit == drawableToInstanceID.end() || nit->second != iid + runLen) break;
+                ++runLen;
+            }
+        }
         bindMaterial(drawable.material);  // albedo/normal maps for the MRT frag
         if (!prePullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
         rhi->setVertexBytes(&iid, sizeof(Uint32), 4);
         if (mesh.indexBuffer.isValid()) {
             rhi->bindIndexBuffer(mesh.indexBuffer, 0);
-            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+            rhi->drawIndexed(mesh.indexCount, runLen, 0, 0, 0);
         } else if (mesh.vertexBuffer.isValid()) {
             rhi->draw(mesh.vertexCount, 1, 0, 0);
         }
+        vi += runLen;
     }
     rhi->endRenderPass();
 }
@@ -4074,6 +4169,7 @@ void Renderer::shadowPass() {
         // every drawable — culled ones follow the visible prefix.)
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
+            if (!drawable.castShadow) continue;
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
@@ -4126,6 +4222,7 @@ void Renderer::shadowPass() {
             rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
         for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
             const Drawable& drawable = frameDrawables[drawableIdx];
+            if (!drawable.castShadow) continue;
             const RenderMesh& mesh = meshes[drawable.mesh];
             auto it = drawableToInstanceID.find(drawableIdx);
             if (it == drawableToInstanceID.end()) continue;
@@ -4730,6 +4827,357 @@ void Renderer::volumeRaymarchPass() {
     rhi->endRenderPass();
 
     std::swap(colorRT, tempColorRT);  // colorRT now holds the composited volume
+}
+
+// ============================================================================
+// MicroVoxel raymarch (sparse-brick voxel volumes)
+// ============================================================================
+
+void Renderer::setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) {
+    pendingVoxelVolumes = volumes;
+}
+
+// Reconcile the ECS-pushed volume list with the renderer's GPU mirrors and
+// flush each world's dirty batches into the SHARED buffers. When the volume
+// set changes (add/remove/reconfigure) the shared page-table and brick-pool
+// buffers are rebuilt with sequential per-volume ranges and every live
+// volume is re-uploaded; steady-state frames upload only dirty bricks — a
+// carve never re-uploads a volume.
+void Renderer::updateVoxelVolumeResources() {
+    struct Desired {
+        std::shared_ptr<Vapor::VoxelWorld> world;
+        glm::vec3 origin;
+        Uint32 pages;
+        Uint32 capacity;
+    };
+    std::vector<Desired> desired;
+    for (const auto& draw : pendingVoxelVolumes) {
+        if (!draw.world) continue;
+        const Uint32 pages = static_cast<Uint32>(draw.world->pageTableData().size());
+        if (pages == 0) continue;  // not generated yet
+        if (desired.size() >= MAX_VOXEL_VOLUMES) break;
+        desired.push_back({ draw.world, draw.origin, pages, draw.world->capacity() });
+    }
+
+    bool layoutChanged = desired.size() != voxelVolumes.size();
+    if (!layoutChanged) {
+        for (size_t i = 0; i < desired.size(); i++) {
+            if (voxelVolumes[i].world.get() != desired[i].world.get() ||
+                voxelVolumes[i].pageEntryCount != desired[i].pages ||
+                voxelVolumes[i].brickCapacity != desired[i].capacity) {
+                layoutChanged = true;
+                break;
+            }
+        }
+    }
+
+    if (layoutChanged) {
+        if (voxelPageTableBuffer.isValid()) rhi->destroyBuffer(voxelPageTableBuffer);
+        if (voxelBrickPoolBuffer.isValid()) rhi->destroyBuffer(voxelBrickPoolBuffer);
+        if (voxelPaletteBuffer.isValid()) rhi->destroyBuffer(voxelPaletteBuffer);
+        voxelPageTableBuffer = {};
+        voxelBrickPoolBuffer = {};
+        voxelPaletteBuffer = {};
+        voxelVolumes.clear();
+
+        Uint32 pageBase = 0, brickBase = 0;
+        for (const auto& d : desired) {
+            VoxelVolumeGpu gpu;
+            gpu.world = d.world;
+            gpu.origin = d.origin;
+            gpu.pageTableOffset = pageBase;
+            gpu.brickPoolBase = brickBase;
+            gpu.pageEntryCount = d.pages;
+            gpu.brickCapacity = d.capacity;
+            voxelVolumes.push_back(gpu);
+            pageBase += d.pages;
+            brickBase += d.capacity;
+        }
+        if (!voxelVolumes.empty()) {
+            BufferDesc pd;
+            pd.size = static_cast<size_t>(pageBase) * sizeof(Uint32);
+            pd.usage = BufferUsage::Storage;
+            pd.memoryUsage = MemoryUsage::GPU;
+            voxelPageTableBuffer = rhi->createBuffer(pd);
+
+            BufferDesc bd;
+            bd.size = static_cast<size_t>(brickBase) * sizeof(Vapor::VoxelWorld::Brick);
+            bd.usage = BufferUsage::Storage;
+            bd.memoryUsage = MemoryUsage::GPU;
+            voxelBrickPoolBuffer = rhi->createBuffer(bd);
+
+            BufferDesc pald;
+            pald.size = static_cast<size_t>(MAX_VOXEL_VOLUMES) * 256 * sizeof(Vapor::VoxelMaterial);
+            pald.usage = BufferUsage::Storage;
+            pald.memoryUsage = MemoryUsage::GPU;
+            voxelPaletteBuffer = rhi->createBuffer(pald);
+        }
+    }
+
+    bool needsFlush = false;
+    for (size_t i = 0; i < voxelVolumes.size(); i++) {
+        VoxelVolumeGpu& gpu = voxelVolumes[i];
+        gpu.origin = desired[i].origin;
+        Vapor::VoxelWorld& world = *gpu.world;
+
+        if (layoutChanged) {
+            // Fresh ranges: upload everything this world currently has and
+            // drain its dirty flags (later generation lands as new batches).
+            world.takeDirty();
+            rhi->updateBuffer(voxelPageTableBuffer, world.pageTableData().data(),
+                              static_cast<size_t>(gpu.pageTableOffset) * sizeof(Uint32),
+                              static_cast<size_t>(gpu.pageEntryCount) * sizeof(Uint32));
+            if (world.brickPoolSize() > 0) {
+                rhi->updateBuffer(voxelBrickPoolBuffer, &world.brick(0),
+                                  static_cast<size_t>(gpu.brickPoolBase) * sizeof(Vapor::VoxelWorld::Brick),
+                                  static_cast<size_t>(world.brickPoolSize()) * sizeof(Vapor::VoxelWorld::Brick));
+            }
+            rhi->updateBuffer(voxelPaletteBuffer, world.paletteData().data(),
+                              i * 256 * sizeof(Vapor::VoxelMaterial), 256 * sizeof(Vapor::VoxelMaterial));
+            needsFlush = true;
+            continue;
+        }
+
+        if (!world.hasDirty()) continue;
+        Vapor::VoxelWorld::DirtyBatch batch = world.takeDirty();
+        if (batch.pageTable) {
+            rhi->updateBuffer(voxelPageTableBuffer, world.pageTableData().data(),
+                              static_cast<size_t>(gpu.pageTableOffset) * sizeof(Uint32),
+                              static_cast<size_t>(gpu.pageEntryCount) * sizeof(Uint32));
+        }
+        if (batch.palette) {
+            rhi->updateBuffer(voxelPaletteBuffer, world.paletteData().data(),
+                              i * 256 * sizeof(Vapor::VoxelMaterial), 256 * sizeof(Vapor::VoxelMaterial));
+        }
+        if (!batch.brickSlots.empty()) {
+            // The CPU pool is contiguous, so consecutive slots merge into one
+            // upload; after initial generation this collapses thousands of
+            // per-brick updates into a few large ranges.
+            std::sort(batch.brickSlots.begin(), batch.brickSlots.end());
+            size_t runStart = 0;
+            for (size_t r = 1; r <= batch.brickSlots.size(); r++) {
+                if (r < batch.brickSlots.size() && batch.brickSlots[r] == batch.brickSlots[r - 1] + 1) {
+                    continue;
+                }
+                const Uint32 first = batch.brickSlots[runStart];
+                const Uint32 count = batch.brickSlots[r - 1] - first + 1;
+                rhi->updateBuffer(
+                    voxelBrickPoolBuffer, &world.brick(first),
+                    (static_cast<size_t>(gpu.brickPoolBase) + first) * sizeof(Vapor::VoxelWorld::Brick),
+                    static_cast<size_t>(count) * sizeof(Vapor::VoxelWorld::Brick));
+                runStart = r;
+            }
+        }
+    }
+    // GPU-only uploads are normally submitted before the NEXT frame; freshly
+    // (re)created shared buffers would draw one frame from uninitialized
+    // memory (a garbage page table can even index the pool out of bounds).
+    // Force the initial upload through before first use.
+    if (needsFlush) rhi->flushUploads();
+}
+
+// Box-rasterized two-level DDA over every registered voxel volume, writing
+// linear HDR into colorRT and true hit depth into depthStencilRT (misses
+// discard). See MicroVoxel.frag / 3d_microvoxel.metal for the traversal.
+void Renderer::microVoxelPass() {
+    voxelVolumesDrawn = 0;
+    voxelGIActiveThisFrame = false;
+    if (!microVoxelEnabled || !microVoxelPipeline.isValid() || !microVoxelDataBuffer.isValid() ||
+        !colorRT.isValid() || !depthStencilRT.isValid() || !voxelHitTRT.isValid()) {
+        voxelGIHistoryValid = false;
+        return;
+    }
+    updateVoxelVolumeResources();
+    if (voxelVolumes.empty()) {
+        voxelGIHistoryValid = false;
+        return;
+    }
+
+    // Traced GI runs when the compute pipelines/targets exist and the panel
+    // strength is nonzero; the primary shader then drops its flat ambient
+    // (params.w > 0) and the composite adds albedo * gi * ao instead.
+    voxelGIActiveThisFrame = capabilities.computeShaders && microVoxelGIStrength > 0.0f &&
+        microVoxelGIPipeline.isValid() && microVoxelGICompositePipeline.isValid() &&
+        microVoxelGIParamsBuffer.isValid() && voxelGIAccumRT[0].isValid() && tempColorRT.isValid();
+    if (!voxelGIActiveThisFrame) voxelGIHistoryValid = false;
+
+    if (!voxelPageTableBuffer.isValid() || !voxelBrickPoolBuffer.isValid() || !voxelPaletteBuffer.isValid()) {
+        voxelGIActiveThisFrame = false;
+        return;
+    }
+
+    std::array<MicroVoxelRenderData, MAX_VOXEL_VOLUMES> data {};
+    const Uint32 written = static_cast<Uint32>(std::min<size_t>(voxelVolumes.size(), MAX_VOXEL_VOLUMES));
+    const glm::mat4 viewProj = currentCamera.proj * currentCamera.view;
+    glm::vec3 sunDir = atmosphereData.sunDirection;
+    sunDir = (glm::length(sunDir) > 1e-6f) ? glm::normalize(sunDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+    for (Uint32 i = 0; i < written; i++) {
+        const VoxelVolumeGpu& gpu = voxelVolumes[i];
+        MicroVoxelRenderData& d = data[i];
+        d = microVoxelSettings;
+        d.viewProj = viewProj;
+        d.cameraPosition = glm::vec4(currentCamera.position, microVoxelSettings.cameraPosition.w);
+        d.volumeOrigin = glm::vec4(gpu.origin, gpu.world->voxelSizeMeters());
+        d.gridDim = glm::vec4(glm::vec3(gpu.world->dim()), microVoxelSettings.gridDim.w);
+        d.sunDirection = glm::vec4(sunDir, microVoxelSettings.sunDirection.w);
+        d.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
+        d.params.w = voxelGIActiveThisFrame ? microVoxelGIStrength : 0.0f;
+        // Shared-buffer ranges: the slice index doubles as the palette slot.
+        d.extra0 = glm::vec4(static_cast<float>(i), static_cast<float>(gpu.pageTableOffset),
+                             static_cast<float>(gpu.brickPoolBase), static_cast<float>(i * 256u));
+        voxelVolumesDrawnRefs[i] = &gpu;
+    }
+    if (written == 0) {
+        voxelGIActiveThisFrame = false;
+        return;
+    }
+    voxelVolumesDrawn = written;
+    rhi->updateBuffer(microVoxelDataBuffer, data.data(), 0,
+                      static_cast<size_t>(written) * sizeof(MicroVoxelRenderData));
+
+    RenderPassDesc rp;
+    rp.name = "MicroVoxel";
+    rp.colorAttachments.push_back(colorRT);
+    rp.loadColor.push_back(true);   // composite over the rendered scene
+    // Voxel G-buffer MRTs, cleared each frame (miss pixels stay hitT = 0).
+    rp.colorAttachments.push_back(voxelHitTRT);
+    rp.colorAttachments.push_back(voxelAlbedoAORT);
+    rp.colorAttachments.push_back(voxelNormalMatRT);
+    rp.clearColors = { glm::vec4(0.0f), glm::vec4(0.0f), glm::vec4(0.0f), glm::vec4(0.0f) };
+    rp.loadColor.push_back(false);
+    rp.loadColor.push_back(false);
+    rp.loadColor.push_back(false);
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = true;            // test against + write voxel hit depth
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(microVoxelPipeline);
+    rhi->setFragmentBuffer(1, voxelPageTableBuffer);
+    rhi->setFragmentBuffer(2, voxelBrickPoolBuffer);
+    rhi->setFragmentBuffer(3, voxelPaletteBuffer);
+    for (Uint32 i = 0; i < written; i++) {
+        const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
+        rhi->setVertexBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
+        rhi->setFragmentBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
+        rhi->draw(36, 1, 0, 0);
+    }
+    rhi->endRenderPass();
+}
+
+// Half-res 1-bounce trace + temporal accumulation in ONE dispatch: the
+// kernel reads each pixel's volume index from the G-buffer and indexes the
+// bound params array, and with cross-volume on its bounce rays brute-force
+// every volume for the nearest hit (the original's giCrossVolume, without
+// its 4-sampler cap — shared buffers dynamically index any volume count).
+// History reads the previous frame's RAW accumulation; the filtered result
+// never feeds back.
+void Renderer::microVoxelGIPass() {
+    if (!voxelGIActiveThisFrame || voxelVolumesDrawn == 0) return;
+
+    const glm::mat4 viewProj = currentCamera.proj * currentCamera.view;
+    MicroVoxelGIRenderData gp {};
+    gp.invViewProj = glm::inverse(viewProj);
+    gp.prevViewProj = voxelGIHistoryValid ? voxelGIPrevViewProj : viewProj;
+    gp.cameraPosition = glm::vec4(currentCamera.position, static_cast<float>(voxelGIFrameIndex));
+    gp.prevCameraPosition = glm::vec4(voxelGIHistoryValid ? voxelGIPrevCameraPos : currentCamera.position,
+                                      voxelGIHistoryValid ? microVoxelGIBlend : 0.0f);
+    gp.params = glm::vec4(microVoxelGIStrength, microVoxelGISplitX,
+                          static_cast<float>(voxelGIWidth), static_cast<float>(voxelGIHeight));
+    const bool giDebugView = static_cast<int>(microVoxelSettings.params.y) == 5;
+    gp.sigmas = glm::vec4(microVoxelGISigmas, giDebugView ? 1.0f : 0.0f);
+    gp.counts = glm::vec4(static_cast<float>(voxelVolumesDrawn), microVoxelGICrossVolume ? 1.0f : 0.0f,
+                          0.0f, 0.0f);
+    rhi->updateBuffer(microVoxelGIParamsBuffer, &gp, 0, sizeof(gp));
+
+    const int cur = voxelGICur;
+    const int prev = 1 - cur;
+    rhi->beginComputePass("MicroVoxelGI");
+    rhi->bindComputePipeline(microVoxelGIPipeline);
+    // The FULL per-volume params array — the kernel indexes it dynamically.
+    rhi->setComputeBuffer(0, microVoxelDataBuffer, 0,
+                          static_cast<size_t>(voxelVolumesDrawn) * sizeof(MicroVoxelRenderData));
+    rhi->setComputeBuffer(1, microVoxelGIParamsBuffer, 0, sizeof(MicroVoxelGIRenderData));
+    rhi->setComputeBuffer(2, voxelPageTableBuffer);
+    rhi->setComputeBuffer(3, voxelBrickPoolBuffer);
+    rhi->setComputeBuffer(4, voxelPaletteBuffer);
+    rhi->setComputeTexture(0, voxelGIAccumRT[cur]);
+    rhi->setComputeSampledTexture(1, voxelHitTRT, shadowSampler);
+    rhi->setComputeSampledTexture(2, voxelNormalMatRT, shadowSampler);
+    rhi->setComputeSampledTexture(3, voxelGIAccumRT[prev], clampSampler);
+    rhi->dispatch((voxelGIWidth + 7) / 8, (voxelGIHeight + 7) / 8, 1);
+    rhi->endComputePass();
+    rhi->computeBarrier();
+}
+
+// A-trous iterations with increasing step size, ping-ponging the two scratch
+// targets. Iteration 0 reads the fresh accumulation.
+void Renderer::microVoxelGIDenoisePass() {
+    if (!voxelGIActiveThisFrame || voxelVolumesDrawn == 0) return;
+    if (!microVoxelAtrousPipeline.isValid() || microVoxelGIAtrousIterations <= 0) return;
+
+    for (int it = 0; it < microVoxelGIAtrousIterations; it++) {
+        TextureHandle input = (it == 0) ? voxelGIAccumRT[voxelGICur] : voxelGIAtrousRT[(it - 1) & 1];
+        TextureHandle output = voxelGIAtrousRT[it & 1];
+        struct {
+            glm::ivec4 stepAndSize;
+            glm::vec4 sigmas;
+        } push;
+        push.stepAndSize = glm::ivec4(1 << it, voxelGIWidth, voxelGIHeight, 0);
+        push.sigmas = glm::vec4(microVoxelGISigmas, 0.0f);
+
+        rhi->beginComputePass("MicroVoxelGIDenoise");
+        rhi->bindComputePipeline(microVoxelAtrousPipeline);
+        rhi->setComputeBytes(&push, sizeof(push), 0);
+        rhi->setComputeTexture(0, output);
+        rhi->setComputeSampledTexture(1, input, shadowSampler);
+        rhi->setComputeSampledTexture(2, voxelNormalMatRT, shadowSampler);
+        rhi->dispatch((voxelGIWidth + 7) / 8, (voxelGIHeight + 7) / 8, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();
+    }
+}
+
+// Fullscreen composite: scene color + albedo * gi * ao on voxel pixels, via
+// the colorRT/tempColorRT swap (fog-pass pattern). Also rolls the GI frame
+// state forward (ping-pong flip, previous view-proj/camera).
+void Renderer::microVoxelGICompositePass() {
+    if (!voxelGIActiveThisFrame || voxelVolumesDrawn == 0) return;
+
+    TextureHandle denoised = (microVoxelGIAtrousIterations > 0 && microVoxelAtrousPipeline.isValid())
+        ? voxelGIAtrousRT[(microVoxelGIAtrousIterations - 1) & 1]
+        : voxelGIAccumRT[voxelGICur];
+
+    // The GI accumulate/à-trous passes leave their final targets as compute
+    // storage images (VK_IMAGE_LAYOUT_GENERAL) — the last write is never
+    // sampled by a later compute pass, so nothing transitions them back.
+    // setTexture below samples them as SHADER_READ_ONLY; move them there first
+    // (between passes, before beginRenderPass) or Vulkan validation trips on
+    // the layout mismatch. No-op on Metal.
+    rhi->prepareTextureForSampling(denoised);
+    rhi->prepareTextureForSampling(voxelGIAccumRT[voxelGICur]);
+
+    RenderPassDesc rp;
+    rp.name = "MicroVoxelGIComposite";
+    rp.colorAttachments.push_back(tempColorRT);
+    rp.loadColor.push_back(false);  // every pixel written
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(microVoxelGICompositePipeline);
+    rhi->setTexture(0, 0, colorRT, clampSampler);
+    rhi->setTexture(0, 1, voxelHitTRT, clampSampler);
+    rhi->setTexture(0, 2, voxelAlbedoAORT, clampSampler);
+    rhi->setTexture(0, 3, denoised, clampSampler);
+    rhi->setTexture(0, 4, voxelGIAccumRT[voxelGICur], clampSampler);
+    rhi->setFragmentBuffer(0, microVoxelGIParamsBuffer, 0, sizeof(MicroVoxelGIRenderData));
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+    std::swap(colorRT, tempColorRT);
+
+    // Roll temporal state forward: this frame's accumulation becomes next
+    // frame's history.
+    voxelGIPrevViewProj = currentCamera.proj * currentCamera.view;
+    voxelGIPrevCameraPos = currentCamera.position;
+    voxelGIFrameIndex++;
+    voxelGICur = 1 - voxelGICur;
+    voxelGIHistoryValid = true;
 }
 
 // Volume Rendering API — the hook a future EmberGen import PR calls with
@@ -5721,6 +6169,10 @@ void Renderer::destroyRenderTargets() {
     kill(lightScatteringRT);
     kill(velocityRT);
     kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT);
+    kill(voxelHitTRT); kill(voxelAlbedoAORT); kill(voxelNormalMatRT);
+    kill(voxelGIAccumRT[0]); kill(voxelGIAccumRT[1]);
+    kill(voxelGIAtrousRT[0]); kill(voxelGIAtrousRT[1]);
+    voxelGIHistoryValid = false;
     kill(swapchainDepthBuffer);
 
     // History/reprojection state is stale at the new resolution.
@@ -5997,6 +6449,38 @@ void Renderer::createRenderTargets() {
         cloudRT = rhi->createTexture(desc);
         cloudHistoryRT = rhi->createTexture(desc);
         cloudResolvedRT = rhi->createTexture(desc);
+    }
+
+    // MicroVoxel voxel G-buffer (full res) + traced-GI targets (half res).
+    // The GI history restarts from scratch after any (re)create — the
+    // history-valid flag forces a fresh-sample frame instead of reading
+    // uninitialized texels.
+    {
+        TextureDesc desc;
+        desc.width = width;
+        desc.height = height;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        desc.format = PixelFormat::R32_FLOAT;
+        voxelHitTRT = rhi->createTexture(desc);
+        desc.format = PixelFormat::RGBA8_UNORM;
+        voxelAlbedoAORT = rhi->createTexture(desc);
+        voxelNormalMatRT = rhi->createTexture(desc);
+
+        voxelGIWidth = std::max(1u, width / 2);
+        voxelGIHeight = std::max(1u, height / 2);
+        TextureDesc gid;
+        gid.width = voxelGIWidth;
+        gid.height = voxelGIHeight;
+        gid.format = PixelFormat::RGBA16_FLOAT;
+        gid.usage = TextureUsage::Storage | TextureUsage::Sampled;
+        gid.sampleCount = 1;
+        for (int i = 0; i < 2; i++) {
+            voxelGIAccumRT[i] = rhi->createTexture(gid);
+            voxelGIAtrousRT[i] = rhi->createTexture(gid);
+        }
+        voxelGIHistoryValid = false;
+        voxelGICur = 0;
     }
 
     // Create default depth buffer for swapchain rendering (when not using render targets)
@@ -6398,6 +6882,72 @@ void Renderer::createRenderPipeline() {
             // Heterogeneous volume raymarch (EmberGen density grids).
             volumeRaymarchPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
+
+            // MicroVoxel primary: box-rasterized voxel DDA. Not the fullscreen
+            // lambda — it draws AABB cubes (cull off, camera may sit inside)
+            // and writes gl_FragDepth, so depth test AND write are on.
+            {
+                std::string mvVertCode = readFile("shaders/MicroVoxel.vert.spv");
+                std::string mvFragCode = readFile("shaders/MicroVoxel.frag.spv");
+                if (!mvVertCode.empty() && !mvFragCode.empty()) {
+                    ShaderDesc vd;
+                    vd.stage = ShaderStage::Vertex;
+                    vd.code = mvVertCode.data();
+                    vd.codeSize = mvVertCode.size();
+                    vd.entryPoint = "main";
+                    microVoxelVS = rhi->createShader(vd);
+                    ShaderDesc fd;
+                    fd.stage = ShaderStage::Fragment;
+                    fd.code = mvFragCode.data();
+                    fd.codeSize = mvFragCode.size();
+                    fd.entryPoint = "main";
+                    microVoxelFS = rhi->createShader(fd);
+
+                    PipelineDesc d;
+                    d.vertexShader = microVoxelVS;
+                    d.fragmentShader = microVoxelFS;
+                    d.vertexLayout.stride = 0;
+                    d.vertexLayout.attributes = {};
+                    d.topology = PrimitiveTopology::TriangleList;
+                    d.blendMode = BlendMode::Opaque;
+                    d.depthTest = true;
+                    d.depthWrite = true;
+                    d.depthCompareOp = CompareOp::Less;
+                    d.cullMode = CullMode::None;
+                    d.sampleCount = 1;
+                    d.hasDepthAttachment = true;
+                    d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                    // Color + the voxel G-buffer MRTs (hitT, albedo+AO,
+                    // normal/material/volume) the GI passes consume.
+                    d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::R32_FLOAT,
+                                                 PixelFormat::RGBA8_UNORM, PixelFormat::RGBA8_UNORM };
+                    microVoxelPipeline = rhi->createPipeline(d);
+                }
+
+                // Traced GI + a-trous denoise (compute) and the fullscreen
+                // composite that folds albedo * gi * ao into the scene.
+                auto makeVkCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
+                    std::string code = readFile(spv);
+                    if (code.empty()) return {};
+                    ShaderDesc d2;
+                    d2.stage = ShaderStage::Compute;
+                    d2.code = code.data();
+                    d2.codeSize = code.size();
+                    d2.entryPoint = "main";
+                    sh = rhi->createShader(d2);
+                    ComputePipelineDesc cd;
+                    cd.computeShader = sh;
+                    cd.threadGroupSizeX = 8;
+                    cd.threadGroupSizeY = 8;
+                    return rhi->createComputePipeline(cd);
+                };
+                microVoxelGIPipeline = makeVkCompute("shaders/MicroVoxelGI.comp.spv", microVoxelGIShader);
+                microVoxelAtrousPipeline =
+                    makeVkCompute("shaders/MicroVoxelAtrous.comp.spv", microVoxelAtrousShader);
+                microVoxelGICompositePipeline = makeFullscreenFragPipeline(
+                    "shaders/MicroVoxelGIComposite.frag.spv", microVoxelGICompositeFS, BlendMode::Opaque);
+            }
+
 
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
@@ -6905,6 +7455,75 @@ void Renderer::createRenderPipeline() {
         }
         volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+
+        // MicroVoxel primary: box-rasterized voxel DDA. Not makeMetalPass —
+        // it needs depth WRITE (the fragment returns [[depth(any)]] so voxels
+        // depth-composite with the raster scene) and cull off (the camera may
+        // sit inside a volume's AABB).
+        {
+            std::string code = readFile("shaders/3d_microvoxel.metal");
+            if (!code.empty()) {
+                ShaderDesc vd;
+                vd.stage = ShaderStage::Vertex;
+                vd.code = code.data();
+                vd.codeSize = code.size();
+                vd.entryPoint = "microVoxelVertex";
+                microVoxelVS = rhi->createShader(vd);
+                ShaderDesc fd;
+                fd.stage = ShaderStage::Fragment;
+                fd.code = code.data();
+                fd.codeSize = code.size();
+                fd.entryPoint = "microVoxelFragment";
+                microVoxelFS = rhi->createShader(fd);
+
+                PipelineDesc d;
+                d.vertexShader = microVoxelVS;
+                d.fragmentShader = microVoxelFS;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = true;
+                d.depthWrite = true;
+                d.depthCompareOp = CompareOp::Less;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = true;
+                d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                // Color + the voxel G-buffer MRTs (hitT, albedo+AO,
+                // normal/material/volume) the GI passes consume.
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT, PixelFormat::R32_FLOAT,
+                                             PixelFormat::RGBA8_UNORM, PixelFormat::RGBA8_UNORM };
+                microVoxelPipeline = rhi->createPipeline(d);
+            }
+
+            // Traced GI + a-trous denoise kernels and the fullscreen GI
+            // composite, all from 3d_microvoxel_gi.metal (which includes the
+            // primary shader for the shared DDA).
+            std::string giCode = readFile("shaders/3d_microvoxel_gi.metal");
+            if (!giCode.empty()) {
+                auto makeKernel = [&](const char* entry, ShaderHandle& sh) -> ComputePipelineHandle {
+                    ShaderDesc d2;
+                    d2.stage = ShaderStage::Compute;
+                    d2.code = giCode.data();
+                    d2.codeSize = giCode.size();
+                    d2.entryPoint = entry;
+                    sh = rhi->createShader(d2);
+                    ComputePipelineDesc cd;
+                    cd.computeShader = sh;
+                    cd.threadGroupSizeX = 8;
+                    cd.threadGroupSizeY = 8;
+                    return rhi->createComputePipeline(cd);
+                };
+                microVoxelGIPipeline = makeKernel("microVoxelGIKernel", microVoxelGIShader);
+                microVoxelAtrousPipeline = makeKernel("microVoxelAtrousKernel", microVoxelAtrousShader);
+                microVoxelGICompositePipeline = makeMetalPass(
+                    "shaders/3d_microvoxel_gi.metal", "microVoxelGICompositeVertex",
+                    "microVoxelGICompositeFragment", BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT },
+                    false, CompareOp::Less);
+            }
+
+        }
         // Volumetric clouds (off by default): quarter-res raymarch ->
         // temporal resolve -> upscale composite, all from the native file.
         cloudRaymarchPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudFragmentLowRes",
@@ -7444,6 +8063,7 @@ void Renderer::collectDrawables(entt::registry& registry, std::shared_ptr<Render
             Drawable drawable;
             drawable.mesh = mesh->renderMeshId;
             drawable.material = mesh->renderMaterialId;
+            drawable.castShadow = meshRenderer.castShadow;
             drawable.transform = transform.worldTransform;
 
             // Transform AABB to world space
@@ -8195,6 +8815,67 @@ void Renderer::drawGraphicsImGui() {
             bool wasEnabled = volumeRenderEnabled;
             volumeSettings = VolumeRenderData{};
             volumeRenderEnabled = wasEnabled;
+        }
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("MicroVoxel")) {
+        ImGui::Checkbox("Enabled", &microVoxelEnabled);
+        Uint64 solid = 0, dropped = 0;
+        Uint32 resident = 0;
+        for (const auto& v : voxelVolumes) {
+            if (!v.world) continue;
+            solid += v.world->solidVoxels();
+            dropped += v.world->droppedBricks();
+            resident += v.world->residentBricks();
+        }
+        ImGui::TextDisabled("%zu volume(s), %u resident bricks (%.1f MB), %llu solid voxels",
+                            voxelVolumes.size(), resident,
+                            resident * sizeof(Vapor::VoxelWorld::Brick) / (1024.0 * 1024.0),
+                            static_cast<unsigned long long>(solid));
+        if (dropped > 0) {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                               "%llu bricks dropped (pool exhausted)",
+                               static_cast<unsigned long long>(dropped));
+        }
+        int maxSteps = static_cast<int>(microVoxelSettings.cameraPosition.w);
+        if (ImGui::SliderInt("Max ray steps", &maxSteps, 32, 512)) {
+            microVoxelSettings.cameraPosition.w = static_cast<float>(maxSteps);
+        }
+        bool sunShadow = microVoxelSettings.sunDirection.w > 0.5f;
+        if (ImGui::Checkbox("Sun shadow ray", &sunShadow)) {
+            microVoxelSettings.sunDirection.w = sunShadow ? 1.0f : 0.0f;
+        }
+        bool reflections = microVoxelSettings.params.z > 0.5f;
+        if (ImGui::Checkbox("Secondary rays (reflection + glass)", &reflections)) {
+            microVoxelSettings.params.z = reflections ? 1.0f : 0.0f;
+        }
+        ImGui::SliderFloat("AO strength", &microVoxelSettings.params.x, 0.0f, 1.0f);
+        ImGui::DragFloat("Emissive strength", &microVoxelSettings.gridDim.w, 0.1f, 0.0f, 16.0f);
+        ImGui::SeparatorText("Traced GI");
+        ImGui::SliderFloat("GI strength", &microVoxelGIStrength, 0.0f, 2.0f);
+        ImGui::Checkbox("Cross-volume bounces", &microVoxelGICrossVolume);
+        ImGui::SliderFloat("Temporal blend", &microVoxelGIBlend, 0.0f, 0.99f);
+        ImGui::SliderInt("A-trous iterations", &microVoxelGIAtrousIterations, 0, 5);
+        ImGui::DragFloat3("Sigmas (depth/normal/luma)", &microVoxelGISigmas.x, 0.1f, 0.0f, 128.0f);
+        bool split = microVoxelGISplitX >= 0.0f;
+        if (ImGui::Checkbox("Raw|denoised split", &split)) {
+            microVoxelGISplitX = split ? 0.5f : -1.0f;
+        }
+        if (split) ImGui::SliderFloat("Split position", &microVoxelGISplitX, 0.0f, 1.0f);
+        ImGui::ColorEdit3("Ambient sky", &microVoxelSettings.ambientSky.x);
+        ImGui::ColorEdit3("Ambient ground", &microVoxelSettings.ambientGround.x);
+        ImGui::DragFloat("Ambient intensity", &microVoxelSettings.ambientSky.w, 0.01f, 0.0f, 2.0f);
+        ImGui::SliderFloat("Albedo variation", &microVoxelSettings.ambientGround.w, 0.0f, 1.0f);
+        const char* debugModes[] = { "Final", "Albedo", "Normals", "AO", "Sun shadow", "GI", "Material" };
+        int debugMode = static_cast<int>(microVoxelSettings.params.y);
+        if (ImGui::Combo("Debug view", &debugMode, debugModes, 7)) {
+            microVoxelSettings.params.y = static_cast<float>(debugMode);
+        }
+        if (ImGui::Button("Reset to Defaults")) {
+            bool wasEnabled = microVoxelEnabled;
+            microVoxelSettings = MicroVoxelRenderData {};
+            microVoxelEnabled = wasEnabled;
         }
         ImGui::TreePop();
     }

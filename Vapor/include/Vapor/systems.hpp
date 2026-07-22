@@ -1,14 +1,18 @@
 #pragma once
 
 #include "components.hpp"
+#include "engine_core.hpp"
 #include "input_manager.hpp"
+#include "mesh_builder.hpp"
 #include "physics_3d.hpp"
 #include "render_data.hpp"
 #include "renderer.hpp"
 #include "render_scene.hpp"
+#include "voxel_world.hpp"
 #include <entt/entt.hpp>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <random>
 #include <vector>
@@ -439,6 +443,89 @@ namespace Vapor {
                 }
 
                 break;  // singleton: the first sky entity wins
+            }
+        }
+    };
+
+    // ============================================================================
+    // MicroVoxel volumes — owns each VoxelVolumeComponent's VoxelWorld and
+    // pushes the live volume list to the renderer (setVoxelVolumes) per frame.
+    // Generation runs as one task-scheduler job per column chunk, so large
+    // worlds stream in over several frames instead of blocking one; the
+    // renderer picks up finished chunks through the world's dirty batches.
+    // ============================================================================
+    class VoxelVolumeSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+            std::vector<VoxelVolumeDraw> draws;
+            auto view = reg.view<VoxelVolumeComponent>();
+            for (auto entity : view) {
+                auto& vv = view.get<VoxelVolumeComponent>(entity);
+                if (!vv.world.value || vv.regenerate || vv._generatedSeed.value != vv.seed) {
+                    startGeneration(vv);
+                }
+                VoxelVolumeDraw d;
+                d.world = vv.world.value;
+                d.origin = volumeOrigin(reg, entity, *vv.world.value);
+                draws.push_back(d);
+            }
+            renderer->setVoxelVolumes(draws);
+        }
+
+        // World-space min corner: the entity position is the volume's
+        // horizontal center at its base (grid centered in x/z, rising from y).
+        static glm::vec3 volumeOrigin(entt::registry& reg, entt::entity entity, const VoxelWorld& world) {
+            glm::vec3 pos(0.0f);
+            if (auto* t = reg.try_get<TransformComponent>(entity)) pos = t->position;
+            const glm::vec3 ext = world.extent();
+            return glm::vec3(pos.x - ext.x * 0.5f, pos.y, pos.z - ext.z * 0.5f);
+        }
+
+        // Gameplay dig helper: raycast every volume along a world-space ray and
+        // carve a sphere of air at the nearest hit. Returns true if it carved.
+        static bool dig(entt::registry& reg, const glm::vec3& ro, const glm::vec3& rd,
+                        float maxDist, float radius) {
+            float best = std::numeric_limits<float>::max();
+            VoxelWorld* bestWorld = nullptr;
+            glm::vec3 bestLocalHit(0.0f);
+            auto view = reg.view<VoxelVolumeComponent>();
+            for (auto entity : view) {
+                auto& vv = view.get<VoxelVolumeComponent>(entity);
+                if (!vv.world.value) continue;
+                const glm::vec3 origin = volumeOrigin(reg, entity, *vv.world.value);
+                glm::vec3 localHit;
+                glm::ivec3 cell;
+                if (vv.world.value->raycast(ro - origin, rd, maxDist, localHit, cell)) {
+                    const float d = glm::length(localHit - (ro - origin));
+                    if (d < best) {
+                        best = d;
+                        bestWorld = vv.world.value.get();
+                        bestLocalHit = localHit;
+                    }
+                }
+            }
+            if (!bestWorld) return false;
+            return bestWorld->carveSphere(bestLocalHit, radius);
+        }
+
+    private:
+        static void startGeneration(VoxelVolumeComponent& vv) {
+            vv.regenerate = false;
+            vv._generatedSeed.value = vv.seed;
+            auto world = std::make_shared<VoxelWorld>();
+            world->configure(vv.gridDim, vv.voxelSize, vv.brickCapacity);
+            world->prepareGeneration(vv.seed);
+            vv.world.value = world;
+            // One job per column chunk; chunks are disjoint, so any number may
+            // run concurrently. Jobs hold the shared_ptr, so a regenerate that
+            // replaces the world never leaves them writing into freed memory.
+            const glm::ivec2 chunks = world->columnChunkCount();
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            for (int cz = 0; cz < chunks.y; cz++) {
+                for (int cx = 0; cx < chunks.x; cx++) {
+                    scheduler.submitTask([world, cx, cz] { world->generateColumnChunk(cx, cz); });
+                }
             }
         }
     };
