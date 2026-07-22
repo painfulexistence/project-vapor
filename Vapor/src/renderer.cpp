@@ -717,14 +717,6 @@ void Renderer::shutdown() {
         grassParamsBuffer = {};
         grassPipeline = {};
 
-        // Mesh-shader terrain resources.
-        if (terrainMeshParamsBuffer.isValid()) rhi->destroyBuffer(terrainMeshParamsBuffer);
-        if (terrainMeshPipeline.isValid()) rhi->destroyPipeline(terrainMeshPipeline);
-        if (terrainTaskShader.isValid()) rhi->destroyShader(terrainTaskShader);
-        if (terrainMeshShader.isValid()) rhi->destroyShader(terrainMeshShader);
-        terrainMeshParamsBuffer = {};
-        terrainMeshPipeline = {};
-
         // Destroy shaders
         if (vertexShader.isValid()) {
             rhi->destroyShader(vertexShader);
@@ -1283,13 +1275,6 @@ void Renderer::setupDefaultRenderGraph() {
     // exists, directly to the swapchain otherwise (decided inside the pass).
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
-
-    // GPU mesh-shader terrain (VK_EXT_mesh_shader; skipped without the caps).
-    // Generates the whole heightfield on GPU when TerrainSystem activates it —
-    // after Main (loads scene color/depth, writes terrain depth) so grass,
-    // voxels, sky and fog all see terrain as ordinary scene geometry.
-    renderGraph.addPass("TerrainMesh",
-        [](Renderer& r) { r.terrainMeshPass(); }, PassFlags::RequiresMeshShaders);
 
     // Streamed grass ring (TerrainSystem): instanced blades drawn per resident
     // cell over the scene color/depth. Writes depth (opaque, distance fade
@@ -4381,105 +4366,6 @@ void Renderer::setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volume
     pendingVoxelVolumes = volumes;
 }
 
-// ── Mesh-shader terrain ─────────────────────────────────────────────────────
-void Renderer::setMeshTerrain(const TerrainMeshInfo& info) {
-    terrainMeshInfo = info;
-    terrainMeshInfoValid = info.tilesAxis > 0 && info.worldSize > 0.0f;
-    if (terrainMeshInfoValid && !terrainMeshParamsBuffer.isValid()) {
-        BufferDesc bd;
-        bd.size = sizeof(Vapor::TerrainMeshParamsGpu);
-        bd.usage = BufferUsage::Storage;
-        bd.memoryUsage = MemoryUsage::GPU;
-        terrainMeshParamsBuffer = rhi->createBuffer(bd);
-    }
-}
-
-bool Renderer::isMeshTerrainActive() const {
-    return meshTerrainEnabled && capabilities.meshShaders && terrainMeshPipeline.isValid() &&
-        terrainMeshInfoValid;
-}
-
-// GPU mesh-shader terrain: one task workgroup per tile (frustum cull + ring
-// LOD + neighbor-LOD payload), mesh workgroups generate 8x8-quad patches from
-// the exact CPU height noise, and RHIMain.frag shades them through its
-// terrain branch — pixel-identical to the CPU tile path. Runs after Main
-// (loads scene color/depth, writes terrain depth) and before Grass/MicroVoxel.
-void Renderer::terrainMeshPass() {
-    if (!isMeshTerrainActive() || !colorRT.isValid() || !depthStencilRT.isValid()) return;
-
-    Vapor::TerrainMeshParamsGpu params {};
-    params.worldParams = glm::vec4(terrainMeshInfo.worldSize, terrainMeshInfo.tileSize,
-                                   terrainMeshInfo.heightScale, terrainMeshInfo.noiseFrequency);
-    params.gridParams = glm::ivec4(terrainMeshInfo.tilesAxis, terrainMeshInfo.noiseOctaves,
-                                   static_cast<int>(terrainMeshInfo.materialId),
-                                   static_cast<int>(terrainMeshInfo.seed));
-    params.lodParams = glm::ivec4(terrainMeshInfo.lod0RadiusTiles, terrainMeshInfo.lod1RadiusTiles,
-                                  terrainMeshInfo.lod2RadiusTiles, 0);
-    rhi->updateBuffer(terrainMeshParamsBuffer, &params, 0, sizeof(params));
-
-    const Uint32 width = rhi->getSwapchainWidth();
-    const Uint32 height = rhi->getSwapchainHeight();
-
-    RenderPassDesc rp;
-    rp.name = "TerrainMesh";
-    rp.colorAttachments.push_back(colorRT);
-    rp.clearColors.push_back(clearColor);
-    rp.loadColor.push_back(true);   // composite over the rendered scene
-    rp.depthAttachment = depthStencilRT;
-    rp.loadDepth = true;            // test against the pre-pass depth, write terrain
-    rhi->beginRenderPass(rp);
-    rhi->bindPipeline(terrainMeshPipeline);
-
-    // Task/mesh-stage inputs (set0; the layout's stage flags include TASK/MESH
-    // when mesh shaders are enabled): camera, materials (fragment reads b1),
-    // and the terrain params at b3.
-    rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
-    rhi->setVertexBuffer(3, terrainMeshParamsBuffer, 0, sizeof(Vapor::TerrainMeshParamsGpu));
-
-    // Fragment contract — MUST mirror mainRenderPass's Vulkan fragment state
-    // for RHIMain.frag (this pass reuses that fragment shader verbatim). Any
-    // binding added to the Main pass's Vulkan block needs adding here too.
-    rhi->setFragmentBuffer(0, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
-    rhi->setFragmentBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
-    if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
-    rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-    if (clusterBuffer.isValid()) rhi->setFragmentBuffer(4, clusterBuffer);
-    if (lightCullDataBuffer.isValid())
-        rhi->setFragmentBuffer(5, lightCullDataBuffer, 0, sizeof(Vapor::LightCullData));
-    if (spotLightBuffer.isValid())
-        rhi->setFragmentBuffer(6, spotLightBuffer, 0, sizeof(Vapor::SpotLight) * maxSpotLights);
-    if (rectLightBuffer.isValid()) rhi->setFragmentBuffer(7, rectLightBuffer);
-
-    glm::vec2 screenSize(static_cast<float>(width), static_cast<float>(height));
-    rhi->setFragmentBytes(&screenSize, sizeof(glm::vec2), 4);
-    glm::uvec2 spotRectCounts(static_cast<Uint32>(spotLights.size()),
-                              static_cast<Uint32>(rectLights.size()));
-    rhi->setFragmentBytes(&spotRectCounts, sizeof(glm::uvec2), 1);
-    rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
-    Uint32 dirLightCount = static_cast<Uint32>(directionalLights.size());
-    rhi->setFragmentBytes(&dirLightCount, sizeof(Uint32), 11);
-
-    TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
-    if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
-    rhi->setTexture(0, 7, (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex, clampSampler);
-    rhi->setTexture(0, 8, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
-    rhi->setTexture(0, 9, nearShadowMap.isValid() ? nearShadowMap : whiteTex, shadowSampler);
-    rhi->setTexture(0, 10, irradianceMap.isValid() ? irradianceMap : defaultBlackCubemapTex, clampSampler);
-    rhi->setTexture(0, 11, prefilterMap.isValid() ? prefilterMap : defaultBlackCubemapTex, clampSampler);
-    rhi->setTexture(0, 12, brdfLUTTex.isValid() ? brdfLUTTex : textures[defaultBlackTexture].handle,
-                    clampSampler);
-    rhi->setTexture(0, 13, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
-                                                              : defaultDetailArrayTexture, defaultSampler);
-    rhi->setTexture(0, 14, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
-                                                              : defaultDetailArrayTexture, defaultSampler);
-
-    const Uint32 tileCount = static_cast<Uint32>(terrainMeshInfo.tilesAxis) *
-        static_cast<Uint32>(terrainMeshInfo.tilesAxis);
-    rhi->drawMeshTasks(tileCount, 1, 1);
-    rhi->endRenderPass();
-}
-
 // ── Grass ring ──────────────────────────────────────────────────────────────
 // Fixed instance pool: cellSlots x bladesPerSlot blades. TerrainSystem streams
 // cells by rewriting slots in place — the same never-allocate-while-streaming
@@ -6585,54 +6471,6 @@ void Renderer::createRenderPipeline() {
                     d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                     grassPipeline = rhi->createPipeline(d);
                 }
-
-            // Mesh-shader terrain (VK_EXT_mesh_shader): Terrain.task culls +
-            // amplifies tiles, Terrain.mesh generates the patches, and the
-            // Main pass's own fragment shader (RHIMain.frag) shades them — the
-            // mesh shader emits its exact interpolant contract. Cull is off:
-            // the engine's negative-viewport Y-flip inverts winding, and
-            // terrain is never viewed from below, so two-sided is the robust
-            // choice over guessing the front-face convention.
-            if (capabilities.meshShaders) {
-                std::string taskCode = readFile("shaders/Terrain.task.spv");
-                std::string meshCode = readFile("shaders/Terrain.mesh.spv");
-                if (!taskCode.empty() && !meshCode.empty() && fragmentShader.isValid()) {
-                    ShaderDesc td;
-                    td.stage = ShaderStage::Task;
-                    td.code = taskCode.data();
-                    td.codeSize = taskCode.size();
-                    td.entryPoint = "main";
-                    terrainTaskShader = rhi->createShader(td);
-                    ShaderDesc md;
-                    md.stage = ShaderStage::Mesh;
-                    md.code = meshCode.data();
-                    md.codeSize = meshCode.size();
-                    md.entryPoint = "main";
-                    terrainMeshShader = rhi->createShader(md);
-
-                    MeshPipelineDesc mp;
-                    mp.taskShader = terrainTaskShader;
-                    mp.meshShader = terrainMeshShader;
-                    mp.fragmentShader = fragmentShader;  // RHIMain.frag (plain variant)
-                    mp.taskThreadgroupSize = 1;    // one tile per task workgroup
-                    mp.meshThreadgroupSize = 128;  // 81 verts + 128 prims per patch
-                    mp.payloadBytes = 32;          // TerrainPayload = 7 uints
-                    mp.maxMeshThreadgroupsPerObject = 64;  // (res/8)^2 <= 64
-                    mp.blendMode = BlendMode::Opaque;
-                    mp.depthTest = true;
-                    mp.depthWrite = true;
-                    mp.depthCompareOp = CompareOp::Less;
-                    mp.hasDepthAttachment = true;
-                    mp.depthAttachmentFormat = PixelFormat::Depth32Float;
-                    mp.cullMode = CullMode::None;
-                    mp.sampleCount = 1;
-                    mp.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
-                    terrainMeshPipeline = rhi->createMeshPipeline(mp);
-                    if (terrainMeshPipeline.isValid()) {
-                        fmt::print("Renderer: mesh-shader terrain pipeline ready\n");
-                    }
-                }
-            }
             }
 
             // Camera-motion velocity (motion vectors) from depth.
@@ -8343,23 +8181,6 @@ void Renderer::drawGraphicsImGui() {
             volumeSettings = VolumeRenderData{};
             volumeRenderEnabled = wasEnabled;
         }
-        ImGui::TreePop();
-    }
-
-    if (ImGui::TreeNode("Terrain")) {
-        // GPU mesh-shader heightfield vs the CPU streamed tiles. The checkbox
-        // is live: TerrainSystem swaps tile visibility on the next update.
-        if (capabilities.meshShaders && terrainMeshPipeline.isValid()) {
-            ImGui::Checkbox("Mesh-shader terrain", &meshTerrainEnabled);
-            ImGui::Text("Mesh path: %s", isMeshTerrainActive() ? "ACTIVE" : "inactive");
-        } else {
-            ImGui::TextDisabled("Mesh shaders unavailable (CPU tiles)");
-        }
-        ImGui::Text("Detail layers: %s", terrainDetailAlbedoArray.isValid() ? "staged" : "none");
-        ImGui::Checkbox("Grass", &grassEnabled);
-        Uint32 grassBlades = 0;
-        for (const auto& cell : grassDraws) grassBlades += cell.count;
-        ImGui::Text("Grass cells %zu, blades %u", grassDraws.size(), grassBlades);
         ImGui::TreePop();
     }
 

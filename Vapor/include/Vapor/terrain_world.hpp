@@ -199,11 +199,6 @@ public:
     glm::ivec2 lastGrassCell { INT32_MIN, INT32_MIN };
     std::atomic<int> grassInFlight { 0 };
 
-    // True while the renderer's GPU mesh-shader path draws the heightfield —
-    // the CPU tile meshes are hidden and tile streaming pauses (scatter,
-    // grass and heightAt queries continue unchanged).
-    bool meshPathActive = false;
-
 private:
     TerrainConfig cfg;
     int tilesAxis = 20;

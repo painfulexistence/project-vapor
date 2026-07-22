@@ -161,13 +161,6 @@ struct alignas(16) GrassParamsGpu {
     glm::vec4 sunColor;       // rgb = sun color, w = unused
 };
 
-// Mesh-shader terrain parameters (Terrain.task / Terrain.mesh set0 b3).
-struct alignas(16) TerrainMeshParamsGpu {
-    glm::vec4 worldParams;  // x worldSize, y tileSize, z heightScale, w noiseFrequency
-    glm::ivec4 gridParams;  // x tilesAxis, y noiseOctaves, z materialId, w seed
-    glm::ivec4 lodParams;   // xyz lod ring radii (tiles), w unused
-};
-
 struct alignas(16) Cluster {
     glm::vec4 min;
     glm::vec4 max;
