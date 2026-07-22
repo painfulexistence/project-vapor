@@ -73,11 +73,16 @@ struct VolumetricCloudData {
 
     // Cloud ambient (sky-fill) tint, scaled by ambientIntensity. Weather
     // drives it: blue for clear, neutral gray overcast, storm green.
+    // float3 self-pads to 16 B, matching C++ `glm::vec3 ambientColor; float _pad9;`
+    // — do NOT add an explicit pad here (that shifts everything below by 16 B).
     float3 ambientColor;
-    float _pad9;
     // Night key light: the moon (moonDir = -sunDirection) takes over as the sun
     // sets. moonLightScale = moon lit brightness as a fraction of the sun term.
-    float3 moonColor;
+    // packed_float3 (12 B) so moonLightScale packs into the vec3's 4th slot,
+    // matching C++ `glm::vec3 moonColor; float moonLightScale;` — a plain float3
+    // would 16-align moonColor and push moonLightScale to the wrong offset,
+    // reading garbage on Metal (night clouds vanish).
+    packed_float3 moonColor;
     float moonLightScale;
 };
 
