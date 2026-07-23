@@ -145,7 +145,17 @@ float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data,
                      (data.curlNoiseStrength * 300.0);
     }
 
-    return detailTex.sample(cloudNoiseSampler, samplePos * (data.detailNoiseScale * 0.001)).r;
+    float d = detailTex.sample(cloudNoiseSampler, samplePos * (data.detailNoiseScale * 0.001)).r;
+    // Close-range octave (twin of CloudRaymarch.frag): same volume at 5x
+    // frequency, decorrelated by a UV offset, faded out past ~2.5 km. Signed
+    // perturbation keeps the mean erosion (and the far look) unchanged.
+    float nearW = 1.0 - smoothstep(800.0, 2500.0, length(worldPos - data.cameraPosition));
+    if (nearW > 0.01) {
+        float hf = detailTex.sample(cloudNoiseSampler,
+                                    samplePos * (data.detailNoiseScale * 0.005) + float3(0.37)).r;
+        d += (hf - 0.5) * 0.35 * nearW;
+    }
+    return d;
 }
 
 // Sample the baked weather map (R = coverage base, G = type) — twin of

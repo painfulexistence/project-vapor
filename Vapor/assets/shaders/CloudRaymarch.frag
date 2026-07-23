@@ -178,7 +178,17 @@ float sampleCloudDetail(vec3 worldPos) {
         samplePos += curlDistort(samplePos * (curlNoiseScale * 0.002)) *
                      (curlNoiseStrength * 300.0);
     }
-    return texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.001)).r;
+    float d = texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.001)).r;
+    // Close-range octave: the same 32^3 volume at 5x frequency (finest wisps
+    // ~25 m), UV-offset to decorrelate, faded out past ~2.5 km — at distance
+    // it would be subpixel noise (temporal shimmer). Signed perturbation, so
+    // the mean erosion (and the far look) is unchanged.
+    float nearW = 1.0 - smoothstep(800.0, 2500.0, length(worldPos - cameraPosition));
+    if (nearW > 0.01) {
+        float hf = texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.005) + vec3(0.37)).r;
+        d += (hf - 0.5) * 0.35 * nearW;
+    }
+    return d;
 }
 
 vec2 sampleWeather(vec3 worldPos) {
