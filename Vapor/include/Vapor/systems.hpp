@@ -820,6 +820,13 @@ namespace Vapor {
                 if (!cam.isActive) continue;
 
                 if (auto* fly = registry.try_get<FlyCameraComponent>(entity)) {
+                    // Z/X throttle: exponential, so holding X roughly doubles
+                    // the speed every half second (Z halves it). Sticky — the
+                    // adjusted moveSpeed stays until changed again.
+                    float speedAxis = inputState.getAxis(InputAction::SpeedDown, InputAction::SpeedUp);
+                    if (speedAxis != 0.0f)
+                        fly->moveSpeed = glm::clamp(
+                            fly->moveSpeed * std::exp(speedAxis * 1.5f * deltaTime), 0.5f, 2000.0f);
                     handleFlyCamera(cam, fly, intent, deltaTime);
                 }
                 if (auto* follow = registry.try_get<FollowCameraComponent>(entity)) {

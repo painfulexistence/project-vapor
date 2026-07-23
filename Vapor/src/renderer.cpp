@@ -1253,6 +1253,10 @@ void Renderer::setupDefaultRenderGraph() {
         [](Renderer& r) { r.sscsPass(); });
 
     // exists, directly to the swapchain otherwise (decided inside the pass).
+    // Top-down cloud shadow map — before Main, whose sun term samples it.
+    renderGraph.addPass("CloudShadow",
+        [](Renderer& r) { r.cloudShadowPass(); });
+
     renderGraph.addPass("Main",
         [](Renderer& r) { r.mainRenderPass(); });
 
@@ -1835,6 +1839,8 @@ void Renderer::mainRenderPass() {
         if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
         if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
         if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+        // Cloud shadow map at set2 b13 (white = unshadowed when off).
+        rhi->setTexture(0, 13, cloudShadowRT.isValid() ? cloudShadowRT : whiteTex, clampSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -1855,10 +1861,15 @@ void Renderer::mainRenderPass() {
         // and buffer(11) is dirLightCount, so 12 is the free slot). Same bits as
         // the Vulkan path: bit0 skip point-light loop, bit1 skip shadow.
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 12);
-        // Weather-driven IBL dimming at buffer(20) (19 is materials; on Vulkan
-        // this value rides in LightCullData instead — binding 20 would alias
-        // push offset 64 and clobber screenSize).
-        rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
+        // envParams at buffer(20): x = weather IBL dimming, y = cloud-shadow
+        // strength (on Vulkan both ride in LightCullData instead — binding 20
+        // would alias push offset 64 and clobber screenSize).
+        {
+            glm::vec2 envParams(m_iblIntensity, cloudShadowStrengthEffective());
+            rhi->setFragmentBytes(&envParams, sizeof(envParams), 20);
+        }
+        // Cloud shadow map at texture(18); white = unshadowed when off.
+        rhi->setTexture(0, 18, cloudShadowRT.isValid() ? cloudShadowRT : whiteTex, clampSampler);
         // Metal-via-RHI: real IBL outputs replace the neutral blacks —
         // irradiance(8), prefilter(9), brdfLUT(10).
         if (m_iblReady) {
@@ -2043,9 +2054,12 @@ void Renderer::mainRenderPass() {
                 (pssmShadowArrayTexture.isValid() && pssmDataBuffer.isValid()) ? 1u : 0u,
             };
             rhi->setFragmentBytes(&lc, sizeof(lc), 8);
-            // Weather-driven IBL dimming (buffer 12) — parity with the forward
-            // PBR fragment's buffer(20).
-            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 12);
+            // envParams (buffer 12): x = weather IBL dimming, y = cloud-shadow
+            // strength — parity with the forward fragment's buffer(20).
+            {
+                glm::vec2 envParams(m_iblIntensity, cloudShadowStrengthEffective());
+                rhi->setFragmentBytes(&envParams, sizeof(envParams), 12);
+            }
             // Tiled point lights: same cluster buffer + tile grid the forward pass
             // uses, so the meshlet fragment shades only the lights covering its
             // tile instead of looping all of them (the main-pass cost driver).
@@ -2087,6 +2101,8 @@ void Renderer::mainRenderPass() {
             // RT hard-shadow near region (white when RT off -> near branch is a
             // no-op since cascadeSplits.x/rtEnd is also 0, matching the forward pass).
             rhi->setTexture(0, 11, (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, clampSampler);
+            // Cloud shadow map at texture(12); white = unshadowed when off.
+            rhi->setTexture(0, 12, cloudShadowRT.isValid() ? cloudShadowRT : whiteTex, clampSampler);
             struct MeshletShadeFlags { Uint32 shadowRGB, gibsOn; float reflOn, reflIntensity, refrOn, refrIntensity; };
             MeshletShadeFlags sf{
                 (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u,
@@ -2703,6 +2719,7 @@ void Renderer::lightCullingPass() {
         Vapor::LightCullData lc{};
         lc.screenSize = screenSize;
         lc.iblIntensity = m_iblIntensity;   // weather-driven env dimming (RHIMain.frag)
+        lc.cloudShadowStrength = cloudShadowStrengthEffective();
         lc.gridSize = gridSize;
         lc.lightCount = pointLightCount;
         lc.cullSpotCount = static_cast<Uint32>(spotLights.size());
@@ -5164,6 +5181,36 @@ void Renderer::setParticleDrawList(const std::vector<ParticleDrawPacket>& draws)
 // (prevViewProj reprojection + neighborhood clamp), then upscale-composite
 // over the scene with a colorRT/tempColorRT swap. Parameters live in
 // cloudSettings (Metal-tested defaults). Off by default.
+// Top-down cloud shadow map: sun transmittance through the deck over a
+// camera-centered region (256^2 R16F), consumed by the PBR passes' sun term.
+// Reads cloudDataBuffer (uploaded by volumetricCloudPass; the frame-slotted
+// write lands before GPU execution, so both passes see this frame's data).
+void Renderer::cloudShadowPass() {
+    if (!volumetricCloudsEnabled || m_cloudShadowStrength <= 0.0f) return;
+    if (!cloudShadowPipeline.isValid() || !cloudShadowRT.isValid() ||
+        !cloudDataBuffer.isValid()) return;
+
+    RenderPassDesc rp;
+    rp.name = "CloudShadow";
+    rp.colorAttachments.push_back(cloudShadowRT);
+    rp.clearColors.push_back(glm::vec4(1.0f));
+    rp.loadColor.push_back(false);
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(cloudShadowPipeline);
+    // Cheap density needs the shape volume + weather map (repeat sampler).
+    rhi->setTexture(0, 0, cloudShapeNoiseTex, defaultSampler);
+    rhi->setTexture(0, 1, cloudWeatherMapTex, defaultSampler);
+    rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
+    // Camera for the region center (same slots as the raymarch pass).
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    } else {
+        rhi->setFragmentBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+    }
+    rhi->draw(3, 1, 0, 0);
+    rhi->endRenderPass();
+}
+
 void Renderer::volumetricCloudPass() {
     if (!volumetricCloudsEnabled) return;
     if (!cloudRaymarchPipeline.isValid() || !cloudTemporalPipeline.isValid() ||
@@ -5216,6 +5263,10 @@ void Renderer::volumetricCloudPass() {
         rhi->beginRenderPass(rp);
         rhi->bindPipeline(cloudRaymarchPipeline);
         rhi->setTexture(0, 0, depthStencilRT, clampSampler);
+        // Baked noise volumes + weather map (repeat sampler — the tiles wrap).
+        rhi->setTexture(0, 1, cloudShapeNoiseTex, defaultSampler);
+        rhi->setTexture(0, 2, cloudDetailNoiseTex, defaultSampler);
+        rhi->setTexture(0, 3, cloudWeatherMapTex, defaultSampler);
         rhi->setFragmentBuffer(0, cloudDataBuffer, 0, sizeof(VolumetricCloudRenderData));
         // cloudFragmentLowRes reads the camera at buffer(1) on Metal; the
         // GLSL twin declares it at set-relative binding 3.
@@ -5409,6 +5460,152 @@ void Renderer::postProcessPass() {
     rhi->endRenderPass();
 }
 
+// ── Baked cloud noise (CPU, tileable) ───────────────────────────────────────
+// Wrapped-lattice Perlin/Worley so the volumes tile seamlessly under the
+// repeat sampler. The relative octave frequencies (shape 4/8/16, detail 2/4/8)
+// match the old in-shader procedural math, so the shader-side UV scales are
+// unchanged — one trilinear fetch replaces ~100 hash ops per density sample.
+namespace {
+    uint32_t cnHash(uint32_t x) {
+        x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+        return x;
+    }
+    uint32_t cnHash3(int x, int y, int z, uint32_t seed) {
+        return cnHash(uint32_t(x) * 73856093u ^ uint32_t(y) * 19349663u ^
+                      uint32_t(z) * 83492791u ^ seed);
+    }
+    float cnFloat(uint32_t h) { return float(h & 0xFFFFFFu) / 16777216.0f; }
+    int cnWrap(int c, int period) { return ((c % period) + period) % period; }
+
+    // Worley distance over a wrapped lattice of `period` cells; p in cell units.
+    float tileableWorley(const glm::vec3& p, int period, uint32_t seed) {
+        glm::ivec3 base(glm::floor(p));
+        float minD2 = 1e9f;
+        for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+            glm::ivec3 c = base + glm::ivec3(dx, dy, dz);
+            uint32_t h = cnHash3(cnWrap(c.x, period), cnWrap(c.y, period), cnWrap(c.z, period), seed);
+            glm::vec3 fp = glm::vec3(c) + glm::vec3(cnFloat(h), cnFloat(cnHash(h)), cnFloat(cnHash(cnHash(h))));
+            glm::vec3 d = fp - p;
+            minD2 = std::min(minD2, glm::dot(d, d));
+        }
+        return std::sqrt(minD2);
+    }
+
+    // Perlin gradient noise over a wrapped lattice; p in cell units, ~[-1, 1].
+    float tileablePerlin(const glm::vec3& p, int period, uint32_t seed) {
+        glm::ivec3 i0(glm::floor(p));
+        glm::vec3 f = p - glm::vec3(i0);
+        glm::vec3 w = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+        float n[8];
+        for (int k = 0; k < 8; ++k) {
+            glm::ivec3 off(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            glm::ivec3 c = i0 + off;
+            uint32_t h = cnHash3(cnWrap(c.x, period), cnWrap(c.y, period), cnWrap(c.z, period), seed);
+            glm::vec3 g(cnFloat(h) * 2.0f - 1.0f,
+                        cnFloat(cnHash(h)) * 2.0f - 1.0f,
+                        cnFloat(cnHash(cnHash(h))) * 2.0f - 1.0f);
+            float len = glm::length(g);
+            if (len > 1e-5f) g /= len;
+            n[k] = glm::dot(g, f - glm::vec3(off));
+        }
+        float x00 = n[0] + (n[1] - n[0]) * w.x;
+        float x10 = n[2] + (n[3] - n[2]) * w.x;
+        float x01 = n[4] + (n[5] - n[4]) * w.x;
+        float x11 = n[6] + (n[7] - n[6]) * w.x;
+        float y0 = x00 + (x10 - x00) * w.y;
+        float y1 = x01 + (x11 - x01) * w.y;
+        return y0 + (y1 - y0) * w.z;
+    }
+}
+
+void Renderer::createCloudNoiseTextures() {
+    // Shape 128^3: combined Perlin-Worley base (perlin remapped by Worley FBM),
+    // octaves at 4/8/16 cells per tile — same relative frequencies as the old
+    // shapeUV*4/8/16 shader math, so one tile spans 1.0 of the shape UV.
+    {
+        const int N = 128;
+        std::vector<uint8_t> data(size_t(N) * N * N);
+        size_t i = 0;
+        for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x, ++i) {
+            glm::vec3 uvw = (glm::vec3(x, y, z) + 0.5f) / float(N);
+            float perlin = tileablePerlin(uvw * 4.0f, 4, 0x51u) * 0.5f + 0.5f;
+            float w1 = 1.0f - tileableWorley(uvw * 4.0f, 4, 0xA1u);
+            float w2 = 1.0f - tileableWorley(uvw * 8.0f, 8, 0xB2u);
+            float w3 = 1.0f - tileableWorley(uvw * 16.0f, 16, 0xC3u);
+            float fbm = w1 * 0.625f + w2 * 0.25f + w3 * 0.125f;
+            float v = glm::clamp((perlin - (fbm - 1.0f)) / (1.0f - (fbm - 1.0f)), 0.0f, 1.0f);
+            data[i] = uint8_t(v * 255.0f + 0.5f);
+        }
+        TextureDesc d;
+        d.width = N; d.height = N; d.depth = N;
+        d.format = PixelFormat::R8_UNORM;
+        d.usage = TextureUsage::Sampled;
+        cloudShapeNoiseTex = rhi->createTexture(d);
+        rhi->updateTexture(cloudShapeNoiseTex, data.data(), data.size());
+    }
+    // Detail 32^3: Worley FBM erosion at 2/4/8 cells per tile (old detailUV*2/4/8).
+    {
+        const int N = 32;
+        std::vector<uint8_t> data(size_t(N) * N * N);
+        size_t i = 0;
+        for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x, ++i) {
+            glm::vec3 uvw = (glm::vec3(x, y, z) + 0.5f) / float(N);
+            float d1 = 1.0f - tileableWorley(uvw * 2.0f, 2, 0xD4u);
+            float d2 = 1.0f - tileableWorley(uvw * 4.0f, 4, 0xE5u);
+            float d3 = 1.0f - tileableWorley(uvw * 8.0f, 8, 0xF6u);
+            float v = glm::clamp(d1 * 0.625f + d2 * 0.25f + d3 * 0.125f, 0.0f, 1.0f);
+            data[i] = uint8_t(v * 255.0f + 0.5f);
+        }
+        TextureDesc d;
+        d.width = N; d.height = N; d.depth = N;
+        d.format = PixelFormat::R8_UNORM;
+        d.usage = TextureUsage::Sampled;
+        cloudDetailNoiseTex = rhi->createTexture(d);
+        rhi->updateTexture(cloudDetailNoiseTex, data.data(), data.size());
+    }
+    // Weather map 512^2 RGBA8, tiling every 1.0 of weather UV (20 km world):
+    // R = coverage base (domain-warped FBM — fronts/streets/clear gaps instead
+    // of uniform value noise), G = cloud type, B = precipitation (reserved for
+    // the WeatherSystem to paint into). Replaces sampleWeather's per-sample
+    // valueNoise; the shaders multiply R by the weather state's cloudCoverage.
+    {
+        const int N = 512;
+        std::vector<uint8_t> data(size_t(N) * N * 4);
+        size_t i = 0;
+        for (int y = 0; y < N; ++y)
+        for (int x = 0; x < N; ++x, i += 4) {
+            glm::vec2 uv = (glm::vec2(x, y) + 0.5f) / float(N);
+            // Domain warp (the warp field is itself periodic, so tiling is exact).
+            glm::vec3 p(uv.x * 3.0f, uv.y * 3.0f, 0.37f);
+            glm::vec2 warp(tileablePerlin(p + glm::vec3(17.3f, 9.1f, 0.0f), 3, 0x11u),
+                           tileablePerlin(p + glm::vec3(41.7f, 23.9f, 0.0f), 3, 0x22u));
+            glm::vec3 pw = p + glm::vec3(warp * 1.2f, 0.0f);
+            float c = tileablePerlin(pw, 3, 0x33u) +
+                      0.5f * tileablePerlin(glm::vec3(pw.x * 2.0f, pw.y * 2.0f, 0.71f), 6, 0x44u);
+            float coverage = std::pow(glm::clamp(c * 0.5f + 0.5f, 0.0f, 1.0f), 0.5f);
+            float type = glm::clamp(
+                tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.53f) + glm::vec3(100.0f, 100.0f, 0.0f), 2, 0x55u)
+                    * 0.5f + 0.5f, 0.0f, 1.0f);
+            data[i + 0] = uint8_t(coverage * 255.0f + 0.5f);
+            data[i + 1] = uint8_t(type * 255.0f + 0.5f);
+            data[i + 2] = uint8_t(glm::clamp(coverage * 2.0f - 1.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
+            data[i + 3] = 255;
+        }
+        TextureDesc d;
+        d.width = N; d.height = N; d.depth = 1;
+        d.format = PixelFormat::RGBA8_UNORM;
+        d.usage = TextureUsage::Sampled;
+        cloudWeatherMapTex = rhi->createTexture(d);
+        rhi->updateTexture(cloudWeatherMapTex, data.data(), data.size());
+    }
+}
+
 void Renderer::createDefaultResources() {
     // Create default sampler
     SamplerDesc samplerDesc;
@@ -5419,6 +5616,9 @@ void Renderer::createDefaultResources() {
     samplerDesc.addressModeV = AddressMode::Repeat;
     samplerDesc.addressModeW = AddressMode::Repeat;
     defaultSampler = rhi->createSampler(samplerDesc);
+
+    // Baked cloud noise volumes (one-time; ~1-2 s of CPU FBM at startup).
+    createCloudNoiseTextures();
 
     // Shadow-map sampler: nearest + clamp. Manual PCF does its own 3x3 filtering,
     // so point sampling is both correct (no bilinear blending of depth values)
@@ -5720,7 +5920,7 @@ void Renderer::destroyRenderTargets() {
     for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) kill(bloomPyramid[i]);
     kill(lightScatteringRT);
     kill(velocityRT);
-    kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT);
+    kill(cloudRT); kill(cloudHistoryRT); kill(cloudResolvedRT); kill(cloudShadowRT);
     kill(swapchainDepthBuffer);
 
     // History/reprojection state is stale at the new resolution.
@@ -5997,6 +6197,18 @@ void Renderer::createRenderTargets() {
         cloudRT = rhi->createTexture(desc);
         cloudHistoryRT = rhi->createTexture(desc);
         cloudResolvedRT = rhi->createTexture(desc);
+    }
+
+    // Cloud shadow map: fixed 256^2 R16F over a camera-centered world region
+    // (16 m texels across 4 km — soft drifting shadows, resolution-independent).
+    {
+        TextureDesc desc;
+        desc.width = 256;
+        desc.height = 256;
+        desc.format = PixelFormat::R16_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        desc.sampleCount = 1;
+        cloudShadowRT = rhi->createTexture(desc);
     }
 
     // Create default depth buffer for swapchain rendering (when not using render targets)
@@ -6457,6 +6669,10 @@ void Renderer::createRenderPipeline() {
                 "shaders/CloudTemporal.frag.spv", cloudTemporalShader, BlendMode::Opaque);
             cloudCompositePipeline = makeFullscreenFragPipeline(
                 "shaders/CloudComposite.frag.spv", cloudCompositeShader, BlendMode::Opaque);
+            // Top-down cloud shadow map (R16F, camera-centered region).
+            cloudShadowPipeline = makeFullscreenFragPipeline(
+                "shaders/CloudShadow.frag.spv", cloudShadowShader, BlendMode::Opaque,
+                PixelFormat::R16_FLOAT);
 
             // GPU particles: two compute stages + an instanced-billboard render.
             auto makeCompute = [&](const char* spv, ShaderHandle& sh) -> ComputePipelineHandle {
@@ -6913,6 +7129,8 @@ void Renderer::createRenderPipeline() {
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         cloudCompositePipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudUpscaleComposite",
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+        cloudShadowPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudShadowMap",
+                                            BlendMode::Opaque, { PixelFormat::R16_FLOAT }, false, CompareOp::Less);
 
         // PSSM shadow depth (3d_pssm_shadow_depth.metal): raw-fetched vertices,
         // depth-only with front-face culling, alpha-tested via texAlbedo.
@@ -8218,6 +8436,8 @@ void Renderer::drawGraphicsImGui() {
         ImGui::DragFloat("Sun Light Scale", &cloudSettings.sunLightScale, 0.01f, 0.0f, 2.0f);
         // Moonlit-cloud brightness at night, as a fraction of the sun term.
         ImGui::DragFloat("Moon Light Scale", &cloudSettings.moonLightScale, 0.005f, 0.0f, 1.0f);
+        // Ground-shadow blend from the top-down cloud shadow map.
+        ImGui::DragFloat("Cloud Shadows", &m_cloudShadowStrength, 0.01f, 0.0f, 1.0f);
         ImGui::DragFloat("Silver Lining", &cloudSettings.silverLiningIntensity, 0.01f, 0.0f, 2.0f);
         // RHI-only extras (kept from the original Effects panel)
         ImGui::SliderFloat("Temporal blend", &cloudSettings.temporalBlend, 0.01f, 1.0f);
@@ -9161,6 +9381,9 @@ void Renderer::renderToTexture(
             if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
             if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
             if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+            // Cloud shadow (b13): white — the map's region tracks the MAIN
+            // camera, not this view.
+            rhi->setTexture(0, 13, whiteTex, clampSampler);
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 2);
             // Spot/rect buffers must be bound (declared in RHIMain.frag); zero
             // counts keep both loops off — their per-frame data belongs to the
@@ -9172,9 +9395,15 @@ void Renderer::renderToTexture(
             rhi->setFragmentBytes(&rttSpotRectCounts, sizeof(glm::uvec2), 1);
         } else {
             rhi->setFragmentBytes(&rttDebugFlags, sizeof(Uint32), 12);
-            // IBL dimming at buffer(20) — declared in the shared PBR fragment,
-            // so every encoder that draws with it must bind the slot.
-            rhi->setFragmentBytes(&m_iblIntensity, sizeof(float), 20);
+            // envParams at buffer(20) — declared in the shared PBR fragment, so
+            // every encoder that draws with it must bind the slot. Cloud-shadow
+            // strength 0: the map's region tracks the MAIN camera, not this view.
+            {
+                glm::vec2 envParams(m_iblIntensity, 0.0f);
+                rhi->setFragmentBytes(&envParams, sizeof(envParams), 20);
+            }
+            // texture(18) must still be bound (declared on the bound path).
+            rhi->setTexture(0, 18, whiteTex, clampSampler);
             // Real IBL cubes: image-based ambience is view-independent.
             if (m_iblReady) {
                 if (irradianceMap.isValid()) rhi->setTexture(0, 8, irradianceMap, clampSampler);

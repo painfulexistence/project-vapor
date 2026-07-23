@@ -10,6 +10,15 @@ layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out vec4 outCloud;
 
 layout(set = 2, binding = 0) uniform sampler2D sceneDepth;
+// Baked tileable noise volumes (renderer createCloudNoiseTextures): one
+// trilinear fetch replaces the old per-sample procedural Perlin-Worley loops.
+// Octave frequencies are baked at the old shader ratios, so the UV scales
+// below are unchanged. Repeat sampler — the tiles wrap.
+layout(set = 2, binding = 1) uniform sampler3D shapeNoiseTex;   // 128^3 Perlin-Worley base
+layout(set = 2, binding = 2) uniform sampler3D detailNoiseTex;  // 32^3 Worley FBM erosion
+// 512^2 weather map tiling every 1.0 of weather UV (~20 km): R = coverage
+// base (domain-warped FBM — fronts/streets), G = type, B = precip (reserved).
+layout(set = 2, binding = 3) uniform sampler2D weatherMapTex;
 
 // Must match Vapor::VolumetricCloudRenderData (std430).
 layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
@@ -110,20 +119,6 @@ float gradientNoise3D(vec3 p) {
                mix(mix(n001, n101, w.x), mix(n011, n111, w.x), w.y), w.z);
 }
 
-float worleyNoise3D(vec3 p) {
-    vec3 pi = floor(p);
-    vec3 pf = fract(p);
-    float minDist = 1.0;
-    for (int z = -1; z <= 1; z++)
-    for (int y = -1; y <= 1; y++)
-    for (int x = -1; x <= 1; x++) {
-        vec3 offset = vec3(x, y, z);
-        vec3 diff = offset + hash33(pi + offset) - pf;
-        minDist = min(minDist, dot(diff, diff));
-    }
-    return sqrt(minDist);
-}
-
 float remap(float value, float inMin, float inMax, float outMin, float outMax) {
     return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
 }
@@ -162,13 +157,7 @@ float cloudHeightGradient(float heightFraction, float type) {
 
 float sampleCloudShape(vec3 worldPos) {
     vec3 samplePos = worldPos + windOffset;
-    vec3 shapeUV = samplePos * shapeNoiseScale * 0.0001;
-    float perlin = gradientNoise3D(shapeUV * 4.0) * 0.5 + 0.5;
-    float worley1 = 1.0 - worleyNoise3D(shapeUV * 4.0);
-    float worley2 = 1.0 - worleyNoise3D(shapeUV * 8.0);
-    float worley3 = 1.0 - worleyNoise3D(shapeUV * 16.0);
-    float worleyFBM = worley1 * 0.625 + worley2 * 0.25 + worley3 * 0.125;
-    return saturate(remap(perlin, worleyFBM - 1.0, 1.0, 0.0, 1.0));
+    return texture(shapeNoiseTex, samplePos * (shapeNoiseScale * 0.0001)).r;
 }
 
 // Curl-ish vector noise: three decorrelated gradient noises. Not a true
@@ -189,20 +178,26 @@ float sampleCloudDetail(vec3 worldPos) {
         samplePos += curlDistort(samplePos * (curlNoiseScale * 0.002)) *
                      (curlNoiseStrength * 300.0);
     }
-    vec3 detailUV = samplePos * detailNoiseScale * 0.001;
-    float d1 = 1.0 - worleyNoise3D(detailUV * 2.0);
-    float d2 = 1.0 - worleyNoise3D(detailUV * 4.0);
-    float d3 = 1.0 - worleyNoise3D(detailUV * 8.0);
-    return d1 * 0.625 + d2 * 0.25 + d3 * 0.125;
+    float d = texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.001)).r;
+    // Close-range octave: the same 32^3 volume at 5x frequency (finest wisps
+    // ~25 m), UV-offset to decorrelate, faded out past ~2.5 km — at distance
+    // it would be subpixel noise (temporal shimmer). Signed perturbation, so
+    // the mean erosion (and the far look) is unchanged.
+    float nearW = 1.0 - smoothstep(800.0, 2500.0, length(worldPos - cameraPosition));
+    if (nearW > 0.01) {
+        float hf = texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.005) + vec3(0.37)).r;
+        d += (hf - 0.5) * 0.35 * nearW;
+    }
+    return d;
 }
 
 vec2 sampleWeather(vec3 worldPos) {
-    vec2 weatherUV = worldPos.xz * 0.00005 + time * 0.001;
-    float coverage = valueNoise3D(vec3(weatherUV * 3.0, 0.0));
-    coverage = pow(coverage * 0.5 + 0.5, 0.5);
-    float type = valueNoise3D(vec3(weatherUV * 2.0 + 100.0, 0.0));
-    type = type * 0.5 + 0.5;
-    return vec2(coverage * cloudCoverage, type);
+    // Scroll the coverage field with the wind (slower than the in-cloud detail,
+    // so macro shapes lag the internal churn); small time term keeps the
+    // pattern evolving. Coverage/type come pre-shaped from the weather map.
+    vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
+    vec2 w = texture(weatherMapTex, weatherUV).rg;
+    return vec2(w.r * cloudCoverage, w.g);
 }
 
 float sampleCloudDensity(vec3 worldPos, bool useCheap) {
@@ -308,27 +303,49 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     tRange.y = min(tRange.y, maxDist);
 
     float rayLength = tRange.y - tRange.x;
-    float stepSize = rayLength / float(primarySteps);
-    float t = tRange.x + stepSize * blueNoise;
 
     vec3 scattering = vec3(0.0);
     float transmittance = 1.0;
     float cosTheta = dot(rayDir, sunDirection);
 
-    for (uint i = 0u; i < primarySteps && t < tRange.y; i++) {
+    // Quadratic step distribution: fine steps near the ray entry, coarse far.
+    // From the ground the entry is the cloud base (sharper bottoms); INSIDE the
+    // layer the entry is the camera (t0 = 0) — the fly-through case, where the
+    // old uniform rayLength/N gave ~km steps that mushed everything nearby.
+    // Each step integrates over its actual length dt (Beer-Lambert is
+    // length-aware, so the integral stays correct under the warp).
+    float tPrev = tRange.x;
+    for (uint i = 0u; i < primarySteps; i++) {
+        float u = (float(i) + blueNoise) / float(primarySteps);
+        float t = tRange.x + rayLength * u * u;
+        float dt = max(t - tPrev, 1e-3);
+        tPrev = t;
+
         vec3 pos = rayOrigin + rayDir * t;
         float density = sampleCloudDensity(pos, false);
         if (density > 0.001) {
             vec3 luminance = cloudLighting(pos, rayDir);
-            float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * powderStrength +
+            float powder = beerPowderEnergy(density * dt * 10.0, cosTheta) * powderStrength +
                            (1.0 - powderStrength);
-            float stepTransmittance = beerLambert(density, stepSize);
+            float stepTransmittance = beerLambert(density, dt);
             scattering += transmittance * luminance * (1.0 - stepTransmittance) * powder;
             transmittance *= stepTransmittance;
             if (transmittance < 0.01) { transmittance = 0.0; break; }
         }
-        t += stepSize;
     }
+
+    // Aerial perspective: distant decks sink into the horizon haze — the
+    // in-scattered light fades toward a sky tint and the cloud loses opacity,
+    // instead of staying crisp all the way to the horizon (~40 km e-folding
+    // on the distance to the cloud entry). Tint follows the sun by day and
+    // nearly vanishes at night.
+    float dayFactor = smoothstep(-0.12, 0.08, sunDirection.y);
+    float haze = 1.0 - exp(-max(tRange.x, 0.0) * 2.5e-5);
+    vec3 hazeTint = (sunColor * 0.25 + ambientColor * 0.75) *
+                    (sunIntensity * sunLightScale * 0.25) * mix(0.05, 1.0, dayFactor);
+    scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
+    transmittance = mix(transmittance, 1.0, haze * 0.5);
+
     return vec4(scattering, transmittance);
 }
 

@@ -26,6 +26,10 @@ namespace Vapor {
         RollLeft,
         RollRight,
 
+        // Fly-camera throttle
+        SpeedDown,
+        SpeedUp,
+
         // General actions
         Jump,
         Crouch,

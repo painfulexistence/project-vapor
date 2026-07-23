@@ -176,6 +176,10 @@ struct alignas(16) LightCullData {
     Uint32 lightCount;
     Uint32 cullSpotCount;   // keep in step with Vapor::LightCullData
     Uint32 cullRectCount;
+    // Cloud-shadow blend strength for RHIMain.frag (0 = off). Occupies the old
+    // tail padding, so sizeof stays 48 and LightCull.comp needs no change.
+    float cloudShadowStrength = 0.0f;
+    float _pad2 = 0.0f;
 };
 
 struct alignas(16) IBLCaptureData {
