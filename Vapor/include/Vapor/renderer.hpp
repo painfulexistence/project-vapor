@@ -787,6 +787,21 @@ private:
     TextureHandle volumeTestTexture;     // owned procedural test grid
     bool volumeRenderEnabled = false;    // default OFF until real data lands
     VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // ---- Grass ring (streamed instanced blades; see grassPass) -----------
+    // Fixed pool of cell slots in one instance buffer; TerrainSystem streams
+    // cells by rewriting slots in place, and each frame supplies the resident
+    // draws + wind/look settings.
+    BufferHandle grassInstanceBuffer;
+    BufferHandle grassParamsBuffer;
+    PipelineHandle grassPipeline;
+    ShaderHandle grassVS, grassFS;
+    Uint32 grassSlotCount = 0;
+    Uint32 grassBladesPerSlot = 0;
+    std::vector<Vapor::GrassCellDraw> grassDraws;
+    Vapor::GrassSettingsData grassSettings;
+    bool grassEnabled = true;
+    float grassTimeSeconds = 0.0f;
+    std::chrono::steady_clock::time_point grassLastTick {};
     // The registry the ECS draw() last rendered with. renderToTexture needs it
     // because the demo's meshes live on ECS entities, not the scene-node tree —
     // the scene-only collectDrawables(scene) finds nothing there. The registry
