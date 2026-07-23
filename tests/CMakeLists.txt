@@ -169,7 +169,7 @@ target_link_libraries(test_ui_document_registry PRIVATE
 target_compile_features(test_ui_document_registry PRIVATE cxx_std_20)
 target_compile_options(test_ui_document_registry PRIVATE ${TEST_WARNING_FLAGS})
 
-# ── Timeline playback tests (clip sampling, wrap modes, FSM events) ───────
+# ── Timeline playback tests (clip sampling, wrap modes, FSM events, overlays, Tween) ─
 add_executable(test_timeline_system
     timeline_system_test.cpp
 )
@@ -182,6 +182,20 @@ target_link_libraries(test_timeline_system PRIVATE
 )
 target_compile_features(test_timeline_system PRIVATE cxx_std_20)
 target_compile_options(test_timeline_system PRIVATE ${TEST_WARNING_FLAGS})
+
+# ── Flipbook playback tests (shared clips, sampling, wrap modes, groups) ──
+add_executable(test_flipbook
+    flipbook_test.cpp
+)
+target_link_libraries(test_flipbook PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    glm::glm
+    fmt::fmt
+    EnTT::EnTT
+)
+target_compile_features(test_flipbook PRIVATE cxx_std_20)
+target_compile_options(test_flipbook PRIVATE ${TEST_WARNING_FLAGS})
 
 # ── FileSystem unit tests (path resolution, priority, add/remove) ─────────
 add_executable(test_file_system

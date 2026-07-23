@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <cmath>
 #include <entt/entt.hpp>
+#include <functional>
 #include <glm/gtc/quaternion.hpp>
+#include <vector>
 
 // ============================================================
 // Timeline playback — the data-driven animation path
@@ -42,6 +44,30 @@ namespace Vapor {
 
         Hidden<float> prevTime = { 0.0f };  // last evaluated playhead (event crossing)
         Hidden<bool> pingForward = { true };// PingPong direction
+    };
+
+    // One fire-and-forget overlay timeline layered on top of the main playback.
+    // Owns its ActionTimeline (usually anonymous, built by a Tween) and its own
+    // playhead; plays once and retires, firing onFinished.
+    struct TimelineOverlay {
+        int id = 0;
+        ActionTimeline timeline;// owned copy
+        float time = 0.0f;
+        float prevTime = 0.0f;
+        std::function<void()> onFinished;
+    };
+
+    // Behavior-tier companion to TimelinePlaybackComponent (deliberately NOT
+    // PoD — overlays own timelines and callbacks). This is where imperative,
+    // code-driven tweens live: the Tween builder (tween.hpp) constructs an
+    // ActionTimeline and drops it here as an overlay, so the ergonomics that
+    // used to reach for ActionManager become data-driven clips that seek and
+    // reverse like any other. Layered on top of the main timeline: overlay
+    // tracks apply after the main clip each frame.
+    struct TimelineOverlayComponent {
+        std::vector<TimelineOverlay> overlays;
+        int nextId = 1;
+        Uint32 groupId = 0;// TimelineTimeScales group (same groups as playback)
     };
 
     class TimelineSystem {
@@ -109,6 +135,41 @@ namespace Vapor {
 
                 evaluate(reg, entity, play, *tl);
             }
+
+            // Overlays run after all main playback, so an entity's overlay
+            // tracks layer on top of whatever its main clip set this frame.
+            updateOverlays(reg, dt, scales);
+        }
+
+        // Add a fire-and-forget overlay timeline to this entity (creating the
+        // overlay component if absent). Returns an id usable with cancelOverlay.
+        // The Tween builder is the ergonomic front door; this is the raw one.
+        static int addOverlay(
+            entt::registry& reg, entt::entity e, ActionTimeline tl, std::function<void()> onFinished = {}
+        ) {
+            tl.recompute();
+            auto& oc = reg.get_or_emplace<TimelineOverlayComponent>(e);
+            TimelineOverlay ov;
+            ov.id = oc.nextId++;
+            ov.timeline = std::move(tl);
+            ov.onFinished = std::move(onFinished);
+            oc.overlays.push_back(std::move(ov));
+            return oc.overlays.back().id;
+        }
+
+        static void cancelOverlay(entt::registry& reg, entt::entity e, int id) {
+            if (auto* oc = reg.try_get<TimelineOverlayComponent>(e)) {
+                oc->overlays.erase(
+                    std::remove_if(
+                        oc->overlays.begin(), oc->overlays.end(), [id](const TimelineOverlay& o) { return o.id == id; }
+                    ),
+                    oc->overlays.end()
+                );
+            }
+        }
+
+        static void cancelAllOverlays(entt::registry& reg, entt::entity e) {
+            if (auto* oc = reg.try_get<TimelineOverlayComponent>(e)) oc->overlays.clear();
         }
 
         // (Re)start playback of a handle on this entity. Also records it in the
@@ -171,6 +232,42 @@ namespace Vapor {
             applyTracks(reg, e, tl, play.time);
             fireEvents(reg, e, tl, play.prevTime, play.time);
             play.prevTime = play.time;
+        }
+
+        static void updateOverlays(entt::registry& reg, float dt, const TimelineTimeScales* scales) {
+            auto view = reg.view<TimelineOverlayComponent>(entt::exclude<InactiveComponent>);
+            for (auto entity : view) {
+                auto& oc = view.get<TimelineOverlayComponent>(entity);
+                if (oc.overlays.empty()) continue;
+                const float scaledDt = dt * (scales ? scales->forGroup(oc.groupId) : 1.0f);
+
+                for (auto& ov : oc.overlays) {
+                    ov.prevTime = ov.time;
+                    ov.time += scaledDt;
+                    applyTracks(reg, entity, ov.timeline, ov.time);
+                    fireEvents(reg, entity, ov.timeline, ov.prevTime, ov.time);
+                }
+
+                // Retire finished overlays (they play once). Collect callbacks
+                // and fire them AFTER erasing, so an onFinished that starts a new
+                // overlay can't invalidate the vector mid-iteration.
+                std::vector<std::function<void()>> finished;
+                oc.overlays.erase(
+                    std::remove_if(
+                        oc.overlays.begin(), oc.overlays.end(),
+                        [&](TimelineOverlay& ov) {
+                            if (ov.time >= ov.timeline.duration) {
+                                if (ov.onFinished) finished.push_back(std::move(ov.onFinished));
+                                return true;
+                            }
+                            return false;
+                        }
+                    ),
+                    oc.overlays.end()
+                );
+                for (auto& cb : finished)
+                    cb();
+            }
         }
 
         static void applyTracks(entt::registry& reg, entt::entity e, const ActionTimeline& tl, float time) {

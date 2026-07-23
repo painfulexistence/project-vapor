@@ -11,6 +11,15 @@ TimelineHandle AnimationClipLibrary::addTimeline(ActionTimeline timeline) {
     return { rid };
 }
 
+FlipbookClipHandle AnimationClipLibrary::addFlipbook(FlipbookClip clip) {
+    clip.recompute();
+    const std::string name = clip.name;
+    const Uint32 rid = static_cast<Uint32>(m_flipbooks.size());
+    m_flipbooks.push_back(std::move(clip));
+    if (!name.empty()) m_flipbookByName[name] = rid;
+    return { rid };
+}
+
 SkeletonHandle AnimationClipLibrary::addSkeleton(Skeleton skeleton) {
     const std::string name = skeleton.name;
     const Uint32 rid = static_cast<Uint32>(m_skeletons.size());
@@ -33,6 +42,11 @@ const ActionTimeline* AnimationClipLibrary::getTimeline(TimelineHandle h) const 
     return &m_timelines[h.rid];
 }
 
+const FlipbookClip* AnimationClipLibrary::getFlipbook(FlipbookClipHandle h) const {
+    if (!h.valid() || h.rid >= m_flipbooks.size()) return nullptr;
+    return &m_flipbooks[h.rid];
+}
+
 const Skeleton* AnimationClipLibrary::getSkeleton(SkeletonHandle h) const {
     if (!h.valid() || h.rid >= m_skeletons.size()) return nullptr;
     return &m_skeletons[h.rid];
@@ -48,6 +62,11 @@ TimelineHandle AnimationClipLibrary::findTimeline(const std::string& name) const
     return it != m_timelineByName.end() ? TimelineHandle{ it->second } : TimelineHandle{};
 }
 
+FlipbookClipHandle AnimationClipLibrary::findFlipbook(const std::string& name) const {
+    auto it = m_flipbookByName.find(name);
+    return it != m_flipbookByName.end() ? FlipbookClipHandle{ it->second } : FlipbookClipHandle{};
+}
+
 SkeletonHandle AnimationClipLibrary::findSkeleton(const std::string& name) const {
     auto it = m_skeletonByName.find(name);
     return it != m_skeletonByName.end() ? SkeletonHandle{ it->second } : SkeletonHandle{};
@@ -60,9 +79,11 @@ SkeletonClipHandle AnimationClipLibrary::findSkeletonClip(const std::string& nam
 
 void AnimationClipLibrary::clear() {
     m_timelines.clear();
+    m_flipbooks.clear();
     m_skeletons.clear();
     m_skeletonClips.clear();
     m_timelineByName.clear();
+    m_flipbookByName.clear();
     m_skeletonByName.clear();
     m_skeletonClipByName.clear();
 }

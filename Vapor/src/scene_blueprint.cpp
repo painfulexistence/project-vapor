@@ -183,6 +183,72 @@ BlueprintComponents& BlueprintComponents::instance() {
             reg.emplace_or_replace<Shape2DComponent>(e, shape);
         });
 
+        // flipbook: frame-based sprite animation. Clips are authored inline
+        // (atlas frame indices + per-frame duration) and registered in the
+        // engine AnimationClipLibrary; the entity gets a FlipbookComponent
+        // holding the resulting handles. Needs runtime setup (library
+        // registration), so it is a hand applier rather than a PFR component.
+        // Pairs with a sprite2D component on the same entity (that carries the
+        // atlas the frame indices address). Schema:
+        //   "flipbook": {
+        //     "clips": [ {"name":"walk","frames":[4,5,6,7],"frameDuration":0.1},
+        //                {"name":"run","first":8,"count":4,"frameDuration":0.08} ],
+        //     "play": "walk", "wrap": "loop", "speed": 1.0, "group": 0 }
+        r.registerApplier("flipbook", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
+            auto* core = EngineCore::Get();
+            if (!core) {
+                fmt::print(stderr, "blueprint: flipbook needs an EngineCore (clip library) — skipped\n");
+                return;
+            }
+            auto& lib = core->getAnimationLibrary();
+            FlipbookComponent fb;
+            if (const auto clips = j.find("clips"); clips != j.end() && clips->is_array()) {
+                for (const auto& c : *clips) {
+                    if (!c.is_object()) continue;
+                    const std::string name = c.value("name", "");
+                    const float dur = c.value("frameDuration", 0.1f);
+                    FlipbookClip clip;
+                    if (const auto fr = c.find("frames"); fr != c.end() && fr->is_array()) {
+                        std::vector<uint16_t> idx;
+                        idx.reserve(fr->size());
+                        for (const auto& v : *fr)
+                            if (v.is_number_integer()) idx.push_back(static_cast<uint16_t>(v.get<int>()));
+                        clip = FlipbookClip::fromIndices(name, std::move(idx), dur);
+                    } else {
+                        clip = FlipbookClip::fromRange(
+                            name,
+                            static_cast<uint16_t>(c.value("first", 0)),
+                            static_cast<uint16_t>(c.value("count", 0)),
+                            dur
+                        );
+                    }
+                    fb.clips.push_back(lib.addFlipbook(std::move(clip)));
+                }
+            }
+            // Select the clip to play: named "play", else the first authored.
+            const std::string play = j.value("play", "");
+            if (!play.empty()) {
+                for (FlipbookClipHandle h : fb.clips) {
+                    const FlipbookClip* c = lib.getFlipbook(h);
+                    if (c && c->name == play) {
+                        fb.clip = h;
+                        break;
+                    }
+                }
+            }
+            if (!fb.clip.valid() && !fb.clips.empty()) fb.clip = fb.clips.front();
+
+            const std::string wrap = j.value("wrap", "loop");
+            fb.wrap = wrap == "once"       ? WrapMode::Once
+                      : wrap == "pingpong" ? WrapMode::PingPong
+                      : wrap == "clamphold" ? WrapMode::ClampHold
+                                            : WrapMode::Loop;
+            fb.speed = j.value("speed", fb.speed);
+            fb.groupId = static_cast<Uint32>(j.value("group", 0));
+            fb.playing = j.value("playing", true);
+            reg.emplace_or_replace<FlipbookComponent>(e, std::move(fb));
+        });
+
         // Physics: data-only here — no live Jolt body is created. The app's
         // body-create system observes {Rigidbody, Transform, Collider} with an
         // invalid BodyHandle and creates/registers the body reactively.

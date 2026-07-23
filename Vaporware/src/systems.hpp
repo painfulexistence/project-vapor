@@ -33,29 +33,10 @@ public:
     }
 };
 
-class FlipbookSystem {
-public:
-    static void update(entt::registry& reg, float deltaTime) {
-        auto view = reg.view<Vapor::Sprite2DComponent, Vapor::FlipbookComponent>(entt::exclude<Vapor::InactiveComponent>);
-        for (auto entity : view) {
-            auto& sprite = view.get<Vapor::Sprite2DComponent>(entity);
-            auto& flipbook = view.get<Vapor::FlipbookComponent>(entity);
-
-            if (!flipbook.playing || flipbook.frameIndices.empty()) continue;
-
-            flipbook.timer += deltaTime;
-            if (flipbook.timer >= flipbook.frameTime) {
-                flipbook.timer -= flipbook.frameTime;
-                flipbook.currentIndex++;
-                if (flipbook.currentIndex >= flipbook.frameIndices.size()) {
-                    flipbook.currentIndex = flipbook.loop ? 0 : flipbook.frameIndices.size() - 1;
-                    if (!flipbook.loop) flipbook.playing = false;
-                }
-                sprite.frameIndex = flipbook.frameIndices[flipbook.currentIndex];
-            }
-        }
-    }
-};
+// Flipbook playback now lives in the engine (Vapor::FlipbookSystem, driven by
+// shared FlipbookClips in the AnimationClipLibrary) — the game loop calls it
+// directly. The old per-entity frameIndices system was retired with the
+// handle-based FlipbookComponent.
 
 class Sprite2DRenderSystem {
 public:

@@ -46,11 +46,47 @@ namespace Vapor {
     };
 
     struct TimelineTag {};
+    struct FlipbookTag {};
     struct SkeletonClipTag {};
     struct SkeletonTag {};
     using TimelineHandle = ClipHandle<TimelineTag>;
+    using FlipbookClipHandle = ClipHandle<FlipbookTag>;
     using SkeletonClipHandle = ClipHandle<SkeletonClipTag>;
     using SkeletonHandle = ClipHandle<SkeletonTag>;
+
+    // ── Flipbook (frame-based sprite animation) ──────────────────────────────
+    // Shared, data-only frame strips sampled by FlipbookComponent. Vapor sprites
+    // address an atlas by frame INDEX (unlike Atmospheric, whose flipbook stores
+    // UV rects), so a frame here is an atlas index + how long it shows. Same
+    // semantics as Atmospheric's FlipbookClip otherwise — per-frame duration and
+    // an optional frame event — and the same from-grid builders, adapted to
+    // index addressing.
+    struct FlipbookFrame {
+        uint16_t frameIndex = 0;// index into the sprite's AtlasHandle
+        float duration = 0.1f;  // seconds this frame is shown
+        int eventId = -1;       // >= 0 → reserved frame-event id (no engine consumer yet)
+    };
+
+    struct FlipbookClip {
+        std::string name;
+        std::vector<FlipbookFrame> frames;
+        float duration = 0.0f;// sum of frame durations; cached by recompute()
+
+        void recompute();
+
+        // Sample the clip at t (seconds): returns the frame index active at that
+        // time. Clamps to the first/last frame outside [0, duration]. Returns 0
+        // for an empty clip. `outFrameSlot` receives the frame's position in the
+        // strip (for change detection / event firing), or -1 if empty.
+        uint16_t sample(float t, int* outFrameSlot = nullptr) const;
+
+        // Build a strip from explicit atlas indices, each shown for the same
+        // duration. The addressing the old FlipbookComponent::frameIndices used.
+        static FlipbookClip fromIndices(std::string name, std::vector<uint16_t> frameIndices, float frameDuration);
+        // Build a strip from `count` consecutive atlas indices starting at
+        // `firstIndex` (the common "frames 4..11 are the walk cycle" case).
+        static FlipbookClip fromRange(std::string name, uint16_t firstIndex, uint16_t count, float frameDuration);
+    };
 
     // ── Action timeline (property tracks as keyframes) ───────────────────────
     enum class ActionProperty {

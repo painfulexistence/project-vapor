@@ -1,5 +1,6 @@
 #pragma once
 #include "Vapor/hidden.hpp"
+#include "animation_clip.hpp"
 #include "character_controller.hpp"
 #include "graphics_handles.hpp"
 #include "graphics_sprite.hpp"
@@ -448,18 +449,25 @@ namespace Vapor {
         bool visible = true;
     };
 
-    // Flipbook animation component (drives any frame-based animation)
+    // Flipbook animation: plays a shared FlipbookClip (owned by
+    // AnimationClipLibrary) by handle, writing the active atlas frame into a
+    // Sprite2DComponent's frameIndex. PoD — the frame data lives in the library,
+    // the entity keeps only the playhead — so it is blueprint-authorable and
+    // inspector-friendly, unlike the old per-entity frameIndices vector.
+    // FlipbookSystem samples it as a pure function of `time`, so wrap modes /
+    // reverse / scrubbing all work; groupId/wrap mirror TimelinePlaybackComponent
+    // so both share the animation time-scale groups.
     struct FlipbookComponent {
-        std::vector<uint16_t> frameIndices;
-        float frameTime = 0.1f;              // Seconds per frame
-        float timer = 0.0f;
-        uint16_t currentIndex = 0;           // Index into frameIndices
-        bool loop = true;
+        FlipbookClipHandle clip;               // active clip (invalid = nothing to play)
+        std::vector<FlipbookClipHandle> clips; // this entity's clips (switch by assigning `clip`)
+        float time = 0.0f;                     // seconds into the clip
+        float speed = 1.0f;                    // negative plays backwards
+        WrapMode wrap = WrapMode::Loop;
         bool playing = true;
+        Uint32 groupId = 0;                    // TimelineTimeScales group
 
-        uint16_t getCurrentFrame() const {
-            return frameIndices.empty() ? 0 : frameIndices[currentIndex];
-        }
+        Hidden<int> lastFrameSlot = {-1};      // change detection (skip redundant sprite writes)
+        Hidden<bool> pingForward = {true};     // PingPong direction
     };
 
     // ============================================================================

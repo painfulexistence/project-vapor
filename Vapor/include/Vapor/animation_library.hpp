@@ -44,20 +44,26 @@ namespace Vapor {
         // Duplicate names overwrite the by-name entry (last registration wins);
         // existing handles keep pointing at their original clips.
         TimelineHandle addTimeline(ActionTimeline timeline);
+        FlipbookClipHandle addFlipbook(FlipbookClip clip);
         SkeletonHandle addSkeleton(Skeleton skeleton);
         SkeletonClipHandle addSkeletonClip(SkeletonClip clip);
 
         const ActionTimeline* getTimeline(TimelineHandle h) const;
+        const FlipbookClip* getFlipbook(FlipbookClipHandle h) const;
         const Skeleton* getSkeleton(SkeletonHandle h) const;
         const SkeletonClip* getSkeletonClip(SkeletonClipHandle h) const;
 
         // By-name lookups (return an invalid handle if absent).
         TimelineHandle findTimeline(const std::string& name) const;
+        FlipbookClipHandle findFlipbook(const std::string& name) const;
         SkeletonHandle findSkeleton(const std::string& name) const;
         SkeletonClipHandle findSkeletonClip(const std::string& name) const;
 
         size_t timelineCount() const {
             return m_timelines.size();
+        }
+        size_t flipbookCount() const {
+            return m_flipbooks.size();
         }
         size_t skeletonCount() const {
             return m_skeletons.size();
@@ -74,10 +80,12 @@ namespace Vapor {
         // reallocation would dangle them; deque keeps element addresses stable
         // across push_back while preserving index access.
         std::deque<ActionTimeline> m_timelines;// index = handle.rid
+        std::deque<FlipbookClip> m_flipbooks;
         std::deque<Skeleton> m_skeletons;
         std::deque<SkeletonClip> m_skeletonClips;
 
         std::unordered_map<std::string, Uint32> m_timelineByName;
+        std::unordered_map<std::string, Uint32> m_flipbookByName;
         std::unordered_map<std::string, Uint32> m_skeletonByName;
         std::unordered_map<std::string, Uint32> m_skeletonClipByName;
     };

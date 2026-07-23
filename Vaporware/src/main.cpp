@@ -22,6 +22,7 @@
 #include "Vapor/stats_log.hpp"
 #include "Vapor/rng.hpp"
 #include "Vapor/render_scene.hpp"
+#include "Vapor/flipbook_system.hpp"
 #include "Vapor/scene_blueprint.hpp"
 #include "Vapor/systems.hpp"
 #include "Vapor/timeline_system.hpp"
@@ -963,7 +964,9 @@ auto main(int argc, char* args[]) -> int {
         Vapor::SkySystem::update(registry, renderer.get());
         Vapor::WindSystem::update(registry, renderer.get());
         Vapor::VolumetricFogSystem::update(registry, renderer.get());
-        FlipbookSystem::update(registry, deltaTime);
+        Vapor::FlipbookSystem::update(
+            registry, engineCore->getAnimationLibrary(), deltaTime, &engineCore->getTimelineScales()
+        );
         Sprite2DRenderSystem::update(registry, renderer.get(), &resourceManager);
         Sprite3DRenderSystem::update(registry, renderer.get(), &resourceManager);
         FpsTextSystem::update(registry, deltaTime);

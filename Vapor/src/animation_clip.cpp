@@ -3,6 +3,59 @@
 
 namespace Vapor {
 
+// ── FlipbookClip ─────────────────────────────────────────────────────────────
+
+void FlipbookClip::recompute() {
+    float d = 0.0f;
+    for (const auto& f : frames)
+        d += f.duration;
+    duration = d;
+}
+
+uint16_t FlipbookClip::sample(float t, int* outFrameSlot) const {
+    if (frames.empty()) {
+        if (outFrameSlot) *outFrameSlot = -1;
+        return 0;
+    }
+    if (t <= 0.0f) {
+        if (outFrameSlot) *outFrameSlot = 0;
+        return frames.front().frameIndex;
+    }
+    // Walk the cumulative durations (frame lists are short; linear is fine and
+    // keeps the clip data-only — the O(log n) prefix-sum cache lives in the
+    // component if a clip ever needs it).
+    float acc = 0.0f;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        acc += frames[i].duration;
+        if (t < acc) {
+            if (outFrameSlot) *outFrameSlot = static_cast<int>(i);
+            return frames[i].frameIndex;
+        }
+    }
+    if (outFrameSlot) *outFrameSlot = static_cast<int>(frames.size() - 1);
+    return frames.back().frameIndex;
+}
+
+FlipbookClip FlipbookClip::fromIndices(std::string name, std::vector<uint16_t> frameIndices, float frameDuration) {
+    FlipbookClip clip;
+    clip.name = std::move(name);
+    clip.frames.reserve(frameIndices.size());
+    for (uint16_t idx : frameIndices)
+        clip.frames.push_back(FlipbookFrame{ idx, frameDuration, -1 });
+    clip.recompute();
+    return clip;
+}
+
+FlipbookClip FlipbookClip::fromRange(std::string name, uint16_t firstIndex, uint16_t count, float frameDuration) {
+    FlipbookClip clip;
+    clip.name = std::move(name);
+    clip.frames.reserve(count);
+    for (uint16_t i = 0; i < count; ++i)
+        clip.frames.push_back(FlipbookFrame{ static_cast<uint16_t>(firstIndex + i), frameDuration, -1 });
+    clip.recompute();
+    return clip;
+}
+
 // ── ActionTrack ──────────────────────────────────────────────────────────────
 
 glm::vec4 ActionTrack::sample(float t) const {

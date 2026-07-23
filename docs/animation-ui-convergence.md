@@ -121,21 +121,35 @@ Three Vaporware pages hand-roll the same `ClickListener` +
 torn down automatically in `onDetach`. This also makes re-attach (needed for
 hot reload, §4) safe by construction.
 
-### 2.4 Flipbooks become shared clips (later)
+### 2.4 Flipbooks become shared clips — DONE (V3)
 
-`FlipbookComponent` currently carries its frame list per entity. Move frame
-data into `AnimationClipLibrary` as `FlipbookClip` (Atmos's
-`FromTileset`/`FromGrid` constructors are worth taking verbatim); the entity
-keeps only `{FlipbookClipHandle, playhead}`. Low urgency, do last.
+`FlipbookComponent` used to carry its frame list per entity. Frame data now
+lives in `AnimationClipLibrary` as a shared `FlipbookClip`; the entity keeps
+only `{FlipbookClipHandle, playhead}` (PoD, blueprint-authorable). Vapor
+sprites address an atlas by frame *index* (not UV rects like Atmos), so the
+clip stores atlas indices + per-frame duration — same semantics as Atmos,
+different addressing — with `fromIndices`/`fromRange` builders adapting the
+`FromTileset`/`FromGrid` idea. Playback moved into an engine `FlipbookSystem`
+(single tick point, same `WrapMode` + time-scale groups as `TimelineSystem`,
+writes `Sprite2DComponent::frameIndex` only on frame change). A `flipbook`
+blueprint applier makes clips authorable in scene JSON — closing the gap the
+dormant per-entity component left open.
 
-### 2.5 What `ActionManager` becomes
+### 2.5 What `ActionManager` becomes — DONE
 
 `ActionManager` stays as the *imperative escape hatch* — code-driven
-sequencing of callbacks (level scripting, one-shot engine glue). It stops
-being the answer for anything an artist/designer would author or anything
-that needs scrubbing/reverse: those are clips. Document this boundary in its
-header; optionally add a `PlayTimelineAction(handle)` adapter so imperative
-sequences can embed data-driven clips.
+sequencing of callbacks (level scripting, one-shot engine glue) — and its
+header now documents that boundary. The specific job it used to serve for
+animation (a quick code-built move/scale/fade with easing) moved to the
+timeline line: `Tween` (`tween.hpp`) is a fluent builder that reads the
+entity's current transform/tint at build time, produces an `ActionTimeline`,
+and plays it as a fire-and-forget **overlay** through
+`TimelineSystem::addOverlay`. Overlays are a behavior-tier
+`TimelineOverlayComponent` (owned timelines + `onFinished`, layered on top of
+the main clip each frame); the PoD `TimelinePlaybackComponent` is untouched.
+Net: the same fluent call site that used to build a `shared_ptr<Action>`
+graph now yields a data-driven clip that seeks, reverses and serializes —
+which is exactly "the ActionManager line became the timeline line".
 
 ---
 
@@ -341,7 +355,7 @@ Each phase is independently landable and testable.
 |---|---|---|
 | V1 | `UIDocumentHandle` + `UIDocumentRegistry`; manager APIs; component + `PageSystem` reattach-on-version; `Page::bind` helper (prerequisite for safe reattach) | registry unit test; `ui_system_test` de-fake + stale/reload cases |
 | V2 | `EasingType`/`ApplyEasing` unification; `AnimationClipLibrary` + `TimelinePlaybackComponent` + `TimelineSystem` (transform/sprite tracks, events → `FSMEventQueue`, group time scales); port `LetterboxPage`/`ChapterTitlePage` timing onto it | clip sampling test (mirror Atmos's `animation_smoke_test`); timeline→FSM event test |
-| V3 | Flipbook clips into the library; `PageID` → game-side registration; `ActionManager` boundary docs + optional clip-playing action | flipbook migration test |
+| V3 (done) | Flipbook → shared `FlipbookClip` in the library + engine `FlipbookSystem` + `flipbook` blueprint applier; `Tween` builder + `TimelineOverlayComponent` overlays (the ActionManager → timeline path); `ActionManager` boundary docs point at `Tween` | flipbook sampling/wrap/group tests; overlay + Tween tests. *Still open:* `PageID` → game-side registration |
 
 **Atmospheric**
 

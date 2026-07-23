@@ -503,6 +503,13 @@ namespace Vapor {
      * which support seek/reverse/serialization that a shared_ptr<Action>
      * graph cannot.
      *
+     * For the specific case this class used to serve — a quick, code-built
+     * move/scale/fade over time with easing — reach for Tween (tween.hpp)
+     * instead: it builds an ActionTimeline and plays it as a TimelineSystem
+     * overlay, so the same fluent call site now yields a data-driven clip.
+     * This is the ActionManager → timeline migration; new animation code should
+     * not grow the UpdateAction/TimelineAction path below.
+     *
      * Supports tagging actions for grouped management (e.g., stop all animations
      * when state changes).
      *
