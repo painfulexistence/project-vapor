@@ -151,43 +151,90 @@ static float4 trgSplatWeights(float height01, float slope, float2 worldXZ) {
     return w / max(w.x + w.y + w.z + w.w, 1e-4);
 }
 
-// Terrain height field — MSL twin of RHIMain.frag's trHeightAt, a byte-for-byte
-// port of TerrainWorld::heightAt (terrain_world.cpp). Lets the fragment stage
-// reconstruct a per-pixel surface normal from the same noise the mesh is built
-// on, restoring the octaves the coarse LOD mesh vertices smooth away. Params
-// arrive packed in the terrain material's unused Disney lobe fields.
-inline float trhHashNoise(int x, int y, uint seed) {
-    uint h = uint(x) * 374761393u + uint(y) * 668265263u + seed * 3266489917u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    h ^= h >> 16;
-    return float(h & 0xFFFFu) / 65535.0;
+// Terrain height field — MSL twin of RHIMain.frag's trHeightAt: FastNoiseLite
+// v1.1.1 OpenSimplex2 FBm ported function-for-function from the vendored
+// header, i.e. the SAME field TerrainWorld::heightAt builds the streamed mesh
+// on (and the exact height source of Atmospheric's TerrainStreamer). Lets the
+// fragment stage reconstruct a per-pixel surface normal, restoring the octaves
+// the coarse LOD mesh vertices smooth away. Params arrive packed in the
+// terrain material's unused Disney lobe fields.
+constant int kFnlPrimeX = 501125321;
+constant int kFnlPrimeY = 1136930381;
+// Gradients2D is 128 pairs: a 24-direction fan (15 deg steps from 82.5 deg)
+// repeated 5 times, then 8 picks at 45 deg steps (fan indices 1,4,7,...,22).
+constant float2 kFnlFan[24] = {
+    float2(0.130526192220052, 0.99144486137381),   float2(0.38268343236509, 0.923879532511287),
+    float2(0.608761429008721, 0.793353340291235),  float2(0.793353340291235, 0.608761429008721),
+    float2(0.923879532511287, 0.38268343236509),   float2(0.99144486137381, 0.130526192220051),
+    float2(0.99144486137381, -0.130526192220051),  float2(0.923879532511287, -0.38268343236509),
+    float2(0.793353340291235, -0.60876142900872),  float2(0.608761429008721, -0.793353340291235),
+    float2(0.38268343236509, -0.923879532511287),  float2(0.130526192220052, -0.99144486137381),
+    float2(-0.130526192220052, -0.99144486137381), float2(-0.38268343236509, -0.923879532511287),
+    float2(-0.608761429008721, -0.793353340291235),float2(-0.793353340291235, -0.608761429008721),
+    float2(-0.923879532511287, -0.38268343236509), float2(-0.99144486137381, -0.130526192220052),
+    float2(-0.99144486137381, 0.130526192220051),  float2(-0.923879532511287, 0.38268343236509),
+    float2(-0.793353340291235, 0.608761429008721), float2(-0.608761429008721, 0.793353340291235),
+    float2(-0.38268343236509, 0.923879532511287),  float2(-0.130526192220052, 0.99144486137381)};
+inline float2 fnlGradient2(int pairIndex) {
+    return pairIndex < 120 ? kFnlFan[pairIndex % 24] : kFnlFan[1 + 3 * (pairIndex - 120)];
 }
-inline float trhGradDot(int xi, int zi, float2 offset, uint seed) {
-    float2 g = float2(trhHashNoise(xi, zi, seed) - 0.5, trhHashNoise(xi, zi, seed ^ 0x9E3779B9u) - 0.5);
-    float len = length(g);
-    if (len < 1e-6) return offset.x;
-    return dot(g / len, offset);
+inline float fnlGradCoord(int seed, int xPrimed, int yPrimed, float xd, float yd) {
+    int hash = (seed ^ xPrimed ^ yPrimed) * 0x27d4eb2d;
+    hash ^= hash >> 15;
+    hash &= 127 << 1;
+    float2 g = fnlGradient2(hash >> 1);
+    return xd * g.x + yd * g.y;
 }
-inline float trhGradNoise2(float2 p, uint seed) {
-    float2 pf = floor(p);
-    float2 f = p - pf;
-    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);  // quintic fade
-    int xi = int(pf.x), zi = int(pf.y);
-    float a = trhGradDot(xi, zi, f, seed);
-    float b = trhGradDot(xi + 1, zi, f - float2(1.0, 0.0), seed);
-    float c = trhGradDot(xi, zi + 1, f - float2(0.0, 1.0), seed);
-    float d = trhGradDot(xi + 1, zi + 1, f - float2(1.0, 1.0), seed);
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+// SingleSimplex (2D OpenSimplex2): input is already frequency-scaled + skewed.
+static float fnlSimplex2(int seed, float2 p) {
+    const float SQRT3 = 1.7320508075688772935;
+    const float G2 = (3.0 - SQRT3) / 6.0;
+    int i = int(floor(p.x)), j = int(floor(p.y));
+    float xi = p.x - float(i), yi = p.y - float(j);
+    float t = (xi + yi) * G2;
+    float x0 = xi - t, y0 = yi - t;
+    i *= kFnlPrimeX;
+    j *= kFnlPrimeY;
+    float n0 = 0.0, n1 = 0.0, n2 = 0.0;
+    float a = 0.5 - x0 * x0 - y0 * y0;
+    if (a > 0.0) n0 = (a * a) * (a * a) * fnlGradCoord(seed, i, j, x0, y0);
+    float c = (2.0 * (1.0 - 2.0 * G2) * (1.0 / G2 - 2.0)) * t
+            + ((-2.0 * (1.0 - 2.0 * G2) * (1.0 - 2.0 * G2)) + a);
+    if (c > 0.0) {
+        float x2 = x0 + (2.0 * G2 - 1.0), y2 = y0 + (2.0 * G2 - 1.0);
+        n2 = (c * c) * (c * c) * fnlGradCoord(seed, i + kFnlPrimeX, j + kFnlPrimeY, x2, y2);
+    }
+    if (y0 > x0) {
+        float x1 = x0 + G2, y1 = y0 + (G2 - 1.0);
+        float b = 0.5 - x1 * x1 - y1 * y1;
+        if (b > 0.0) n1 = (b * b) * (b * b) * fnlGradCoord(seed, i, j + kFnlPrimeY, x1, y1);
+    } else {
+        float x1 = x0 + (G2 - 1.0), y1 = y0 + G2;
+        float b = 0.5 - x1 * x1 - y1 * y1;
+        if (b > 0.0) n1 = (b * b) * (b * b) * fnlGradCoord(seed, i + kFnlPrimeX, j, x1, y1);
+    }
+    return (n0 + n1 + n2) * 99.83685446303647;
 }
+// GetNoise: TransformNoiseCoordinate (frequency + F2 skew) -> GenFractalFBm
+// (lacunarity 2, gain 0.5, weightedStrength 0), then the heightFn mapping
+// noise * 0.5 + 0.5 clamped to [0,1] and scaled — matching heightAt exactly.
 inline float trhHeightAt(float2 xz, float noiseFreq, int octaves, uint seed, float heightScale) {
     float2 p = xz * noiseFreq;
-    float sum = 0.0, amp = 0.5;
+    const float SQRT3 = 1.7320508075688772935;
+    const float F2 = 0.5 * (SQRT3 - 1.0);
+    p += float2((p.x + p.y) * F2);
+    const float gain = 0.5;
+    float amp = gain, ampFractal = 1.0;
+    for (int i = 1; i < octaves; ++i) { ampFractal += amp; amp *= gain; }
+    int s = int(seed);
+    float sum = 0.0;
+    amp = 1.0 / ampFractal;  // fractalBounding
     for (int i = 0; i < octaves; ++i) {
-        sum += amp * trhGradNoise2(p, seed + uint(i) * 101u);
+        sum += fnlSimplex2(s++, p) * amp;
         p *= 2.0;
-        amp *= 0.5;
+        amp *= gain;
     }
-    return clamp(0.5 + sum * 1.2, 0.0, 1.0) * heightScale;
+    return clamp(sum * 0.5 + 0.5, 0.0, 1.0) * heightScale;
 }
 
 static void trgShadeTerrain(float3 worldPos, float noiseFreq, int octaves, uint seed, float heightScale,

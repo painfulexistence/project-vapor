@@ -180,6 +180,7 @@ add_executable(test_terrain_world
 target_include_directories(test_terrain_world PRIVATE
     ${CMAKE_SOURCE_DIR}/Vapor/include
     ${CMAKE_SOURCE_DIR}/Vapor/include/Vapor
+    ${CMAKE_SOURCE_DIR}/Vapor/FastNoiseLite
 )
 target_link_libraries(test_terrain_world PRIVATE
     Catch2::Catch2WithMain

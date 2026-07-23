@@ -11,6 +11,8 @@
 #include <unordered_set>
 #include <vector>
 
+class FastNoiseLite;// vendored Vapor/FastNoiseLite (only terrain_world.cpp includes it)
+
 namespace Vapor {
 
 // ============================================================================
@@ -36,8 +38,12 @@ struct TerrainConfig {
     float worldSize = 10240.0f;   // meters per axis; rounded to a tile multiple
     float tileSize = 512.0f;      // meters per tile edge
     float heightScale = 500.0f;   // peak height in meters
+    // OpenSimplex2 FBm height source (FastNoiseLite, the exact library +
+    // parameters of Atmospheric's TerrainStreamer default heightFn).
     float noiseFrequency = 0.0007f;// ~1.4 km feature wavelength
     int noiseOctaves = 9;
+    float noiseLacunarity = 2.0f;
+    float noiseGain = 0.5f;
     Uint32 seed = 20260705u;
     // Concentric ring radius (Chebyshev, in tiles) selecting LOD 0/1/2;
     // everything further keeps the always-resident base coat (LOD 3).
@@ -202,6 +208,9 @@ public:
 private:
     TerrainConfig cfg;
     int tilesAxis = 20;
+    // Immutable after configure(); GetNoise is const and stateless, so worker
+    // jobs and main-thread queries share it without locking.
+    std::shared_ptr<FastNoiseLite> noise;
 
     mutable std::mutex resultMutex;
     std::vector<BuildResult> results;

@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <set>
 
 using Vapor::TerrainConfig;
@@ -38,6 +39,104 @@ TerrainConfig smallConfig() {
     cfg.noiseOctaves = 5;
     cfg.seed = 1234u;
     return cfg;
+}
+
+// ── C++ transcription of the shader height-field twin ───────────────────────
+// Statement-for-statement copy of trHeightAt + helpers from RHIMain.frag (and
+// the identical MSL twin in 3d_pbr_normal_mapped.metal): the FastNoiseLite
+// v1.1.1 OpenSimplex2-FBm port the fragment stage uses for per-pixel normals.
+// The parity test below checks it against TerrainWorld::heightAt — which runs
+// the REAL vendored FastNoiseLite — so the shader port is verified against
+// Atmospheric's actual height source, not against a copy of itself.
+// Signed-int wrap in the shader (defined in SPIR-V/MSL) is expressed through
+// unsigned arithmetic here to keep the C++ UB-clean while staying bit-equal.
+int32_t shWrapMul(int32_t a, int32_t b) {
+    return static_cast<int32_t>(static_cast<uint32_t>(a) * static_cast<uint32_t>(b));
+}
+int32_t shWrapAdd(int32_t a, int32_t b) {
+    return static_cast<int32_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b));
+}
+
+constexpr int32_t kShPrimeX = 501125321;
+constexpr int32_t kShPrimeY = 1136930381;
+const glm::vec2 kShFan[24] = {
+    { 0.130526192220052f, 0.99144486137381f },   { 0.38268343236509f, 0.923879532511287f },
+    { 0.608761429008721f, 0.793353340291235f },  { 0.793353340291235f, 0.608761429008721f },
+    { 0.923879532511287f, 0.38268343236509f },   { 0.99144486137381f, 0.130526192220051f },
+    { 0.99144486137381f, -0.130526192220051f },  { 0.923879532511287f, -0.38268343236509f },
+    { 0.793353340291235f, -0.60876142900872f },  { 0.608761429008721f, -0.793353340291235f },
+    { 0.38268343236509f, -0.923879532511287f },  { 0.130526192220052f, -0.99144486137381f },
+    { -0.130526192220052f, -0.99144486137381f }, { -0.38268343236509f, -0.923879532511287f },
+    { -0.608761429008721f, -0.793353340291235f },{ -0.793353340291235f, -0.608761429008721f },
+    { -0.923879532511287f, -0.38268343236509f }, { -0.99144486137381f, -0.130526192220052f },
+    { -0.99144486137381f, 0.130526192220051f },  { -0.923879532511287f, 0.38268343236509f },
+    { -0.793353340291235f, 0.608761429008721f }, { -0.608761429008721f, 0.793353340291235f },
+    { -0.38268343236509f, 0.923879532511287f },  { -0.130526192220052f, 0.99144486137381f } };
+
+glm::vec2 shGradient2(int pairIndex) {
+    return pairIndex < 120 ? kShFan[pairIndex % 24] : kShFan[1 + 3 * (pairIndex - 120)];
+}
+
+float shGradCoord(int32_t seed, int32_t xPrimed, int32_t yPrimed, float xd, float yd) {
+    int32_t hash = shWrapMul(seed ^ xPrimed ^ yPrimed, 0x27d4eb2d);
+    hash ^= hash >> 15;
+    hash &= 127 << 1;
+    const glm::vec2 g = shGradient2(hash >> 1);
+    return xd * g.x + yd * g.y;
+}
+
+float shSimplex2(int32_t seed, glm::vec2 p) {
+    const float SQRT3 = 1.7320508075688772935f;
+    const float G2 = (3.0f - SQRT3) / 6.0f;
+    int32_t i = static_cast<int32_t>(std::floor(p.x)), j = static_cast<int32_t>(std::floor(p.y));
+    const float xi = p.x - static_cast<float>(i), yi = p.y - static_cast<float>(j);
+    const float t = (xi + yi) * G2;
+    const float x0 = xi - t, y0 = yi - t;
+    i = shWrapMul(i, kShPrimeX);
+    j = shWrapMul(j, kShPrimeY);
+    float n0 = 0.0f, n1 = 0.0f, n2 = 0.0f;
+    const float a = 0.5f - x0 * x0 - y0 * y0;
+    if (a > 0.0f) n0 = (a * a) * (a * a) * shGradCoord(seed, i, j, x0, y0);
+    const float c = (2.0f * (1.0f - 2.0f * G2) * (1.0f / G2 - 2.0f)) * t
+        + ((-2.0f * (1.0f - 2.0f * G2) * (1.0f - 2.0f * G2)) + a);
+    if (c > 0.0f) {
+        const float x2 = x0 + (2.0f * G2 - 1.0f), y2 = y0 + (2.0f * G2 - 1.0f);
+        n2 = (c * c) * (c * c)
+            * shGradCoord(seed, shWrapAdd(i, kShPrimeX), shWrapAdd(j, kShPrimeY), x2, y2);
+    }
+    if (y0 > x0) {
+        const float x1 = x0 + G2, y1 = y0 + (G2 - 1.0f);
+        const float b = 0.5f - x1 * x1 - y1 * y1;
+        if (b > 0.0f) n1 = (b * b) * (b * b) * shGradCoord(seed, i, shWrapAdd(j, kShPrimeY), x1, y1);
+    } else {
+        const float x1 = x0 + (G2 - 1.0f), y1 = y0 + G2;
+        const float b = 0.5f - x1 * x1 - y1 * y1;
+        if (b > 0.0f) n1 = (b * b) * (b * b) * shGradCoord(seed, shWrapAdd(i, kShPrimeX), j, x1, y1);
+    }
+    return (n0 + n1 + n2) * 99.83685446303647f;
+}
+
+float shHeightAt(glm::vec2 xz, float noiseFreq, int octaves, uint32_t seed, float heightScale) {
+    glm::vec2 p = xz * noiseFreq;
+    const float SQRT3 = 1.7320508075688772935f;
+    const float F2 = 0.5f * (SQRT3 - 1.0f);
+    p += glm::vec2((p.x + p.y) * F2);
+    const float gain = 0.5f;
+    float amp = gain, ampFractal = 1.0f;
+    for (int i = 1; i < octaves; ++i) {
+        ampFractal += amp;
+        amp *= gain;
+    }
+    int32_t s = static_cast<int32_t>(seed);
+    float sum = 0.0f;
+    amp = 1.0f / ampFractal;  // fractalBounding
+    for (int i = 0; i < octaves; ++i) {
+        sum += shSimplex2(s, p) * amp;
+        s = shWrapAdd(s, 1);
+        p *= 2.0f;
+        amp *= gain;
+    }
+    return glm::clamp(sum * 0.5f + 0.5f, 0.0f, 1.0f) * heightScale;
 }
 
 }  // namespace
@@ -107,6 +206,56 @@ TEST_CASE("heightAt is deterministic, bounded, and seed-dependent", "[terrain]")
 
     // slopeAt is the central-difference gradient magnitude — never negative.
     CHECK(a.slopeAt(31.0f, -47.0f) >= 0.0f);
+}
+
+TEST_CASE("shader height-field twin matches the real FastNoiseLite source", "[terrain][parity]") {
+    // The oracle is TerrainWorld::heightAt running the vendored FastNoiseLite
+    // v1.1.1 — the same library + parameters as Atmospheric's TerrainStreamer.
+    // The transcription (shHeightAt above) mirrors the GLSL/MSL per-pixel
+    // twin, so agreement here means the fragment-stage normals are derived
+    // from the terrain the mesh was actually built on. The tolerance only
+    // absorbs fp32 rounding (contraction/ordering); a logic divergence would
+    // show up as metres, not millimetres.
+    TerrainWorld world;
+
+    // Demo-scale config (the TerrainStreaming example's exact parameters).
+    TerrainConfig demo;
+    demo.worldSize = 10240.0f;
+    demo.tileSize = 512.0f;
+    demo.heightScale = 500.0f;
+    demo.noiseFrequency = 0.0007f;
+    demo.noiseOctaves = 9;
+    demo.seed = 20260705u;
+    world.configure(demo);
+
+    float maxHeight = 0.0f, minHeight = demo.heightScale;
+    for (int gz = 0; gz < 48; gz++) {
+        for (int gx = 0; gx < 48; gx++) {
+            const float x = -5120.0f + gx * 217.3f;
+            const float z = -5120.0f + gz * 213.7f;
+            const float cpu = world.heightAt(x, z);
+            const float sh = shHeightAt({ x, z }, demo.noiseFrequency, demo.noiseOctaves,
+                                        demo.seed, demo.heightScale);
+            REQUIRE_THAT(sh, Catch::Matchers::WithinAbs(cpu, 0.02f));
+            maxHeight = std::max(maxHeight, cpu);
+            minHeight = std::min(minHeight, cpu);
+        }
+    }
+    // Regression guard for the flatness bug: OpenSimplex2 FBm uses the height
+    // range — over a 10 km sweep the field must span well over half of it
+    // (the old hand-rolled fBm hovered around 0.5 * heightScale).
+    CHECK(maxHeight - minHeight > 0.5f * demo.heightScale);
+
+    // A second config (different seed/frequency/octaves) stays in lockstep.
+    TerrainConfig alt = smallConfig();
+    world.configure(alt);
+    for (int i = 0; i < 300; i++) {
+        const float x = -256.0f + i * 1.83f;
+        const float z = 256.0f - i * 1.57f;
+        REQUIRE_THAT(shHeightAt({ x, z }, alt.noiseFrequency, alt.noiseOctaves, alt.seed,
+                                alt.heightScale),
+                     Catch::Matchers::WithinAbs(world.heightAt(x, z), 0.02f));
+    }
 }
 
 TEST_CASE("worldToTile maps and clamps world positions", "[terrain]") {

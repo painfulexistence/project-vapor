@@ -1,47 +1,28 @@
 #include "terrain_world.hpp"
 
+#include "FastNoiseLite.h"
+
 #include <algorithm>
 #include <cmath>
 
 namespace Vapor {
 
-// ============================================================================
-// Height source — gradient-noise fBm, pure and thread-safe, so worker jobs
-// and main-thread queries (ground clamp, scatter) share one function.
-// ============================================================================
-
-static float trHashNoise(int x, int y, Uint32 seed) {
-    Uint32 h = static_cast<Uint32>(x) * 374761393u + static_cast<Uint32>(y) * 668265263u + seed * 3266489917u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    h ^= h >> 16;
-    return static_cast<float>(h & 0xFFFFu) / 65535.0f;
-}
-
-static float trGradDot(int xi, int zi, glm::vec2 offset, Uint32 seed) {
-    glm::vec2 g(trHashNoise(xi, zi, seed) - 0.5f, trHashNoise(xi, zi, seed ^ 0x9E3779B9u) - 0.5f);
-    float len = glm::length(g);
-    if (len < 1e-6f) return offset.x;
-    return glm::dot(g / len, offset);
-}
-
-static float trGradNoise2(glm::vec2 p, Uint32 seed) {
-    glm::vec2 pf = glm::floor(p);
-    glm::vec2 f = p - pf;
-    glm::vec2 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);  // quintic fade
-    int xi = static_cast<int>(pf.x), zi = static_cast<int>(pf.y);
-    float a = trGradDot(xi, zi, f, seed);
-    float b = trGradDot(xi + 1, zi, f - glm::vec2(1, 0), seed);
-    float c = trGradDot(xi, zi + 1, f - glm::vec2(0, 1), seed);
-    float d = trGradDot(xi + 1, zi + 1, f - glm::vec2(1, 1), seed);
-    return glm::mix(glm::mix(a, b, u.x), glm::mix(c, d, u.x), u.y);
-}
-
-// ============================================================================
-
 void TerrainWorld::configure(const TerrainConfig& config) {
     cfg = config;
     tilesAxis = std::max(1, static_cast<int>(cfg.worldSize / cfg.tileSize));
     cfg.worldSize = tilesAxis * cfg.tileSize;
+
+    // The height source — OpenSimplex2 FBm configured exactly like the
+    // default heightFn in Atmospheric's TerrainStreamer::Init, so the same
+    // (seed, frequency, octaves) reproduces the same mountains.
+    noise = std::make_shared<FastNoiseLite>();
+    noise->SetSeed(static_cast<int>(cfg.seed));
+    noise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    noise->SetFrequency(cfg.noiseFrequency);
+    noise->SetFractalType(FastNoiseLite::FractalType_FBm);
+    noise->SetFractalOctaves(cfg.noiseOctaves);
+    noise->SetFractalLacunarity(cfg.noiseLacunarity);
+    noise->SetFractalGain(cfg.noiseGain);
 
     tiles.assign(static_cast<size_t>(tileCount()), Tile {});
     baseSlots.assign(static_cast<size_t>(tileCount()), Slot {});
@@ -70,14 +51,11 @@ void TerrainWorld::configure(const TerrainConfig& config) {
 }
 
 float TerrainWorld::heightAt(float x, float z) const {
-    glm::vec2 p = glm::vec2(x, z) * cfg.noiseFrequency;
-    float sum = 0.0f, amp = 0.5f;
-    for (int i = 0; i < cfg.noiseOctaves; i++) {
-        sum += amp * trGradNoise2(p, cfg.seed + static_cast<Uint32>(i) * 101u);
-        p *= 2.0f;
-        amp *= 0.5f;
-    }
-    return glm::clamp(0.5f + sum * 1.2f, 0.0f, 1.0f) * cfg.heightScale;
+    // Atmospheric's default heightFn is GetNoise * 0.5 + 0.5; the streamer
+    // clamps to [0,1] when it bakes tile grids, so clamp here too.
+    if (!noise) return 0.0f;
+    const float h01 = glm::clamp(noise->GetNoise(x, z) * 0.5f + 0.5f, 0.0f, 1.0f);
+    return h01 * cfg.heightScale;
 }
 
 float TerrainWorld::slopeAt(float x, float z) const {

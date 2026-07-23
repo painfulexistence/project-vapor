@@ -162,6 +162,10 @@ target_include_directories(Vapor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/Vapor
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/miniaudio
+    # Vendored FastNoiseLite v1.1.1 (single MIT header, like stb): the terrain
+    # height source — the same library/version Atmospheric's TerrainStreamer
+    # uses, so streamed terrain reproduces its OpenSimplex2 FBm exactly.
+    ${CMAKE_CURRENT_SOURCE_DIR}/FastNoiseLite
 )
 
 if(FFMPEG_FOUND)
