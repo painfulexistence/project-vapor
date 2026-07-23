@@ -518,6 +518,12 @@ private:
     void* getImGuiTextureID(TextureHandle handle);
     std::unordered_map<Uint32, void*> imguiTextureCache;  // Vulkan descriptor sets
     void drawGraphicsImGui();
+    // "Post Processing" section of the Engine window: per-effect enable
+    // checkboxes + parameter sliders (bloom, god rays, tone mapping, color
+    // grading, chromatic aberration, vignette, and the ported VHS/CRT/Sobel/
+    // Posterize stylizations). Writes straight into postProcessParams /
+    // bloomEnabled / lightScatteringEnabled, which the passes read next frame.
+    void drawPostProcessImGui();
 
     // Last completed frame's numbers, shown in the Engine window. The panel
     // draws BETWEEN beginFrame (which clears the live per-frame light vectors)
@@ -658,6 +664,11 @@ private:
     TextureHandle bloomPyramid[BLOOM_PYRAMID_LEVELS]; // progressively halved
     float bloomThreshold = 1.0f;
     float bloomStrength = 0.8f;
+    // Master bloom toggle (Post Processing ImGui panel). When off, the bloom
+    // pyramid passes early-out and PostProcess binds a black bloom texture, so
+    // nothing is added — on both the Vulkan (in-shader composite) and Metal
+    // (separate BloomComposite pass, skipped) paths.
+    bool bloomEnabled = true;
 
     // Default depth buffer for swapchain rendering (when not using render targets)
     TextureHandle swapchainDepthBuffer;
@@ -678,8 +689,15 @@ private:
     ComputePipelineHandle velocityComputePipeline;
     // Shader handles created for the Metal pass chain (kept for shutdown).
     std::vector<ShaderHandle> metalPassShaders;
-    // Post-process tunables (contract of 3d_post_process.metal — the Vulkan
-    // PostProcess.frag currently bakes its own constants).
+    // Post-process tunables — the shared contract of BOTH post shaders:
+    // 3d_post_process.metal (Metal, buffer(0)) and PostProcess.frag (Vulkan,
+    // std430 set1 b0). The field order below MUST stay identical in all three
+    // definitions (append only; the buffer is sized with sizeof()). All fields
+    // are 4-byte floats so the scalar std430/MSL layout is trivially matched —
+    // the `enable*` flags are floats (1=on, 0=off) for the same reason. The
+    // effects gated by these flags are the single-pass ones inside the post
+    // shader; bloom/god-rays toggle at the pass level (bloomEnabled /
+    // lightScatteringEnabled) instead.
     struct alignas(16) PostProcessParams {
         float chromaticAberrationStrength = 0.01f;
         float chromaticAberrationFalloff = 2.0f;
@@ -692,6 +710,20 @@ private:
         float temperature = 0.0f;
         float tint = 0.0f;
         float exposure = 1.0f;
+        // ---- appended: per-effect enable flags + stylized-effect params ----
+        // Existing effects default ON so the default frame is unchanged.
+        float enableChromaticAberration = 1.0f;
+        float enableVignette = 1.0f;
+        float enableColorGrading = 1.0f;  // gates temperature/tint/brightness/saturation/contrast
+        float enableToneMapping = 1.0f;   // gates exposure scale + ACES
+        // Stylized effects ported from Atmospheric's post_composite.frag.
+        // Default OFF — purely additive, so they never disturb the base look.
+        float enableVHS = 0.0f;
+        float enableCRT = 0.0f;
+        float enableSobel = 0.0f;
+        float enablePosterize = 0.0f;
+        float posterizeLevels = 5.0f;     // number of quantization steps
+        float time = 0.0f;                // seconds, drives animated VHS/CRT
     };
     PostProcessParams postProcessParams;
     BufferHandle postProcessParamsBuffer;  // Vulkan PostProcess.frag set1 b0

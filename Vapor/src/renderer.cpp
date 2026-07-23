@@ -4217,6 +4217,7 @@ void Renderer::sscsPass() {
 // Bloom brightness: soft-threshold extract from colorRT into the half-res
 // bloomBrightness target.
 void Renderer::bloomBrightnessPass() {
+    if (!bloomEnabled) return;  // Post Processing panel master toggle
     if (!bloomBrightPipeline.isValid() || !colorRT.isValid() || !bloomBrightness.isValid()) return;
     RenderPassDesc rp;
     rp.name = "BloomBrightness";
@@ -4237,6 +4238,7 @@ void Renderer::bloomBrightnessPass() {
 // Bloom downsample: build the pyramid. brightness -> pyramid[0], then
 // pyramid[i-1] -> pyramid[i], each a 3x3 gaussian at decreasing resolution.
 void Renderer::bloomDownsamplePass() {
+    if (!bloomEnabled) return;  // Post Processing panel master toggle
     if (!bloomDownsamplePipeline.isValid() || !bloomBrightness.isValid()) return;
     for (Uint32 i = 0; i < BLOOM_PYRAMID_LEVELS; i++) {
         if (!bloomPyramid[i].isValid()) return;
@@ -4258,6 +4260,10 @@ void Renderer::bloomDownsamplePass() {
 // the lower level and ADD it (additive blend) onto the current level, so
 // pyramid[0] ends up holding the fully accumulated bloom.
 void Renderer::bloomUpsamplePass() {
+    // Master toggle: skipping here also skips the Metal BloomComposite at the
+    // tail of this function, so colorRT is never swapped and downstream passes
+    // see the un-bloomed scene.
+    if (!bloomEnabled) return;
     if (!bloomUpsamplePipeline.isValid()) return;
     for (int i = static_cast<int>(BLOOM_PYRAMID_LEVELS) - 2; i >= 0; i--) {
         if (!bloomPyramid[i].isValid() || !bloomPyramid[i + 1].isValid()) continue;
@@ -5350,6 +5356,10 @@ void Renderer::postProcessPass() {
         return;
     }
 
+    // Feed the animated-effect clock (VHS/CRT) using the same time base the
+    // renderer uses elsewhere (frameCounter / 60). Uploaded to the GPU below.
+    postProcessParams.time = float(frameCounter) / 60.0f;
+
     // Create render pass descriptor for swapchain
     RenderPassDesc renderPassDesc;
     renderPassDesc.name = "PostProcess";
@@ -5386,8 +5396,13 @@ void Renderer::postProcessPass() {
     if (colorRT.isValid() && clampSampler.isValid()) {
         rhi->setTexture(0, 0, colorRT, clampSampler);
     }
-    if (bloomPyramid[0].isValid() && clampSampler.isValid()) {
-        rhi->setTexture(0, 1, bloomPyramid[0], clampSampler);
+    if (clampSampler.isValid()) {
+        // Bloom accumulates into pyramid[0]. When disabled the pyramid passes
+        // are skipped (stale data), so bind black — the shader's additive
+        // composite then contributes nothing.
+        TextureHandle bloomTex = (bloomEnabled && bloomPyramid[0].isValid())
+            ? bloomPyramid[0] : textures[defaultBlackTexture].handle;
+        rhi->setTexture(0, 1, bloomTex, clampSampler);
     }
     if (clampSampler.isValid()) {
         // When god rays are disabled their RT is never written — bind black
@@ -7560,6 +7575,7 @@ void Renderer::invokeImGuiCallback() {
     ImGui::Begin("Engine");
 
     drawGraphicsImGui();
+    drawPostProcessImGui();
     drawRenderGraphImGui();
     drawGpuTimingsImGui();
     drawCpuTimingsImGui();
@@ -7596,6 +7612,109 @@ void* Renderer::getImGuiTextureID(TextureHandle handle) {
         return (void*)ds;
     }
     return nullptr;
+}
+
+// The "Post Processing" section of the Engine window. Per-effect enable
+// checkboxes + parameter sliders — a quick at-a-glance toggle grid up top
+// (Atmospheric-style) plus collapsible per-effect tuning (Vapor's TreeNode
+// idiom). The enable flags are floats in postProcessParams (the shared GPU
+// struct); bloom and god rays toggle at the pass level (bloomEnabled /
+// lightScatteringEnabled). Ported from Atmospheric's graphics_subsystem panel.
+void Renderer::drawPostProcessImGui() {
+    if (!ImGui::CollapsingHeader("Post Processing")) {
+        return;
+    }
+    PostProcessParams& p = postProcessParams;
+
+    // Bind an ImGui checkbox to a float enable flag (1=on, 0=off).
+    auto flagBox = [](const char* label, float& flag) -> bool {
+        bool on = flag > 0.5f;
+        if (ImGui::Checkbox(label, &on)) flag = on ? 1.0f : 0.0f;
+        return on;
+    };
+
+    // Quick toggles: an at-a-glance on/off grid. Same underlying state as the
+    // detailed sections below (two widgets, one variable).
+    ImGui::TextDisabled("Quick toggles");
+    ImGui::Checkbox("Bloom", &bloomEnabled);              ImGui::SameLine();
+    ImGui::Checkbox("God Rays", &lightScatteringEnabled); ImGui::SameLine();
+    flagBox("Tonemap", p.enableToneMapping);              ImGui::SameLine();
+    flagBox("Grading", p.enableColorGrading);
+    flagBox("Chromatic Aberration", p.enableChromaticAberration); ImGui::SameLine();
+    flagBox("Vignette", p.enableVignette);
+    flagBox("VHS", p.enableVHS);           ImGui::SameLine();
+    flagBox("CRT", p.enableCRT);           ImGui::SameLine();
+    flagBox("Sobel", p.enableSobel);       ImGui::SameLine();
+    flagBox("Posterize", p.enablePosterize);
+    ImGui::Separator();
+
+    // Detailed per-effect controls.
+    if (ImGui::TreeNode("Bloom##pp")) {
+        ImGui::Checkbox("Enabled##bloom", &bloomEnabled);
+        ImGui::BeginDisabled(!bloomEnabled);
+        ImGui::DragFloat("Threshold", &bloomThreshold, 0.01f, 0.0f, 10.0f);
+        ImGui::DragFloat("Strength", &bloomStrength, 0.01f, 0.0f, 3.0f);
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("God Rays##pp")) {
+        ImGui::Checkbox("Enabled##godrays", &lightScatteringEnabled);
+        ImGui::TextDisabled("Screen-space light scattering (sun must be on-screen).");
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Tone Mapping##pp")) {
+        flagBox("Enabled##tm", p.enableToneMapping);
+        ImGui::BeginDisabled(p.enableToneMapping <= 0.5f);
+        ImGui::DragFloat("Exposure", &p.exposure, 0.01f, 0.0f, 10.0f);
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("ACES filmic");
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Color Grading##pp")) {
+        flagBox("Enabled##cg", p.enableColorGrading);
+        ImGui::BeginDisabled(p.enableColorGrading <= 0.5f);
+        ImGui::DragFloat("Saturation", &p.saturation, 0.01f, 0.0f, 2.0f);
+        ImGui::DragFloat("Contrast", &p.contrast, 0.01f, 0.0f, 2.0f);
+        ImGui::DragFloat("Brightness", &p.brightness, 0.005f, -1.0f, 1.0f);
+        ImGui::DragFloat("Temperature", &p.temperature, 0.01f, -1.0f, 1.0f);
+        ImGui::DragFloat("Tint", &p.tint, 0.01f, -1.0f, 1.0f);
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Chromatic Aberration##pp")) {
+        flagBox("Enabled##ca", p.enableChromaticAberration);
+        ImGui::BeginDisabled(p.enableChromaticAberration <= 0.5f);
+        ImGui::DragFloat("Strength", &p.chromaticAberrationStrength, 0.001f, 0.0f, 0.1f, "%.4f");
+        ImGui::DragFloat("Falloff", &p.chromaticAberrationFalloff, 0.05f, 0.0f, 8.0f);
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Vignette##pp")) {
+        flagBox("Enabled##vig", p.enableVignette);
+        ImGui::BeginDisabled(p.enableVignette <= 0.5f);
+        ImGui::DragFloat("Strength", &p.vignetteStrength, 0.01f, 0.0f, 1.0f);
+        ImGui::DragFloat("Radius", &p.vignetteRadius, 0.01f, 0.0f, 1.5f);
+        ImGui::DragFloat("Softness", &p.vignetteSoftness, 0.01f, 0.0f, 1.0f);
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Stylized / Retro (Atmospheric)##pp")) {
+        flagBox("VHS (curve + tracking wobble)", p.enableVHS);
+        flagBox("CRT (barrel + scanlines)", p.enableCRT);
+        flagBox("Sobel edges", p.enableSobel);
+        bool poster = flagBox("Posterize", p.enablePosterize);
+        ImGui::BeginDisabled(!poster);
+        ImGui::DragFloat("Levels", &p.posterizeLevels, 0.5f, 2.0f, 32.0f);
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Reset to Defaults")) {
+        p = PostProcessParams{};
+        bloomEnabled = true;
+        lightScatteringEnabled = true;
+    }
 }
 
 // The Graphics section of the Engine window — restored from the pre-RHI
