@@ -1342,9 +1342,9 @@ private:
     // meshlet path: the pipelines only exist on backends whose shaders loaded.
     // Implementation lives in src/tessellation.cpp.
     // ------------------------------------------------------------------------
-    Uint32 createTessellatedMesh(const Mesh& mesh, const TessellationDesc& desc = {});
-    void destroyTessellatedMesh(Uint32 id);
-    void setTessellatedMeshTransform(Uint32 id, const glm::mat4& model);
+    Uint32 createTessellatedMesh(const Mesh& mesh, const TessellationDesc& desc = {}) override;
+    void destroyTessellatedMesh(Uint32 id) override;
+    void setTessellatedMeshTransform(Uint32 id, const glm::mat4& model) override;
     // Split when a leaf's hypotenuse projects larger than this many pixels
     // (leaf grid segments are ~1/8 of it — 64 px => ~8 px triangles).
     float tessSplitPixels = 64.0f;
@@ -1361,6 +1361,11 @@ private:
         Uint32 maxLeaves = 0;
         float displacementScale = 0.0f;
         glm::mat4 model = glm::mat4(1.0f);
+        // Terrain heightfield displacement (see TessellationDesc).
+        bool terrainHeightfield = false;
+        float terrainFrequency = 0.0007f;
+        int terrainOctaves = 9;
+        Uint32 terrainSeed = 20260705u;
         BufferHandle cbtBuffer;       // CBT storage (counts + bitfield), GPU-resident
         BufferHandle rootBuffer;      // TessRootGpu[]
         BufferHandle argsBuffer;      // TessArgs (GPU-written indirect args)

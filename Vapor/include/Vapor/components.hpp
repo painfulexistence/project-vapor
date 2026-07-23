@@ -281,8 +281,16 @@ namespace Vapor {
         glm::vec3 grassTipColor = glm::vec3(0.965f, 0.949f, 0.388f); // golden tip
         float grassWindStrength = 0.45f;
         float grassWindSpeed = 1.8f;
+        // CBT displaced tessellation (opt-in): render the terrain surface as
+        // ONE adaptively subdivided plane with true heightfield displacement
+        // (the Tess pass) instead of the streamed tile-mesh rings. Metal-only
+        // today — on backends without tessellation pipelines the classic tile
+        // path takes over automatically. Grass, scatter and height queries are
+        // unaffected (same height source either way).
+        bool cbtTessellation = false;
         bool regenerate = false;       // set true (e.g. from the inspector) to rebuild
         Hidden<std::shared_ptr<TerrainWorld>> world = {};  // owned; created by the system
+        Hidden<Uint32> tessMeshId = {};// live tess instance (0 = none); system-owned
     };
 
     // ── Weather ──────────────────────────────────────────────────────────────

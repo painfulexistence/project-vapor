@@ -479,16 +479,25 @@ namespace Vapor {
                     }
                 }
 
+                // CBT tessellation renders the surface as one displaced tess
+                // instance — tile-ring streaming is off, but scatter, grass
+                // and height queries run unchanged (same height source).
+                const bool tessTerrain = tc.tessMeshId.value != 0;
+
                 const glm::ivec2 camTile = world.worldToTile(camPos.x, camPos.z);
                 if (camTile != world.lastCamTile) {
                     world.lastCamTile = camTile;
                     // Demotions to the always-resident base coat are free —
                     // apply first so freed slots can serve incoming tiles.
-                    for (int t : world.computeTargets(camTile)) demoteToBase(reg, world, t);
+                    if (!tessTerrain) {
+                        for (int t : world.computeTargets(camTile)) demoteToBase(reg, world, t);
+                    }
                     updateScatter(reg, world, tc, camTile);
                 }
-                enqueueBuilds(world);
-                applyResults(reg, renderer, world);
+                if (!tessTerrain) {
+                    enqueueBuilds(world);
+                    applyResults(reg, renderer, world);
+                }
                 updateGrass(renderer, world, tc, camPos);
                 break;  // singleton: the first terrain entity wins
             }
@@ -637,10 +646,61 @@ namespace Vapor {
                 world->scatterMeshes.push_back(rockMesh);
             }
 
+            // CBT displaced tessellation (opt-in): hand the renderer ONE flat
+            // world-spanning plane; the Tess pass refines it adaptively on the
+            // GPU with true heightfield displacement (the same OpenSimplex2
+            // FBm field heightAt runs), terrain-aware LoD metric and palette
+            // shading. Metal-only today — createTessellatedMesh returns 0 on
+            // other backends and the classic tile rings below take over.
+            if (tc.tessMeshId.value != 0) {
+                renderer->destroyTessellatedMesh(tc.tessMeshId.value);
+                tc.tessMeshId.value = 0;
+            }
+            if (tc.cbtTessellation) {
+                std::vector<VertexData> planeVerts;
+                std::vector<Uint32> planeInds;
+                const int quads = 16;// 1536 LEB roots; maxDepth 25 reaches sub-metre leaves
+                const float halfW = 0.5f * cfg.worldSize;
+                for (int z = 0; z <= quads; z++) {
+                    for (int x = 0; x <= quads; x++) {
+                        VertexData v {};
+                        v.position = glm::vec3(-halfW + cfg.worldSize * x / static_cast<float>(quads), 0.0f,
+                                               -halfW + cfg.worldSize * z / static_cast<float>(quads));
+                        v.uv = glm::vec2(x / static_cast<float>(quads), z / static_cast<float>(quads));
+                        v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+                        v.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                        planeVerts.push_back(v);
+                    }
+                }
+                for (int z = 0; z < quads; z++) {
+                    for (int x = 0; x < quads; x++) {
+                        const Uint32 v00 = static_cast<Uint32>(z * (quads + 1) + x);
+                        const Uint32 v10 = v00 + 1;
+                        const Uint32 v01 = v00 + static_cast<Uint32>(quads + 1);
+                        const Uint32 v11 = v01 + 1;
+                        // Same winding as buildTileGeometry's tile quads.
+                        planeInds.insert(planeInds.end(), { v00, v01, v11, v00, v11, v10 });
+                    }
+                }
+                Mesh plane;// CPU-only: consumed by buildTessRoots, never staged
+                plane.vertices = planeVerts;
+                plane.indices = planeInds;
+                TessellationDesc td;
+                td.maxDepth = 25;
+                td.displacementScale = cfg.heightScale;
+                td.terrainHeightfield = true;
+                td.terrainFrequency = cfg.noiseFrequency;
+                td.terrainOctaves = cfg.noiseOctaves;
+                td.terrainSeed = cfg.seed;
+                tc.tessMeshId.value = renderer->createTessellatedMesh(plane, td);
+            }
+            const bool tessTerrain = tc.tessMeshId.value != 0;
+
             // Base coat: every tile's coarsest-LOD mesh, built in parallel and
             // staged before the first frame — the whole horizon is present at
-            // boot.
-            const int total = world->tileCount();
+            // boot. Skipped entirely when the CBT tess instance carries the
+            // surface (no tile entities exist then; streaming stays off).
+            const int total = tessTerrain ? 0 : world->tileCount();
             for (int t = 0; t < total; t++) {
                 world->baseSlots[t].mesh = std::make_shared<Mesh>();
                 scheduler.submitTask([world, t] {
@@ -664,8 +724,9 @@ namespace Vapor {
             }
 
             // Fine pools: registered once with a flat placeholder per LOD;
-            // contents are rewritten in place as the rings move.
-            for (int lod = 0; lod < TerrainWorld::LOD_COUNT - 1; lod++) {
+            // contents are rewritten in place as the rings move. (Off with the
+            // CBT tess instance, like the base coat.)
+            for (int lod = 0; !tessTerrain && lod < TerrainWorld::LOD_COUNT - 1; lod++) {
                 std::vector<VertexData> verts;
                 std::vector<Uint32> inds;
                 glm::vec3 mn, mx;

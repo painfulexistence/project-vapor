@@ -244,6 +244,10 @@ Uint32 Renderer::createTessellatedMesh(const Mesh& mesh, const TessellationDesc&
     t.maxLeaves = std::max(desc.maxLeaves, rootCount);
     t.displacementScale = desc.displacementScale;
     t.model = desc.model;
+    t.terrainHeightfield = desc.terrainHeightfield;
+    t.terrainFrequency = desc.terrainFrequency;
+    t.terrainOctaves = desc.terrainOctaves;
+    t.terrainSeed = desc.terrainSeed;
 
     // CBT storage, initialized on the CPU (roots marked + reduced) and
     // GPU-resident afterwards.
@@ -334,8 +338,12 @@ TessParamsGpu Renderer::tessFillParams(const TessInstance& t) const {
     p.splitPixels = tessSplitPixels;
     p.screenHeight = float(rhi->getSwapchainHeight());
     p.displacementScale = t.displacementScale;
-    p.flags = tessFreeze ? 1u : 0u;
+    p.flags = (tessFreeze ? kTessFlagFreeze : 0u)
+        | (t.terrainHeightfield ? kTessFlagTerrain : 0u);
     p.gridIndexCount = tessGridIndexCount;
+    p.terrainFrequency = t.terrainFrequency;
+    p.terrainSeed = t.terrainSeed;
+    p.terrainOctaves = static_cast<Uint32>(std::max(t.terrainOctaves, 1));
     return p;
 }
 

@@ -1,6 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 #include "Res/shaders/3d_common.metal"    // CameraData
+#include "Res/shaders/3d_terrain_noise.metal"  // terrain heightfield (used by 3d_tess_lib)
 #include "Res/shaders/3d_tess_lib.metal"  // CBT/LEB shared library
 
 // ============================================================================
@@ -23,6 +24,8 @@ struct TessVertexOut {
     float3 worldNormal;
     float3 worldPosition;
     float2 uv;
+    float3 terrainColor;       // TESS_FLAG_TERRAIN: palette color from height/slope
+    float terrainMix [[flat]]; // 1 = terrain shading, 0 = LoD debug hash
     uint depth [[flat]];
     uint node [[flat]];
 };
@@ -45,6 +48,8 @@ vertex TessVertexOut tessVertexMain(
         out.worldNormal = float3(0, 1, 0);
         out.worldPosition = float3(0);
         out.uv = float2(0);
+        out.terrainColor = float3(0);
+        out.terrainMix = 0.0;
         out.depth = 0u;
         out.node = 0u;
         return out;
@@ -61,8 +66,20 @@ vertex TessVertexOut tessVertexMain(
 
     // Displacement is a function of the undisplaced object-space position
     // only, so leaves sharing an edge displace its vertices identically.
+    // Terrain instances lift the vertex onto the heightfield and derive the
+    // normal + palette color from it; others keep the sin/cos placeholder.
     nrm = normalize(nrm);
-    pos += nrm * tessDisplaceAmount(pos, params.displacementScale);
+    out.terrainColor = float3(0);
+    out.terrainMix = 0.0;
+    if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
+        TessTerrainVertex tv = tessTerrainDisplace(pos, params);
+        pos = tv.pos;
+        nrm = tv.nrm;
+        out.terrainColor = tv.color;
+        out.terrainMix = 1.0;
+    } else {
+        pos += nrm * tessDisplaceAmount(pos, params.displacementScale);
+    }
 
     float4 world = params.model * float4(pos, 1.0);
     out.position = cam.proj * cam.view * world;
@@ -79,7 +96,9 @@ vertex TessVertexOut tessVertexMain(
 fragment float4 tessFragmentMain(TessVertexOut in [[stage_in]]) {
     // Debug shading, matching the meshlet path's conventions: hash color per
     // subdivision depth (the LoD visualization), simple lambert + ambient.
-    float3 base = tessHashColor(in.depth * 2654435761u);
+    // Terrain instances swap the hash for the interpolated palette color
+    // (heightfield normal computed per vertex in tessTerrainDisplace).
+    float3 base = mix(tessHashColor(in.depth * 2654435761u), in.terrainColor, in.terrainMix);
     float3 lightDir = normalize(float3(0.4, 1.0, 0.3));
     float ndl = max(dot(normalize(in.worldNormal), lightDir), 0.0);
     float3 color = base * (0.25 + 0.75 * ndl);
