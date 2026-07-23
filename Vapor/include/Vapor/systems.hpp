@@ -10,9 +10,11 @@
 #include "render_scene.hpp"
 #include "terrain_texture_gen.hpp"
 #include "terrain_world.hpp"
+#include <SDL3/SDL_filesystem.h>
 #include <entt/entt.hpp>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <random>
@@ -549,6 +551,13 @@ namespace Vapor {
             cfg.noiseFrequency = tc.noiseFrequency;
             cfg.noiseOctaves = tc.noiseOctaves;
             cfg.seed = tc.seed;
+            // Baked-tile cache: resolve a relative dir against the executable
+            // base path (SDL_GetBasePath, like Atmospheric's demo) so scene
+            // JSON stays portable and the bake never lands in a random cwd.
+            cfg.cacheDir = tc.cacheDir;
+            if (!cfg.cacheDir.empty() && !std::filesystem::path(cfg.cacheDir).is_absolute()) {
+                if (const char* base = SDL_GetBasePath()) cfg.cacheDir = std::string(base) + cfg.cacheDir;
+            }
             cfg.lod0RadiusTiles = tc.lod0RadiusTiles;
             cfg.lod1RadiusTiles = tc.lod1RadiusTiles;
             cfg.lod2RadiusTiles = tc.lod2RadiusTiles;

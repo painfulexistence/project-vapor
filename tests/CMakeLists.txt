@@ -176,6 +176,7 @@ target_compile_options(test_file_system PRIVATE ${TEST_WARNING_FLAGS})
 add_executable(test_terrain_world
     terrain_world_test.cpp
     ${CMAKE_SOURCE_DIR}/Vapor/src/terrain_world.cpp
+    ${CMAKE_SOURCE_DIR}/Vapor/src/terrain_tile_cache.cpp
 )
 target_include_directories(test_terrain_world PRIVATE
     ${CMAKE_SOURCE_DIR}/Vapor/include
@@ -189,6 +190,28 @@ target_link_libraries(test_terrain_world PRIVATE
 )
 target_compile_features(test_terrain_world PRIVATE cxx_std_20)
 target_compile_options(test_terrain_world PRIVATE ${TEST_WARNING_FLAGS})
+
+# ── Terrain tile cache tests (pure file IO + codec, no GPU) ───────────────
+# Compiles terrain_tile_cache.cpp + terrain_world.cpp directly (same no-GPU
+# pattern): the ATC1 codec round-trip, header guards and the cache-first
+# tile-build path are all plain C++.
+add_executable(test_terrain_tile_cache
+    terrain_tile_cache_test.cpp
+    ${CMAKE_SOURCE_DIR}/Vapor/src/terrain_tile_cache.cpp
+    ${CMAKE_SOURCE_DIR}/Vapor/src/terrain_world.cpp
+)
+target_include_directories(test_terrain_tile_cache PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+    ${CMAKE_SOURCE_DIR}/Vapor/include/Vapor
+    ${CMAKE_SOURCE_DIR}/Vapor/FastNoiseLite
+)
+target_link_libraries(test_terrain_tile_cache PRIVATE
+    Catch2::Catch2WithMain
+    glm::glm
+    EnTT::EnTT
+)
+target_compile_features(test_terrain_tile_cache PRIVATE cxx_std_20)
+target_compile_options(test_terrain_tile_cache PRIVATE ${TEST_WARNING_FLAGS})
 
 # ── Terrain texture generator tests (pure logic, no GPU) ──────────────────
 # Compiles terrain_texture_gen.cpp directly (same no-GPU pattern):
@@ -266,4 +289,5 @@ catch_discover_tests(test_cbt                WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_particle_system    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_particle_system>")
 catch_discover_tests(test_scene_blueprint    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_blueprint>")
 catch_discover_tests(test_terrain_world      WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_terrain_world>")
+catch_discover_tests(test_terrain_tile_cache WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_terrain_tile_cache>")
 catch_discover_tests(test_terrain_texture_gen WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_terrain_texture_gen>")

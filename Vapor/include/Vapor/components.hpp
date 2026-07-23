@@ -259,6 +259,11 @@ namespace Vapor {
         float noiseFrequency = 0.0007f;
         int noiseOctaves = 9;
         Uint32 seed = 20260705u;
+        // Baked-tile disk cache: first run generates + stores tile height
+        // grids, every run after boots from pure IO. Empty disables. Relative
+        // paths are resolved against the executable base path (SDL) by
+        // TerrainSystem, so scene JSON can just say "cache/terrain".
+        std::string cacheDir;
         int lod0RadiusTiles = 2;
         int lod1RadiusTiles = 4;
         int lod2RadiusTiles = 8;

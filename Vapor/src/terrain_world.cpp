@@ -1,5 +1,7 @@
 #include "terrain_world.hpp"
 
+#include "terrain_tile_cache.hpp"
+
 #include "FastNoiseLite.h"
 
 #include <algorithm>
@@ -23,6 +25,31 @@ void TerrainWorld::configure(const TerrainConfig& config) {
     noise->SetFractalOctaves(cfg.noiseOctaves);
     noise->SetFractalLacunarity(cfg.noiseLacunarity);
     noise->SetFractalGain(cfg.noiseGain);
+
+    // Baked-tile disk cache: hash every input that shapes the generated
+    // heights so stale bakes can never replay after a parameter change.
+    // worldSize is included (unlike Atmospheric's hash) because tile origins
+    // are offset by worldSize / 2 — resizing the world moves every tile.
+    tileCache.reset();
+    tileCacheHash = 0;
+    tileCacheHits.store(0, std::memory_order_relaxed);
+    tileCacheMisses.store(0, std::memory_order_relaxed);
+    if (!cfg.cacheDir.empty()) {
+        auto cache = std::make_shared<TerrainTileCache>(cfg.cacheDir);
+        if (cache->enabled()) {
+            Uint32 h = 0;
+            h = TerrainTileCache::hashCombine(h, &cfg.seed, sizeof(cfg.seed));
+            h = TerrainTileCache::hashCombine(h, &cfg.noiseFrequency, sizeof(cfg.noiseFrequency));
+            h = TerrainTileCache::hashCombine(h, &cfg.noiseOctaves, sizeof(cfg.noiseOctaves));
+            h = TerrainTileCache::hashCombine(h, &cfg.noiseLacunarity, sizeof(cfg.noiseLacunarity));
+            h = TerrainTileCache::hashCombine(h, &cfg.noiseGain, sizeof(cfg.noiseGain));
+            h = TerrainTileCache::hashCombine(h, &cfg.tileSize, sizeof(cfg.tileSize));
+            h = TerrainTileCache::hashCombine(h, &cfg.worldSize, sizeof(cfg.worldSize));
+            h = TerrainTileCache::hashCombine(h, &cfg.cacheVersion, sizeof(cfg.cacheVersion));
+            tileCacheHash = h;
+            tileCache = std::move(cache);
+        }
+    }
 
     tiles.assign(static_cast<size_t>(tileCount()), Tile {});
     baseSlots.assign(static_cast<size_t>(tileCount()), Slot {});
@@ -50,12 +77,41 @@ void TerrainWorld::configure(const TerrainConfig& config) {
     grassInFlight.store(0, std::memory_order_relaxed);
 }
 
-float TerrainWorld::heightAt(float x, float z) const {
+float TerrainWorld::height01At(float x, float z) const {
     // Atmospheric's default heightFn is GetNoise * 0.5 + 0.5; the streamer
     // clamps to [0,1] when it bakes tile grids, so clamp here too.
     if (!noise) return 0.0f;
-    const float h01 = glm::clamp(noise->GetNoise(x, z) * 0.5f + 0.5f, 0.0f, 1.0f);
-    return h01 * cfg.heightScale;
+    return glm::clamp(noise->GetNoise(x, z) * 0.5f + 0.5f, 0.0f, 1.0f);
+}
+
+float TerrainWorld::heightAt(float x, float z) const {
+    return height01At(x, z) * cfg.heightScale;
+}
+
+std::vector<float> TerrainWorld::tileHeightGrid(int tileX, int tileZ, int lod) const {
+    const int res = kLodRes[glm::clamp(lod, 0, LOD_COUNT - 1)];
+    const int w = res + 3;
+    std::vector<float> grid;
+    if (tileCache && tileCache->load(tileX, tileZ, lod, tileCacheHash, w, grid)) {
+        tileCacheHits.fetch_add(1, std::memory_order_relaxed);
+        return grid;
+    }
+    const float half = 0.5f * cfg.worldSize;
+    const float minX = tileX * cfg.tileSize - half;
+    const float minZ = tileZ * cfg.tileSize - half;
+    const float step = cfg.tileSize / res;
+    grid.resize(static_cast<size_t>(w) * w);
+    for (int j = 0; j < w; j++) {
+        const float wz = minZ + (j - 1) * step;
+        for (int i = 0; i < w; i++) {
+            grid[static_cast<size_t>(j) * w + i] = height01At(minX + (i - 1) * step, wz);
+        }
+    }
+    if (tileCache) {
+        tileCache->store(tileX, tileZ, lod, tileCacheHash, w, grid);
+        tileCacheMisses.fetch_add(1, std::memory_order_relaxed);
+    }
+    return grid;
 }
 
 float TerrainWorld::slopeAt(float x, float z) const {
@@ -82,6 +138,14 @@ void TerrainWorld::buildTileGeometry(int tileX, int tileZ, int lod, std::vector<
     const float step = cfg.tileSize / res;
     const float skirtDepth = 2.0f * step;  // hides LOD-boundary T-junction cracks
 
+    // One gutter grid drives heights, normals and slopes — the unit the
+    // baked-tile cache stores, so a cached tile skips synthesis entirely.
+    const std::vector<float> grid = tileHeightGrid(tileX, tileZ, lod);
+    const int w = res + 3;
+    const auto gridH = [&](int gx, int gz) {
+        return grid[static_cast<size_t>(gz + 1) * w + (gx + 1)] * cfg.heightScale;
+    };
+
     verts.clear();
     verts.reserve(static_cast<size_t>(res + 1) * (res + 1) + 4 * (res + 1));
     aabbMin = glm::vec3(minX, 1e9f, minZ);
@@ -91,9 +155,9 @@ void TerrainWorld::buildTileGeometry(int tileX, int tileZ, int lod, std::vector<
         for (int gx = 0; gx <= res; gx++) {
             const float wx = minX + gx * step;
             const float wz = minZ + gz * step;
-            const float h = heightAt(wx, wz);
-            const float hl = heightAt(wx - step, wz), hr = heightAt(wx + step, wz);
-            const float hd = heightAt(wx, wz - step), hu = heightAt(wx, wz + step);
+            const float h = gridH(gx, gz);
+            const float hl = gridH(gx - 1, gz), hr = gridH(gx + 1, gz);
+            const float hd = gridH(gx, gz - 1), hu = gridH(gx, gz + 1);
             glm::vec3 n = glm::normalize(glm::vec3(hl - hr, 2.0f * step, hd - hu));
             const float slope01 =
                 glm::clamp(std::sqrt((hr - hl) * (hr - hl) + (hu - hd) * (hu - hd)) / (4.0f * step), 0.0f, 1.0f);
@@ -278,6 +342,8 @@ TerrainWorld::Stats TerrainWorld::stats() const {
     Stats s;
     for (const Tile& t : tiles) s.lodCounts[glm::clamp(t.currentLod, 0, LOD_COUNT - 1)]++;
     s.pendingJobs = inFlight.load(std::memory_order_relaxed);
+    s.cacheHits = tileCacheHits.load(std::memory_order_relaxed);
+    s.cacheMisses = tileCacheMisses.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(resultMutex);
         s.queuedResults = static_cast<int>(results.size());

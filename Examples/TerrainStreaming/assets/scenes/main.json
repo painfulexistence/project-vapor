@@ -10,7 +10,8 @@
           "heightScale": 500.0,
           "noiseFrequency": 0.0007,
           "noiseOctaves": 9,
-          "seed": 20260705
+          "seed": 20260705,
+          "cacheDir": "cache/terrain"
         }
       }
     },

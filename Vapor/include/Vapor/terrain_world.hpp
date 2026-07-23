@@ -15,6 +15,8 @@ class FastNoiseLite;// vendored Vapor/FastNoiseLite (only terrain_world.cpp incl
 
 namespace Vapor {
 
+class TerrainTileCache;
+
 // ============================================================================
 // TerrainWorld — CPU core of the streamed heightfield terrain (the engine
 // half of Atmospheric's TerrainStreamer, rebuilt on Vapor's ECS: entities and
@@ -45,6 +47,13 @@ struct TerrainConfig {
     float noiseLacunarity = 2.0f;
     float noiseGain = 0.5f;
     Uint32 seed = 20260705u;
+    // Baked-tile disk cache (TerrainTileCache): tile height grids are read
+    // from disk when present and synthesized + stored on miss, so every boot
+    // after the first streams from pure IO. Empty disables. TerrainSystem
+    // resolves relative paths against the executable base path before the
+    // config reaches configure().
+    std::string cacheDir;
+    Uint32 cacheVersion = 1;// bump to invalidate every baked tile
     // Concentric ring radius (Chebyshev, in tiles) selecting LOD 0/1/2;
     // everything further keeps the always-resident base coat (LOD 3).
     int lod0RadiusTiles = 2;
@@ -102,6 +111,8 @@ public:
         int lodCounts[LOD_COUNT] = {};
         int pendingJobs = 0;
         int queuedResults = 0;
+        int cacheHits = 0;   // baked-tile cache: grids replayed from disk
+        int cacheMisses = 0; // ... vs synthesized (and stored) this run
     };
 
     // Rounds worldSize down to a whole number of tiles (at least 1) and
@@ -115,6 +126,13 @@ public:
     float heightAt(float x, float z) const;
     float slopeAt(float x, float z) const;
     glm::ivec2 worldToTile(float x, float z) const;
+
+    // Normalized height grid for one tile at one LOD: w = res + 3 (a 1-texel
+    // gutter each side, the geometry's normal/slope stencil), row-major with
+    // grid[j * w + i] sampling world (minX + (i-1) * step, minZ + (j-1) * step).
+    // Cache-first when a cacheDir is configured (load, or synthesize + store —
+    // the Ghost-of-Tsushima boot path); safe from task-scheduler workers.
+    std::vector<float> tileHeightGrid(int tileX, int tileZ, int lod) const;
 
     // Heightfield tile mesh: (res+1)^2 grid vertices with normals and
     // (height01, slope01) UVs, plus a two-sided skirt ring hiding
@@ -206,11 +224,19 @@ public:
     std::atomic<int> grassInFlight { 0 };
 
 private:
+    float height01At(float x, float z) const;
+
     TerrainConfig cfg;
     int tilesAxis = 20;
     // Immutable after configure(); GetNoise is const and stateless, so worker
     // jobs and main-thread queries share it without locking.
     std::shared_ptr<FastNoiseLite> noise;
+    // Baked-tile cache (null when disabled) + the parameter hash guarding it;
+    // hit/miss counters are bumped from worker jobs, read via stats().
+    std::shared_ptr<TerrainTileCache> tileCache;
+    Uint32 tileCacheHash = 0;
+    mutable std::atomic<int> tileCacheHits { 0 };
+    mutable std::atomic<int> tileCacheMisses { 0 };
 
     mutable std::mutex resultMutex;
     std::vector<BuildResult> results;

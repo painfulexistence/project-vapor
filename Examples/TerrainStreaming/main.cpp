@@ -298,9 +298,10 @@ auto main(int argc, char* args[]) -> int {
             entt::entity ce = getActiveCamera(registry);
             const glm::vec3 pos =
                 ce != entt::null ? registry.get<Vapor::VirtualCameraComponent>(ce).position : glm::vec3(0.0f);
-            fmt::print("cam ({}, {}) lod0 {} lod1 {} lod2 {} base {} pending {} queued {} scatter {}\n",
+            fmt::print("cam ({}, {}) lod0 {} lod1 {} lod2 {} base {} pending {} queued {} scatter {} cache {}/{}\n",
                        static_cast<int>(pos.x), static_cast<int>(pos.z), s.lodCounts[0], s.lodCounts[1],
-                       s.lodCounts[2], s.lodCounts[3], s.pendingJobs, s.queuedResults, scatterCount);
+                       s.lodCounts[2], s.lodCounts[3], s.pendingJobs, s.queuedResults, scatterCount,
+                       s.cacheHits, s.cacheHits + s.cacheMisses);
         }
 
         if (activeCam == entt::null) continue;
