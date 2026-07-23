@@ -3,8 +3,10 @@
 #include "asset_manager.hpp"
 #include "asset_serializer.hpp"
 #include "components.hpp"
+#include "engine_core.hpp"
 #include "file_system.hpp"
 #include "fsm.hpp"
+#include "timeline_system.hpp"
 #include "mesh_builder.hpp"
 #include "meshlet_builder.hpp"
 #include "render_scene.hpp"
@@ -356,6 +358,7 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
     const int entityBase = static_cast<int>(dst.entities.size());
     const int meshBase = static_cast<int>(dst.meshes.size());
     const int lightBase = static_cast<int>(dst.lights.size());
+    const int skeletonBase = static_cast<int>(dst.skeletons.size());
 
     for (auto& e : sub.entities) {
         e.parent = e.parent < 0 ? parentIndex : e.parent + entityBase;
@@ -363,12 +366,18 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
             m += meshBase;
         for (int& l : e.lights)
             l += lightBase;
+        // e.clips carry their tracks inline — nothing to rebase.
         dst.entities.push_back(std::move(e));
     }
     std::move(sub.meshes.begin(), sub.meshes.end(), std::back_inserter(dst.meshes));
     std::move(sub.materials.begin(), sub.materials.end(), std::back_inserter(dst.materials));
     std::move(sub.images.begin(), sub.images.end(), std::back_inserter(dst.images));
     std::move(sub.lights.begin(), sub.lights.end(), std::back_inserter(dst.lights));
+    std::move(sub.skeletons.begin(), sub.skeletons.end(), std::back_inserter(dst.skeletons));
+    for (auto& sc : sub.skeletonClips) {
+        if (sc.skeleton >= 0) sc.skeleton += skeletonBase;
+        dst.skeletonClips.push_back(std::move(sc));
+    }
     std::move(sub.sources.begin(), sub.sources.end(), std::back_inserter(dst.sources));
 }
 
@@ -664,6 +673,30 @@ entt::entity instantiate(
             }
         }
 
+        // Imported node animations → library clips + a playback component.
+        // Mirrors Atmospheric's spawn path: every clip of the node is
+        // registered and switchable by name; the first auto-plays looping, the
+        // sensible default for the common single-animation asset. Clip names
+        // are prefixed with the entity name because bare clip names collide
+        // across nodes. Skipped when no EngineCore exists (pure unit tests).
+        if (!e.clips.empty()) {
+            if (auto* core = EngineCore::Get()) {
+                auto& lib = core->getAnimationLibrary();
+                TimelinePlaybackComponent play;
+                play.clips.reserve(e.clips.size());
+                for (const auto& clip : e.clips) {
+                    ActionTimeline tl;
+                    tl.name = fmt::format("{}/{}", e.name, clip.name);
+                    tl.tracks = clip.tracks;
+                    play.clips.push_back(lib.addTimeline(std::move(tl)));
+                }
+                play.clip = play.clips.front();
+                play.wrap = WrapMode::Loop;
+                play.playing = true;
+                registry.emplace<TimelinePlaybackComponent>(ent, std::move(play));
+            }
+        }
+
         for (int li : e.lights) {
             const LightBlueprint& light = blueprint.lights[static_cast<size_t>(li)];
             switch (light.type) {
@@ -709,6 +742,31 @@ entt::entity instantiate(
         }
 
         if (outEntities) outEntities->push_back(ent);
+    }
+
+    // Imported skeletons and skeletal clips land in the library so the data
+    // survives instantiation (no skinning consumer yet). Names are prefixed
+    // with the blueprint name; a clip additionally carries its skeleton's name
+    // so the association survives the flat store.
+    if ((!blueprint.skeletons.empty() || !blueprint.skeletonClips.empty())) {
+        if (auto* core = EngineCore::Get()) {
+            auto& lib = core->getAnimationLibrary();
+            std::vector<std::string> skeletonNames(blueprint.skeletons.size());
+            for (size_t i = 0; i < blueprint.skeletons.size(); ++i) {
+                Skeleton skel = blueprint.skeletons[i];
+                skel.name = fmt::format("{}/{}", blueprint.name, skel.name);
+                skeletonNames[i] = skel.name;
+                lib.addSkeleton(std::move(skel));
+            }
+            for (const auto& sc : blueprint.skeletonClips) {
+                SkeletonClip clip = sc.clip;
+                const std::string skelName = (sc.skeleton >= 0 && sc.skeleton < (int)skeletonNames.size())
+                                                 ? skeletonNames[static_cast<size_t>(sc.skeleton)]
+                                                 : fmt::format("{}/<none>", blueprint.name);
+                clip.name = fmt::format("{}/{}", skelName, clip.name);
+                lib.addSkeletonClip(std::move(clip));
+            }
+        }
     }
 
     // Generic components, applied in a second pass now that every entity of

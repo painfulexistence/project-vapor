@@ -65,7 +65,7 @@ public:
     // per-mesh layout the blueprint cook writes changed. Bump so a stale v3 .vscene
     // (whose meshes have no meshlet fields) is rejected and re-cooked instead of
     // misreading later bytes as a meshlet count (huge alloc -> crash).
-    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 4; // v3: EntityBlueprint::primitive; v4: mesh meshletData
+    static constexpr uint32_t BLUEPRINT_FORMAT_VERSION = 5; // v3: EntityBlueprint::primitive; v4: mesh meshletData; v5: imported animations (node clips, skeletons, skeletal clips)
     static void serializeBlueprint(cereal::BinaryOutputArchive& archive, const Vapor::SceneBlueprint& blueprint);
     // Returns ok == false on a version mismatch.
     static Vapor::SceneBlueprint deserializeBlueprint(cereal::BinaryInputArchive& archive);

@@ -16,6 +16,11 @@ namespace Vapor {
     // ============================================================
     // Easing Functions
     // ============================================================
+    // TRANSITIONAL: the engine-wide easing vocabulary is now the EasingType
+    // enum + applyEasing() in easing.hpp (PoD, blueprint-serializable, and
+    // value-compatible with the Atmospheric engine / CSB numbering). The
+    // functions below remain for existing imperative Action code; prefer
+    // applyEasing(t, EasingType::...) in new code.
 
     using EasingFunc = std::function<float(float)>;
 
@@ -489,6 +494,14 @@ namespace Vapor {
      *
      * Automatically removes actions when they complete. Useful for managing
      * timed operations, animations, and delayed behaviors.
+     *
+     * BOUNDARY: ActionManager is the imperative escape hatch — code-driven,
+     * one-shot sequencing of callbacks (level scripting, engine glue). It is
+     * not the path for anything authorable or scrubbable: keyframed animation
+     * belongs in AnimationClipLibrary clips played through
+     * TimelinePlaybackComponent + TimelineSystem (see timeline_system.hpp),
+     * which support seek/reverse/serialization that a shared_ptr<Action>
+     * graph cannot.
      *
      * Supports tagging actions for grouped management (e.g., stop all animations
      * when state changes).

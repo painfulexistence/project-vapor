@@ -1,6 +1,7 @@
 #pragma once
 #include "Vapor/hidden.hpp"
 #include "Vapor/physics_3d.hpp"
+#include "Vapor/ui_document_registry.hpp"
 #include "imgui.h"
 #ifdef VAPOR_HAS_BOOST_PFR
 #include <boost/pfr.hpp>
@@ -87,6 +88,10 @@ bool drawField(std::string_view name, T& value) {
 
     } else if constexpr (std::is_same_v<V, BodyHandle> || std::is_same_v<V, TriggerHandle>) {
         ImGui::LabelText(name.data(), value.valid() ? "valid (%u)" : "invalid", value.rid);
+        return false;
+
+    } else if constexpr (std::is_same_v<V, UIDocumentHandle>) {
+        ImGui::LabelText(name.data(), value.valid() ? "doc slot %u (gen %u)" : "unloaded", value.slot, value.gen);
         return false;
 
     } else if constexpr (std::is_enum_v<V>) {

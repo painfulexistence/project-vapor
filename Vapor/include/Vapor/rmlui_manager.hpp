@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui_document_registry.hpp"
 #include <RmlUi/Core/Context.h>
 #include <RmlUi/Core/ElementDocument.h>
 #include <RmlUi/Core/Types.h>
@@ -43,7 +44,46 @@ namespace Vapor {
         // Handle window resize
         void OnResize(int width, int height);
 
-        // Document management
+        // ── Handle-based document management ─────────────────────────────
+        // Preferred API: data components hold UIDocumentHandles (value
+        // semantics, serializer/inspector-friendly), never raw document
+        // pointers. The Rml context owns the documents; the registry maps
+        // handles onto them and survives hot reloads.
+
+        // Load a document and register it. Invalid handle on failure.
+        UIDocumentHandle LoadDocumentHandle(const std::string& filename);
+
+        // Current pointer for a handle; null when the handle is stale (closed)
+        // or the last reload failed. Do not cache across frames — re-resolve.
+        Rml::ElementDocument* Resolve(UIDocumentHandle h) const {
+            return m_documents.resolve(h);
+        }
+
+        // Bumps on every reload; callers re-attach (re-query elements,
+        // re-bind listeners) when the version they attached against moved.
+        Uint32 DocumentVersion(UIDocumentHandle h) const {
+            return m_documents.version(h);
+        }
+
+        // Close the document and retire the handle in one step, so nothing can
+        // resolve the document during Rml's deferred-destruction window.
+        void CloseDocument(UIDocumentHandle h);
+
+        // Hot reload: closes the old document, loads the same path, keeps the
+        // handle stable and bumps its version. Detach pages (drop listeners /
+        // element pointers) BEFORE calling this — see PageSystem::reload.
+        void ReloadDocument(UIDocumentHandle h);
+
+        UIDocumentRegistry& documents() {
+            return m_documents;
+        }
+        const UIDocumentRegistry& documents() const {
+            return m_documents;
+        }
+
+        // ── Raw-pointer document management (transitional) ───────────────
+        // Kept for callers that manage document lifetime themselves. New code
+        // should use the handle API above.
         Rml::ElementDocument* LoadDocument(const std::string& filename);
         Rml::ElementDocument* ReloadDocument(const std::string& filename);
         void UnloadDocument(Rml::ElementDocument* document);
@@ -76,6 +116,7 @@ namespace Vapor {
     private:
         std::unique_ptr<RmlUiSystem> m_system;
         Rml::Context* m_context = nullptr;
+        UIDocumentRegistry m_documents;
 
         int m_width = 0;
         int m_height = 0;

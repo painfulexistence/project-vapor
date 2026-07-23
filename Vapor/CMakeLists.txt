@@ -78,6 +78,9 @@ add_subdirectory(MikkTSpace)
 
 set(SOURCES
     src/action_manager.cpp
+    src/animation_clip.cpp
+    src/animation_library.cpp
+    src/easing.cpp
     src/audio_engine.cpp
     src/file_system.cpp
     src/input_manager.cpp

@@ -107,6 +107,7 @@ namespace Vapor {
         }
 
         m_system.reset();
+        m_documents = {};// context teardown closed every document; all handles stale
 
         m_initialized = false;
         // spdlog::info("RmlUi shutdown complete");
@@ -126,6 +127,38 @@ namespace Vapor {
         if (m_context) {
             m_context->SetDimensions(Rml::Vector2i(width, height));
         }
+    }
+
+    auto RmlUiManager::LoadDocumentHandle(const std::string& filename) -> UIDocumentHandle {
+        Rml::ElementDocument* doc = LoadDocument(filename);
+        if (!doc) return {};
+        // Register under the AUTHORED path (not the resolved one) so reload
+        // re-runs the same FileSystem search the original load did.
+        return m_documents.insert(doc, filename);
+    }
+
+    void RmlUiManager::CloseDocument(UIDocumentHandle h) {
+        Rml::ElementDocument* doc = m_documents.resolve(h);
+        // Erase first: the handle must be stale before Close() queues the
+        // document for deferred destruction, so no one can resolve it inside
+        // that window.
+        m_documents.erase(h);
+        if (doc) doc->Close();
+    }
+
+    void RmlUiManager::ReloadDocument(UIDocumentHandle h) {
+        const std::string* path = m_documents.path(h);
+        if (!path) return;// stale handle
+        const std::string filename = *path;// copy before the slot mutates
+
+        if (Rml::ElementDocument* old = m_documents.resolve(h)) old->Close();
+
+        // Same slot, new pointer, version bump. A failed load leaves the slot
+        // resolving null; PageSystem then drops the handle and retries by path
+        // under its normal lazy-load rules, so a broken edit isn't fatal.
+        Rml::ElementDocument* fresh = LoadDocument(filename);
+        if (!fresh) fmt::print(stderr, "RmlUiManager::ReloadDocument: reload of '{}' failed\n", filename);
+        m_documents.replace(h, fresh);
     }
 
     auto RmlUiManager::LoadDocument(const std::string& filename) -> Rml::ElementDocument* {

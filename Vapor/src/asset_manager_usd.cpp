@@ -273,6 +273,94 @@ glm::mat4 toGlm(const tinyusdz::value::matrix4d& m) {
     return g;
 }
 
+// Tydra quaternions are float4 laid out (x, y, z, w); glm::quat is (w, x, y, z).
+glm::quat toGlmQuat(const tinyusdz::tydra::quat& q) {
+    return glm::quat(q[3], q[0], q[1], q[2]);
+}
+
+// ── UsdSkel → Skeleton / SkeletonClip (ported from Atmospheric prefab_usd) ────
+
+// Flatten a Tydra SkelHierarchy (a SkelNode tree; each node's `joint_id` is
+// exactly the index a mesh's skel:jointIndices reference) into the flat,
+// topologically-ordered Skeleton. `bind_transform` is the joint's world-space
+// bind pose (→ inverseBind); `rest_transform` is its parent-local rest pose
+// (→ bind-TRS fallback for channels a clip doesn't animate). Also records
+// joint_name/joint_path → joint_id so a SkelAnimation's channels (keyed by
+// joint name) can be resolved. NOTE: assumes joint_id ordering is
+// parent-before-child (the UsdSkel convention, matching the glTF path).
+void flattenSkelNode(
+    const tinyusdz::tydra::SkelNode& sn, int parentJointId, Vapor::Skeleton& skel,
+    std::map<std::string, int>& nameToId
+) {
+    if (sn.joint_id >= 0) {
+        if (sn.joint_id >= static_cast<int>(skel.joints.size())) skel.joints.resize(sn.joint_id + 1);
+        Vapor::Joint& j = skel.joints[sn.joint_id];
+        j.name = sn.joint_name.empty() ? sn.joint_path : sn.joint_name;
+        j.parent = parentJointId;
+        j.inverseBind = glm::inverse(toGlm(sn.bind_transform));
+        glm::vec3 t, s;
+        glm::quat r;
+        Vapor::decomposeTransform(toGlm(sn.rest_transform), t, r, s);
+        j.bindTranslation = t;
+        j.bindRotation = r;
+        j.bindScale = s;
+        if (!sn.joint_name.empty()) nameToId[sn.joint_name] = sn.joint_id;
+        if (!sn.joint_path.empty()) nameToId[sn.joint_path] = sn.joint_id;
+    }
+    for (const auto& c : sn.children)
+        flattenSkelNode(c, sn.joint_id, skel, nameToId);
+}
+
+// Build a SkeletonClip from a Tydra SkelAnimation. channels_map is keyed by
+// joint name; resolve each to a joint index via `nameToId` and fold the T/R/S
+// samplers into the joint's channel. A sampler with no time samples but a
+// static value contributes a single key (a posed-but-not-animated joint).
+Vapor::SkeletonClip buildSkeletonClip(
+    const tinyusdz::tydra::Animation& anim, const std::map<std::string, int>& nameToId
+) {
+    using Ch = tinyusdz::tydra::AnimationChannel;
+    Vapor::SkeletonClip clip;
+    clip.name = anim.prim_name.empty() ? anim.abs_path : anim.prim_name;
+    for (const auto& [jointName, chans] : anim.channels_map) {
+        auto idIt = nameToId.find(jointName);
+        if (idIt == nameToId.end()) continue;
+        Vapor::JointChannel jc;
+        jc.joint = idIt->second;
+        for (const auto& [ctype, ch] : chans) {
+            if (ctype == Ch::ChannelType::Translation) {
+                for (const auto& smp : ch.translations.samples)
+                    jc.translation.push_back({ smp.t, glm::vec3(smp.value[0], smp.value[1], smp.value[2]) });
+                if (ch.translations.samples.empty() && ch.translations.static_value)
+                    jc.translation.push_back({ 0.0f,
+                                               glm::vec3(
+                                                   ch.translations.static_value.value()[0],
+                                                   ch.translations.static_value.value()[1],
+                                                   ch.translations.static_value.value()[2]
+                                               ) });
+            } else if (ctype == Ch::ChannelType::Rotation) {
+                for (const auto& smp : ch.rotations.samples)
+                    jc.rotation.push_back({ smp.t, toGlmQuat(smp.value) });
+                if (ch.rotations.samples.empty() && ch.rotations.static_value)
+                    jc.rotation.push_back({ 0.0f, toGlmQuat(ch.rotations.static_value.value()) });
+            } else if (ctype == Ch::ChannelType::Scale) {
+                for (const auto& smp : ch.scales.samples)
+                    jc.scale.push_back({ smp.t, glm::vec3(smp.value[0], smp.value[1], smp.value[2]) });
+                if (ch.scales.samples.empty() && ch.scales.static_value)
+                    jc.scale.push_back({ 0.0f,
+                                         glm::vec3(
+                                             ch.scales.static_value.value()[0],
+                                             ch.scales.static_value.value()[1],
+                                             ch.scales.static_value.value()[2]
+                                         ) });
+            }
+        }
+        if (!jc.translation.empty() || !jc.rotation.empty() || !jc.scale.empty())
+            clip.channels.push_back(std::move(jc));
+    }
+    clip.recompute();
+    return clip;
+}
+
 // Extract a Tydra RenderMesh into a Vapor::Mesh, expanding to a non-indexed
 // triangle list (one vertex per face-vertex — copes with both 'vertex' and
 // 'facevarying' attribute variability). 32-bit indices, so no chunking.
@@ -493,6 +581,26 @@ auto AssetManager::loadUSD(const std::string& filename) -> Vapor::SceneBlueprint
         bp.meshes.push_back(std::move(mesh));
     }
 
+    // ── Skeletons + skeletal clips (UsdSkel → blueprint data) ────────────────
+    // rscene.skeletons and bp.skeletons stay index-parallel. A SkelHierarchy
+    // names its default SkelAnimation via anim_id; convert it once, resolving
+    // joint-name-keyed channels against the flattened skeleton. Stored for a
+    // future skinning path — node hierarchies animate today, skinned meshes
+    // don't deform yet.
+    for (size_t si = 0; si < rscene.skeletons.size(); ++si) {
+        const auto& skelH = rscene.skeletons[si];
+        Vapor::Skeleton skel;
+        skel.name = skelH.prim_name.empty() ? skelH.abs_path : skelH.prim_name;
+        std::map<std::string, int> nameToId;
+        flattenSkelNode(skelH.root_node, -1, skel, nameToId);
+        bp.skeletons.push_back(std::move(skel));
+
+        if (skelH.anim_id >= 0 && skelH.anim_id < static_cast<int>(rscene.animations.size())) {
+            Vapor::SkeletonClip clip = buildSkeletonClip(rscene.animations[skelH.anim_id], nameToId);
+            if (!clip.channels.empty()) bp.skeletonClips.push_back({ static_cast<int>(si), std::move(clip) });
+        }
+    }
+
     // ── Node hierarchy (mesh points are local; nodes carry the transforms) ───
     // Top-level entity applies the stage metadata: metersPerUnit scale and
     // upAxis rotation (Z-up / X-up -> Y-up). Read from the Stage itself —
@@ -515,6 +623,7 @@ auto AssetManager::loadUSD(const std::string& filename) -> Vapor::SceneBlueprint
 
     std::function<void(const tinyusdz::tydra::Node&, int)> buildNode = [&](const tinyusdz::tydra::Node& n,
                                                                            int parentIndex) {
+        using Ch = tinyusdz::tydra::AnimationChannel;
         Vapor::EntityBlueprint e;
         e.name = n.prim_name.empty() ? n.abs_path : n.prim_name;
         e.parent = parentIndex;
@@ -522,6 +631,58 @@ auto AssetManager::loadUSD(const std::string& filename) -> Vapor::SceneBlueprint
         if (n.nodeType == tinyusdz::tydra::NodeType::Mesh && n.id >= 0
             && n.id < static_cast<int32_t>(meshRemap.size()) && meshRemap[n.id] >= 0)
             e.meshes.push_back(meshRemap[n.id]);
+
+        // Non-skeletal node xform animation: Tydra hands back per-channel T/R/S
+        // samplers (or, occasionally, a full Transform matrix sampler which we
+        // decompose). Fold them into one clip on this node; instantiate() plays
+        // it through a TimelinePlaybackComponent.
+        if (!n.node_animations.empty()) {
+            Vapor::NodeClipBlueprint pc;
+            pc.name = "node";
+            for (const auto& ch : n.node_animations) {
+                if (ch.type == Ch::ChannelType::Translation && !ch.translations.samples.empty()) {
+                    Vapor::ActionTrack tr;
+                    tr.property = Vapor::ActionProperty::Position;
+                    for (const auto& s : ch.translations.samples)
+                        tr.keys.push_back({ s.t, glm::vec4(s.value[0], s.value[1], s.value[2], 0.0f),
+                                            Vapor::EasingType::Linear });
+                    pc.tracks.push_back(std::move(tr));
+                } else if (ch.type == Ch::ChannelType::Rotation && !ch.rotations.samples.empty()) {
+                    Vapor::ActionTrack tr;
+                    tr.property = Vapor::ActionProperty::RotationQuat;
+                    for (const auto& s : ch.rotations.samples) {
+                        const glm::quat q = toGlmQuat(s.value);
+                        tr.keys.push_back({ s.t, glm::vec4(q.x, q.y, q.z, q.w), Vapor::EasingType::Linear });
+                    }
+                    pc.tracks.push_back(std::move(tr));
+                } else if (ch.type == Ch::ChannelType::Scale && !ch.scales.samples.empty()) {
+                    Vapor::ActionTrack tr;
+                    tr.property = Vapor::ActionProperty::Scale;
+                    for (const auto& s : ch.scales.samples)
+                        tr.keys.push_back({ s.t, glm::vec4(s.value[0], s.value[1], s.value[2], 0.0f),
+                                            Vapor::EasingType::Linear });
+                    pc.tracks.push_back(std::move(tr));
+                } else if (ch.type == Ch::ChannelType::Transform && !ch.transforms.samples.empty()) {
+                    Vapor::ActionTrack tp, trk, ts;
+                    tp.property = Vapor::ActionProperty::Position;
+                    trk.property = Vapor::ActionProperty::RotationQuat;
+                    ts.property = Vapor::ActionProperty::Scale;
+                    for (const auto& s : ch.transforms.samples) {
+                        glm::vec3 t, sc;
+                        glm::quat r;
+                        Vapor::decomposeTransform(toGlm(s.value), t, r, sc);
+                        tp.keys.push_back({ s.t, glm::vec4(t, 0.0f), Vapor::EasingType::Linear });
+                        trk.keys.push_back({ s.t, glm::vec4(r.x, r.y, r.z, r.w), Vapor::EasingType::Linear });
+                        ts.keys.push_back({ s.t, glm::vec4(sc, 0.0f), Vapor::EasingType::Linear });
+                    }
+                    pc.tracks.push_back(std::move(tp));
+                    pc.tracks.push_back(std::move(trk));
+                    pc.tracks.push_back(std::move(ts));
+                }
+            }
+            if (!pc.tracks.empty()) e.clips.push_back(std::move(pc));
+        }
+
         const int selfIndex = static_cast<int>(bp.entities.size());
         bp.entities.push_back(std::move(e));
         for (const auto& c : n.children)
@@ -538,12 +699,14 @@ auto AssetManager::loadUSD(const std::string& filename) -> Vapor::SceneBlueprint
 
     bp.ok = !bp.meshes.empty();
     fmt::print(
-        "loadUSD '{}': {} entities, {} meshes, {} materials, {} images\n",
+        "loadUSD '{}': {} entities, {} meshes, {} materials, {} images, {} skeletons, {} skeletal clips\n",
         filename,
         bp.entities.size(),
         bp.meshes.size(),
         bp.materials.size(),
-        bp.images.size()
+        bp.images.size(),
+        bp.skeletons.size(),
+        bp.skeletonClips.size()
     );
     return bp;
 }

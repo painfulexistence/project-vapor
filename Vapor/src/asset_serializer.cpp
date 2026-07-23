@@ -355,6 +355,62 @@ void AssetSerializer::serializeBlueprint(cereal::BinaryOutputArchive& archive, c
         archive(e.primitive.size);
         archive(e.primitive.height);
         archive(e.primitive.material);
+
+        // v5: per-node animation clips
+        archive(static_cast<Uint32>(e.clips.size()));
+        for (const auto& clip : e.clips) {
+            archive(clip.name);
+            archive(static_cast<Uint32>(clip.tracks.size()));
+            for (const auto& track : clip.tracks) {
+                archive(static_cast<int>(track.property));
+                archive(track.customId);
+                archive(static_cast<Uint32>(track.keys.size()));
+                for (const auto& key : track.keys) {
+                    archive(key.time);
+                    archive(key.value);
+                    archive(static_cast<int>(key.easing));
+                }
+            }
+        }
+    }
+
+    // v5: skeletons + skeletal clips
+    archive(static_cast<Uint32>(blueprint.skeletons.size()));
+    for (const auto& skel : blueprint.skeletons) {
+        archive(skel.name);
+        archive(static_cast<Uint32>(skel.joints.size()));
+        for (const auto& j : skel.joints) {
+            archive(j.name);
+            archive(j.parent);
+            archive(j.bindTranslation);
+            archive(j.bindRotation);
+            archive(j.bindScale);
+            archive(j.inverseBind);
+        }
+    }
+    archive(static_cast<Uint32>(blueprint.skeletonClips.size()));
+    for (const auto& sc : blueprint.skeletonClips) {
+        archive(sc.skeleton);
+        archive(sc.clip.name);
+        archive(static_cast<Uint32>(sc.clip.channels.size()));
+        for (const auto& ch : sc.clip.channels) {
+            archive(ch.joint);
+            archive(static_cast<Uint32>(ch.translation.size()));
+            for (const auto& k : ch.translation) {
+                archive(k.time);
+                archive(k.value);
+            }
+            archive(static_cast<Uint32>(ch.rotation.size()));
+            for (const auto& k : ch.rotation) {
+                archive(k.time);
+                archive(k.value);
+            }
+            archive(static_cast<Uint32>(ch.scale.size()));
+            for (const auto& k : ch.scale) {
+                archive(k.time);
+                archive(k.value);
+            }
+        }
     }
 
     archive(blueprint.sources);
@@ -430,7 +486,101 @@ auto AssetSerializer::deserializeBlueprint(cereal::BinaryInputArchive& archive) 
         archive(e.primitive.size);
         archive(e.primitive.height);
         archive(e.primitive.material);
+
+        // v5: per-node animation clips
+        Uint32 clipCount = 0;
+        archive(clipCount);
+        e.clips.reserve(clipCount);
+        for (Uint32 c = 0; c < clipCount; ++c) {
+            Vapor::NodeClipBlueprint clip;
+            archive(clip.name);
+            Uint32 trackCount = 0;
+            archive(trackCount);
+            clip.tracks.reserve(trackCount);
+            for (Uint32 t = 0; t < trackCount; ++t) {
+                Vapor::ActionTrack track;
+                int prop = 0;
+                archive(prop);
+                track.property = static_cast<Vapor::ActionProperty>(prop);
+                archive(track.customId);
+                Uint32 keyCount = 0;
+                archive(keyCount);
+                track.keys.reserve(keyCount);
+                for (Uint32 k = 0; k < keyCount; ++k) {
+                    Vapor::ActionKey key;
+                    archive(key.time);
+                    archive(key.value);
+                    int easing = 0;
+                    archive(easing);
+                    key.easing = static_cast<Vapor::EasingType>(easing);
+                    track.keys.push_back(key);
+                }
+                clip.tracks.push_back(std::move(track));
+            }
+            e.clips.push_back(std::move(clip));
+        }
+
         blueprint.entities.push_back(std::move(e));
+    }
+
+    // v5: skeletons + skeletal clips
+    Uint32 skeletonCount = 0;
+    archive(skeletonCount);
+    blueprint.skeletons.reserve(skeletonCount);
+    for (Uint32 i = 0; i < skeletonCount; ++i) {
+        Vapor::Skeleton skel;
+        archive(skel.name);
+        Uint32 jointCount = 0;
+        archive(jointCount);
+        skel.joints.reserve(jointCount);
+        for (Uint32 j = 0; j < jointCount; ++j) {
+            Vapor::Joint joint;
+            archive(joint.name);
+            archive(joint.parent);
+            archive(joint.bindTranslation);
+            archive(joint.bindRotation);
+            archive(joint.bindScale);
+            archive(joint.inverseBind);
+            skel.joints.push_back(std::move(joint));
+        }
+        blueprint.skeletons.push_back(std::move(skel));
+    }
+    Uint32 skeletonClipCount = 0;
+    archive(skeletonClipCount);
+    blueprint.skeletonClips.reserve(skeletonClipCount);
+    for (Uint32 i = 0; i < skeletonClipCount; ++i) {
+        Vapor::SkeletonClipBlueprint sc;
+        archive(sc.skeleton);
+        archive(sc.clip.name);
+        Uint32 channelCount = 0;
+        archive(channelCount);
+        sc.clip.channels.reserve(channelCount);
+        for (Uint32 c = 0; c < channelCount; ++c) {
+            Vapor::JointChannel ch;
+            archive(ch.joint);
+            Uint32 n = 0;
+            archive(n);
+            ch.translation.resize(n);
+            for (auto& k : ch.translation) {
+                archive(k.time);
+                archive(k.value);
+            }
+            archive(n);
+            ch.rotation.resize(n);
+            for (auto& k : ch.rotation) {
+                archive(k.time);
+                archive(k.value);
+            }
+            archive(n);
+            ch.scale.resize(n);
+            for (auto& k : ch.scale) {
+                archive(k.time);
+                archive(k.value);
+            }
+            sc.clip.channels.push_back(std::move(ch));
+        }
+        sc.clip.recompute();
+        blueprint.skeletonClips.push_back(std::move(sc));
     }
 
     archive(blueprint.sources);

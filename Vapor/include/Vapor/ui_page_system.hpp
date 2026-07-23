@@ -28,10 +28,14 @@ namespace Vapor {
     // Tag: this page entity should currently be displayed
     struct UIVisibleTag {};
 
-    // RmlUI document path + loaded state for one page entity
+    // RmlUI document reference for one page entity. Pure data: the document
+    // itself is owned by the Rml context and named by handle — never by raw
+    // pointer — so the component stays value-semantic (blueprint-authorable,
+    // PFR-inspectable, copyable without aliasing a lifetime it doesn't own).
     struct UIDocumentComponent {
         std::string path;
-        Rml::ElementDocument* doc = nullptr;
+        UIDocumentHandle doc;       // runtime; resolved through RmlUiManager each frame
+        Uint32 seenVersion = 0;     // document version the page last attached against (0 = never)
         bool lazyLoad = false;
         bool lastSentVisible = false;
     };
@@ -56,20 +60,40 @@ namespace Vapor {
                 auto& doc = view.get<UIDocumentComponent>(entity);
                 auto& behavior = view.get<UIPageBehaviorComponent>(entity);
 
-                if (!doc.doc) {
+                if (!doc.doc.valid()) {
                     bool shouldLoad = !doc.lazyLoad || reg.all_of<UIVisibleTag>(entity);
                     if (shouldLoad) {
-                        auto* d = rml->LoadDocument(doc.path);
-                        if (!d) {
+                        doc.doc = rml->LoadDocumentHandle(doc.path);
+                        if (!doc.doc.valid()) {
                             fmt::print(stderr, "PageSystem: failed to load '{}'\n", doc.path);
                             continue;
                         }
-                        doc.doc = d;
-                        behavior.page->onAttach(d, reg);
                     }
                 }
 
-                if (!doc.doc) continue;
+                if (!doc.doc.valid()) continue;
+
+                // Re-resolve every frame: the handle, not the pointer, is the
+                // stable identity. Null means the document was closed behind us
+                // (or a hot reload failed) — drop the handle so the lazy rules
+                // above decide whether to load again next frame.
+                Rml::ElementDocument* d = rml->Resolve(doc.doc);
+                if (!d) {
+                    if (doc.seenVersion != 0) behavior.page->onDetach();
+                    doc.doc = {};
+                    doc.seenVersion = 0;
+                    continue;
+                }
+
+                // First attach and every hot reload land here: the registry
+                // bumps the version when the pointer changes, and the page
+                // re-resolves its element caches / listeners in onAttach.
+                const Uint32 ver = rml->DocumentVersion(doc.doc);
+                if (ver != doc.seenVersion) {
+                    if (doc.seenVersion != 0) behavior.page->onDetach();
+                    behavior.page->onAttach(d, reg);
+                    doc.seenVersion = ver;
+                }
 
                 bool visible = reg.all_of<UIVisibleTag>(entity);
                 if (visible != doc.lastSentVisible) {
@@ -82,6 +106,24 @@ namespace Vapor {
 
                 behavior.page->onUpdate(dt);
             }
+        }
+
+        // Hot-reload one page's document in place. The page is detached FIRST
+        // (its bind() listeners are removed while the old elements are alive),
+        // then the manager swaps the document under the same handle; the next
+        // update() sees the version bump and re-attaches against the new DOM.
+        static void reload(entt::registry& reg, RmlUiManager* rml, PageID id) {
+            if (!rml) return;
+            auto e = findEntity(reg, id);
+            if (e == entt::null) return;
+            auto* doc = reg.try_get<UIDocumentComponent>(e);
+            auto* behavior = reg.try_get<UIPageBehaviorComponent>(e);
+            if (!doc || !doc->doc.valid()) return;
+            if (behavior && behavior->page && doc->seenVersion != 0) {
+                behavior->page->onDetach();
+                doc->seenVersion = 0;
+            }
+            rml->ReloadDocument(doc->doc);
         }
 
         static void show(entt::registry& reg, PageID id) {

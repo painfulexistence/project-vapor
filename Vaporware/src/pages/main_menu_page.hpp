@@ -1,11 +1,8 @@
 #pragma once
 #include "page.hpp"
 #include "page_system.hpp"
-#include <RmlUi/Core/EventListener.h>
 #include <functional>
 #include <fmt/core.h>
-#include <memory>
-#include <vector>
 
 class MainMenuPage : public Page {
 public:
@@ -14,11 +11,9 @@ public:
 
     void onAttach(Rml::ElementDocument* doc, entt::registry& reg) override {
         Page::onAttach(doc, reg);
-        bind(doc->GetElementById("btn-start"), [this] { onStartGame_(); });
-        bind(doc->GetElementById("btn-quit"),  [this] { onQuit_(); });
+        bind("btn-start", [this] { onStartGame_(); });
+        bind("btn-quit",  [this] { onQuit_(); });
     }
-
-    void onDetach() override { listeners_.clear(); }
 
     void onUpdate(float dt) override {
         if (!doc_) return;
@@ -62,19 +57,6 @@ public:
     }
 
 private:
-    struct ClickListener : Rml::EventListener {
-        std::function<void()> fn;
-        void ProcessEvent(Rml::Event&) override { fn(); }
-    };
-
-    void bind(Rml::Element* el, std::function<void()> fn) {
-        auto l = std::make_unique<ClickListener>();
-        l->fn = std::move(fn);
-        el->AddEventListener(Rml::EventId::Click, l.get());
-        listeners_.emplace_back(el, std::move(l));
-    }
-
-    std::vector<std::pair<Rml::Element*, std::unique_ptr<ClickListener>>> listeners_;
     std::function<void()> onStartGame_;
     std::function<void()> onQuit_;
 

@@ -1,6 +1,8 @@
 #pragma once
-#include "graphics.hpp"// Image, Material, Mesh
+#include "animation_clip.hpp"// ActionTrack, SkeletonClip (imported animations)
+#include "graphics.hpp"      // Image, Material, Mesh
 #include "hidden.hpp"
+#include "skeleton.hpp"
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <functional>
@@ -84,6 +86,15 @@ struct PrimitiveBlueprint {
     int material = -1;  // index into SceneBlueprint::materials, -1 = default
 };
 
+// One node-transform animation clip authored on an entity (glTF animations[]
+// channels targeting a non-joint node; USD xform time samples). instantiate()
+// registers each as an ActionTimeline in the AnimationClipLibrary and gives
+// the entity a TimelinePlaybackComponent.
+struct NodeClipBlueprint {
+    std::string name;
+    std::vector<ActionTrack> tracks;
+};
+
 struct EntityBlueprint {
     std::string name;
     glm::vec3 position{ 0.0f };
@@ -92,6 +103,7 @@ struct EntityBlueprint {
     int parent = -1;        // index into SceneBlueprint::entities, -1 = top level
     std::vector<int> meshes;// indices into SceneBlueprint::meshes
     std::vector<int> lights;// indices into SceneBlueprint::lights
+    std::vector<NodeClipBlueprint> clips;// per-node animation clips (glTF/USD)
     PrimitiveBlueprint primitive;
 
     // Authoring references, expanded by loadSceneBlueprint (kept afterwards as
@@ -108,6 +120,15 @@ struct EntityBlueprint {
     std::string componentsJson;
 };
 
+// A skeletal animation clip plus the skeleton it drives (index into
+// SceneBlueprint::skeletons). Registered into the AnimationClipLibrary at
+// instantiate() time; the skinning render path that will consume them is
+// future work — importing preserves the data either way.
+struct SkeletonClipBlueprint {
+    int skeleton = -1;
+    SkeletonClip clip;
+};
+
 struct SceneBlueprint {
     std::string name;
     std::vector<EntityBlueprint> entities;// flat, parent-indexed; parents precede children
@@ -117,6 +138,8 @@ struct SceneBlueprint {
     std::vector<std::shared_ptr<Material>> materials;
     std::vector<std::shared_ptr<Image>> images;
     std::vector<LightBlueprint> lights;
+    std::vector<Skeleton> skeletons;             // glTF skins / UsdSkel hierarchies
+    std::vector<SkeletonClipBlueprint> skeletonClips;// skeletal animations
 
     // Every file this blueprint was expanded from (the scene JSON itself is not
     // listed; source models and nested prefab JSONs are). Input set for the

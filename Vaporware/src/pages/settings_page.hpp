@@ -1,10 +1,7 @@
 #pragma once
 #include "page.hpp"
 #include "page_system.hpp"
-#include <RmlUi/Core/EventListener.h>
 #include <functional>
-#include <memory>
-#include <vector>
 
 class SettingsPage : public Page {
 public:
@@ -12,14 +9,12 @@ public:
 
     void onAttach(Rml::ElementDocument* doc, entt::registry& reg) override {
         Page::onAttach(doc, reg);
-        bind(doc->GetElementById("tab-audio"),    [this] { switchTab(Tab::Audio); });
-        bind(doc->GetElementById("tab-video"),    [this] { switchTab(Tab::Video); });
-        bind(doc->GetElementById("tab-controls"), [this] { switchTab(Tab::Controls); });
-        bind(doc->GetElementById("btn-back"),     [this, &reg] { PageSystem::pop(reg); });
+        bind("tab-audio",    [this] { switchTab(Tab::Audio); });
+        bind("tab-video",    [this] { switchTab(Tab::Video); });
+        bind("tab-controls", [this] { switchTab(Tab::Controls); });
+        bind("btn-back",     [this, &reg] { PageSystem::pop(reg); });
         switchTab(activeTab_);
     }
-
-    void onDetach() override { listeners_.clear(); }
 
     void onUpdate(float dt) override {
         if (!doc_) return;
@@ -77,20 +72,6 @@ private:
         }
     }
 
-    struct ClickListener : Rml::EventListener {
-        std::function<void()> fn;
-        void ProcessEvent(Rml::Event&) override { fn(); }
-    };
-
-    void bind(Rml::Element* el, std::function<void()> fn) {
-        if (!el) return;
-        auto l = std::make_unique<ClickListener>();
-        l->fn = std::move(fn);
-        el->AddEventListener(Rml::EventId::Click, l.get());
-        listeners_.emplace_back(el, std::move(l));
-    }
-
-    std::vector<std::pair<Rml::Element*, std::unique_ptr<ClickListener>>> listeners_;
     Tab activeTab_ = Tab::Audio;
 
     enum class State { Hidden, FadingIn, Visible, FadingOut };

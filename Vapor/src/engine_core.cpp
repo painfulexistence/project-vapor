@@ -64,6 +64,9 @@ namespace Vapor {
         // Initialize action manager
         _actionManager = std::make_unique<ActionManager>();
 
+        // Initialize the shared animation clip store
+        _animationLibrary = std::make_unique<AnimationClipLibrary>();
+
         // Initialize input manager
         _inputManager = std::make_unique<InputManager>();
 
@@ -108,6 +111,7 @@ namespace Vapor {
         _audioEngine->shutdown();
         _audioEngine.reset();
         _inputManager.reset();
+        _animationLibrary.reset();
         _actionManager.reset();
         _resourceManager.reset();
         _taskScheduler->shutdown();

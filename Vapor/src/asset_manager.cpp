@@ -24,6 +24,7 @@
 #include <tiny_gltf.h>
 
 #include "graphics.hpp"
+#include <algorithm>
 #include <cstring>
 #include <functional>
 
@@ -359,6 +360,163 @@ auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprin
         bp.lights.push_back(light);
     }
 
+    // ── Animation import (nodes + skeletons) ─────────────────────────────────
+    // Ported from Atmospheric's prefab_gltf: skins become Skeletons, animation
+    // channels split by target — joint channels fold into SkeletonClips (data
+    // preserved for a future skinning path), non-joint channels become per-node
+    // ActionTrack clips that instantiate() plays through TimelinePlaybackComponent.
+
+    // Scalar/mat4 accessor readers for animation samplers (readVec3/readVec4
+    // above cover the vector outputs).
+    const auto readScalars = [&](const tinygltf::Accessor& acc) {
+        const auto& bv = model.bufferViews[acc.bufferView];
+        const auto& buf = model.buffers[bv.buffer];
+        const size_t stride = bv.byteStride ? bv.byteStride : sizeof(float);
+        const uint8_t* base = buf.data.data() + bv.byteOffset + acc.byteOffset;
+        std::vector<float> out(acc.count);
+        for (size_t i = 0; i < acc.count; i++)
+            out[i] = *reinterpret_cast<const float*>(base + i * stride);
+        return out;
+    };
+    const auto readMat4 = [&](const tinygltf::Accessor& acc) {
+        const auto& bv = model.bufferViews[acc.bufferView];
+        const auto& buf = model.buffers[bv.buffer];
+        const size_t stride = bv.byteStride ? bv.byteStride : sizeof(float) * 16;
+        const uint8_t* base = buf.data.data() + bv.byteOffset + acc.byteOffset;
+        std::vector<glm::mat4> out(acc.count);
+        for (size_t i = 0; i < acc.count; i++)
+            std::memcpy(&out[i], base + i * stride, sizeof(float) * 16);// column-major, matches glm::mat4
+        return out;
+    };
+
+    // node → parent node (glTF stores only children); needed to map joint parents.
+    std::vector<int> nodeParent(model.nodes.size(), -1);
+    for (size_t ni = 0; ni < model.nodes.size(); ++ni)
+        for (int c : model.nodes[ni].children)
+            if (c >= 0 && c < static_cast<int>(nodeParent.size())) nodeParent[c] = static_cast<int>(ni);
+
+    // glTF skins[] → blueprint Skeletons.
+    std::unordered_map<int, std::pair<int, int>> jointOfNode;// joint node → {skin, jointIndex}
+    for (size_t si = 0; si < model.skins.size(); ++si) {
+        const auto& sk = model.skins[si];
+        Skeleton skel;
+        skel.name = sk.name.empty() ? fmt::format("{}_skin{}", filePath.stem().string(), si) : sk.name;
+        std::unordered_map<int, int> localNodeToJoint;
+        for (size_t ji = 0; ji < sk.joints.size(); ++ji)
+            localNodeToJoint[sk.joints[ji]] = static_cast<int>(ji);
+        std::vector<glm::mat4> ibm;
+        if (sk.inverseBindMatrices >= 0) ibm = readMat4(model.accessors[sk.inverseBindMatrices]);
+        // NOTE: assumes glTF lists joints parent-before-child (the common case),
+        // matching Skeleton's single-pass hierarchy accumulation contract.
+        for (size_t ji = 0; ji < sk.joints.size(); ++ji) {
+            const int nodeIdx = sk.joints[ji];
+            const tinygltf::Node& jn = model.nodes[nodeIdx];
+            Joint joint;
+            joint.name = jn.name;
+            if (jn.translation.size() == 3)
+                joint.bindTranslation = { (float)jn.translation[0], (float)jn.translation[1],
+                                          (float)jn.translation[2] };
+            if (jn.scale.size() == 3) joint.bindScale = { (float)jn.scale[0], (float)jn.scale[1], (float)jn.scale[2] };
+            if (jn.rotation.size() == 4)// glTF quat is (x,y,z,w); glm::quat is (w,x,y,z)
+                joint.bindRotation =
+                    glm::quat((float)jn.rotation[3], (float)jn.rotation[0], (float)jn.rotation[1], (float)jn.rotation[2]);
+            joint.inverseBind = (ji < ibm.size()) ? ibm[ji] : glm::mat4(1.0f);
+            auto pit = localNodeToJoint.find(nodeParent[nodeIdx]);
+            joint.parent = (pit != localNodeToJoint.end()) ? pit->second : -1;
+            skel.joints.push_back(std::move(joint));
+            jointOfNode[nodeIdx] = { static_cast<int>(si), static_cast<int>(ji) };
+        }
+        bp.skeletons.push_back(std::move(skel));
+    }
+
+    // Animations: split joint channels (→ SkeletonClip) from node channels.
+    std::unordered_map<int, std::vector<NodeClipBlueprint>> animByNode;
+    std::vector<std::unordered_map<std::string, SkeletonClip>> skinClips(model.skins.size());// [skin][name]
+    for (size_t ai = 0; ai < model.animations.size(); ++ai) {
+        const auto& anim = model.animations[ai];
+        const std::string clipName = anim.name.empty() ? fmt::format("anim_{}", ai) : anim.name;
+        for (const auto& ch : anim.channels) {
+            if (ch.target_node < 0 || ch.sampler < 0) continue;
+            const std::string& channelPath = ch.target_path;// translation / rotation / scale / weights
+            const auto& samp = anim.samplers[ch.sampler];
+            if (samp.input < 0 || samp.output < 0) continue;
+            const std::vector<float> times = readScalars(model.accessors[samp.input]);
+            // CUBICSPLINE packs (inTangent, value, outTangent) per key → take the
+            // value, treat as linear; STEP is also approximated as linear.
+            const bool cubic = samp.interpolation == "CUBICSPLINE";
+            const auto& outAcc = model.accessors[samp.output];
+
+            auto jit = jointOfNode.find(ch.target_node);
+            if (jit != jointOfNode.end()) {
+                // Skeletal: fold into the skin's clip as a per-joint channel.
+                const int si = jit->second.first, jointIdx = jit->second.second;
+                SkeletonClip& sc = skinClips[si][clipName];
+                sc.name = clipName;
+                JointChannel* jc = nullptr;
+                for (auto& c : sc.channels)
+                    if (c.joint == jointIdx) {
+                        jc = &c;
+                        break;
+                    }
+                if (!jc) {
+                    sc.channels.push_back(JointChannel{ jointIdx, {}, {}, {} });
+                    jc = &sc.channels.back();
+                }
+                if (channelPath == "rotation") {
+                    for (size_t k = 0; k < times.size(); ++k) {
+                        const size_t vi = cubic ? k * 3 + 1 : k;
+                        if (vi >= outAcc.count) break;
+                        const glm::vec4 q = readVec4(outAcc, vi);
+                        jc->rotation.push_back({ times[k], glm::quat(q.w, q.x, q.y, q.z) });
+                    }
+                } else if (channelPath == "translation" || channelPath == "scale") {
+                    auto& dst = (channelPath == "translation") ? jc->translation : jc->scale;
+                    for (size_t k = 0; k < times.size(); ++k) {
+                        const size_t vi = cubic ? k * 3 + 1 : k;
+                        if (vi >= outAcc.count) break;
+                        dst.push_back({ times[k], readVec3(outAcc, vi) });
+                    }
+                }
+                continue;
+            }
+
+            // Plain node animation (non-joint) → ActionTrack keys.
+            ActionProperty prop;
+            if (channelPath == "translation")
+                prop = ActionProperty::Position;
+            else if (channelPath == "scale")
+                prop = ActionProperty::Scale;
+            else if (channelPath == "rotation")
+                prop = ActionProperty::RotationQuat;
+            else
+                continue;// weights (morph targets) unsupported
+            ActionTrack track;
+            track.property = prop;
+            for (size_t k = 0; k < times.size(); ++k) {
+                const size_t vi = cubic ? k * 3 + 1 : k;
+                if (vi >= outAcc.count) break;
+                if (prop == ActionProperty::RotationQuat) {
+                    track.keys.push_back({ times[k], readVec4(outAcc, vi), EasingType::Linear });
+                } else {
+                    const glm::vec3 v = readVec3(outAcc, vi);
+                    track.keys.push_back({ times[k], glm::vec4(v, 0.0f), EasingType::Linear });
+                }
+            }
+            if (track.keys.empty()) continue;
+            auto& clips = animByNode[ch.target_node];
+            auto it = std::find_if(clips.begin(), clips.end(), [&](const NodeClipBlueprint& c) {
+                return c.name == clipName;
+            });
+            if (it == clips.end())
+                clips.push_back({ clipName, { std::move(track) } });
+            else
+                it->tracks.push_back(std::move(track));
+        }
+    }
+    for (size_t si = 0; si < skinClips.size(); ++si)
+        for (auto& [nm, sc] : skinClips[si])
+            bp.skeletonClips.push_back({ static_cast<int>(si), std::move(sc) });
+
     // Mesh cache: GLTF mesh index -> blueprint mesh indices. Multiple nodes
     // referencing the same GLTF mesh share the decoded primitives, so repeated
     // use stays one geometry registration (GPU instancing at draw time).
@@ -515,6 +673,7 @@ auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprin
         if (srcNode.mesh >= 0) e.meshes = processMesh(srcNode.mesh);
         if (srcNode.light >= 0 && srcNode.light < static_cast<int>(bp.lights.size()))
             e.lights.push_back(srcNode.light);
+        if (auto animIt = animByNode.find(nodeIdx); animIt != animByNode.end()) e.clips = std::move(animIt->second);
 
         const int selfIndex = static_cast<int>(bp.entities.size());
         bp.entities.push_back(std::move(e));
@@ -527,12 +686,14 @@ auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprin
 
     bp.ok = true;
     fmt::print(
-        "loadGLTF '{}': {} entities, {} meshes, {} materials, {} lights\n",
+        "loadGLTF '{}': {} entities, {} meshes, {} materials, {} lights, {} skeletons, {} skeletal clips\n",
         filename,
         bp.entities.size(),
         bp.meshes.size(),
         bp.materials.size(),
-        bp.lights.size()
+        bp.lights.size(),
+        bp.skeletons.size(),
+        bp.skeletonClips.size()
     );
     return bp;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "action_manager.hpp"
+#include "animation_library.hpp"
 #include "audio_engine.hpp"
 #include "fsm.hpp"
 #include "fsm_system.hpp"
@@ -39,9 +40,25 @@ namespace Vapor {
             return *_resourceManager;
         }
 
-        // Get the action manager
+        // Get the action manager (imperative, code-driven sequencing). For
+        // data-driven / authorable animation use the clip library + timeline
+        // playback below instead.
         ActionManager& getActionManager() {
             return *_actionManager;
+        }
+
+        // Shared animation clip store (timelines, skeletons, skeletal clips).
+        // Filled by the model importers at instantiate() time and by game code;
+        // sampled by TimelineSystem::update (called from the game loop, which
+        // owns the registry).
+        AnimationClipLibrary& getAnimationLibrary() {
+            return *_animationLibrary;
+        }
+
+        // Global + per-group timeline playback rates, passed to
+        // TimelineSystem::update by the game loop.
+        TimelineTimeScales& getTimelineScales() {
+            return _timelineScales;
         }
 
         // Get the input manager
@@ -95,6 +112,8 @@ namespace Vapor {
         std::unique_ptr<TaskScheduler> _taskScheduler;
         std::unique_ptr<ResourceManager> _resourceManager;
         std::unique_ptr<ActionManager> _actionManager;
+        std::unique_ptr<AnimationClipLibrary> _animationLibrary;
+        TimelineTimeScales _timelineScales;
         std::unique_ptr<InputManager> _inputManager;
         std::unique_ptr<AudioEngine> _audioEngine;
         std::unique_ptr<VideoRecorder> _videoRecorder;

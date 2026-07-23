@@ -156,6 +156,33 @@ target_link_libraries(test_ui_system PRIVATE
 target_compile_features(test_ui_system PRIVATE cxx_std_20)
 target_compile_options(test_ui_system PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── UI document registry tests (pure bookkeeping, no Rml init) ────────────
+add_executable(test_ui_document_registry
+    ui_document_registry_test.cpp
+)
+target_include_directories(test_ui_document_registry PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+)
+target_link_libraries(test_ui_document_registry PRIVATE
+    Catch2::Catch2WithMain
+)
+target_compile_features(test_ui_document_registry PRIVATE cxx_std_20)
+target_compile_options(test_ui_document_registry PRIVATE ${TEST_WARNING_FLAGS})
+
+# ── Timeline playback tests (clip sampling, wrap modes, FSM events) ───────
+add_executable(test_timeline_system
+    timeline_system_test.cpp
+)
+target_link_libraries(test_timeline_system PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    glm::glm
+    fmt::fmt
+    EnTT::EnTT
+)
+target_compile_features(test_timeline_system PRIVATE cxx_std_20)
+target_compile_options(test_timeline_system PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── FileSystem unit tests (path resolution, priority, add/remove) ─────────
 add_executable(test_file_system
     file_system_test.cpp

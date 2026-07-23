@@ -24,6 +24,7 @@
 #include "Vapor/render_scene.hpp"
 #include "Vapor/scene_blueprint.hpp"
 #include "Vapor/systems.hpp"
+#include "Vapor/timeline_system.hpp"
 #include <RmlUi/Core/ElementDocument.h>
 #include <entt/entt.hpp>
 
@@ -937,6 +938,12 @@ auto main(int argc, char* args[]) -> int {
         BodyCreateSystem::update(registry, physics.get());
         BodyDestroySystem::update(registry, physics.get());
         physics->process(registry, deltaTime);
+        // Timeline playback (imported glTF/USD node animations + game clips)
+        // writes local TRS, so it must run before TransformSystem propagates
+        // world transforms.
+        Vapor::TimelineSystem::update(
+            registry, engineCore->getAnimationLibrary(), deltaTime, &engineCore->getTimelineScales()
+        );
         Vapor::TransformSystem::update(registry);
         // Pause freezes the GPU sim (renderer) and the CPU-side emitter/reclaim
         // timers (skip the system entirely) so nothing advances while paused.
