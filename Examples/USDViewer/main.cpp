@@ -8,17 +8,19 @@
 // meshes/materials/images = payload) and instantiate() turns it into entt
 // entities that draw as GPU instances.
 //
-// Two demo assets:
-//   - assets/models/cube.usda — tiny committed sample, always loaded.
-//   - assets/models/kitchen/Kitchen_set.usd — Pixar's Kitchen_set, the real
-//     composition stress test. Not committed (large); fetch it with
-//     scripts/downloadUSDSamples.sh, and OnLoad imports it when present.
-//     Kitchen_set is authored in centimetres but omits the metersPerUnit
-//     stage metadatum, so the importer applies no unit scale — the root
-//     entity is scaled to metres here, like the original demo.
+// An ImGui model picker lists the .usd/.usda/.usdc/.usdz files under Res/models
+// (via FileSystem::list) and swaps to the one you click. The model lives in one
+// slot: picking destroys the current model's entity subtree and instantiates the
+// new one — no accumulation. A failed import just leaves the slot empty.
 //
-// Controls: WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.
-// (--vulkan / --metal pick the backend.)
+// Models (fetch the big ones with scripts/downloadUSDSamples.sh):
+//   - models/cube.usda — tiny committed sample.
+//   - models/kitchen/Kitchen_set.usd — Pixar's Kitchen_set. Authored in
+//     centimetres but omits the metersPerUnit metadatum, so the importer applies
+//     no unit scale — its root entity is scaled to metres on load.
+//
+// Controls: WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit; click a
+// model in the picker. (--vulkan / --metal pick the backend.)
 // ============================================================================
 
 #include "Vapor/asset_manager.hpp"
@@ -38,6 +40,9 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 #include "backends/imgui_impl_sdl3.h"
 #include "imgui.h"
@@ -106,6 +111,29 @@ entt::entity importModel(entt::registry& registry, RenderScene& scene, const std
     return Vapor::instantiate(registry, scene, bp, entt::null, name);
 }
 
+// Destroy a model's whole entity subtree. instantiate() links every entity to
+// its root via TransformComponent.parent, so collect the transitive closure of
+// entities parented (directly or indirectly) to `root`, then destroy them.
+// (The model's geometry stays in the RenderScene's append-only pool — it just
+// stops drawing, since draw() is driven by the surviving MeshRendererComponents.)
+void destroyModel(entt::registry& reg, entt::entity root) {
+    if (root == entt::null || !reg.valid(root)) return;
+    std::unordered_set<entt::entity> kill{ root };
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (auto e : reg.view<Vapor::TransformComponent>()) {
+            if (kill.count(e)) continue;
+            const entt::entity p = reg.get<Vapor::TransformComponent>(e).parent;
+            if (p != entt::null && kill.count(p)) {
+                kill.insert(e);
+                grew = true;
+            }
+        }
+    }
+    for (auto e : kill)
+        if (reg.valid(e)) reg.destroy(e);
+}
+
 }  // namespace
 
 auto main(int argc, char* args[]) -> int {
@@ -166,24 +194,43 @@ auto main(int argc, char* args[]) -> int {
     entt::registry registry;
 
     // ---- USD content -------------------------------------------------------
-    // The committed sample cube is always present; Pixar's Kitchen_set loads
-    // when the user has downloaded it (see the header comment).
-    importModel(registry, *scene, "models/cube.usda", "cube");
-    const std::string kitchen = "models/kitchen/Kitchen_set.usd";
-    if (FileSystem::instance().resolvePath(kitchen)) {
-        entt::entity root = importModel(registry, *scene, kitchen, "Kitchen_set");
-        if (root != entt::null) {
-            // Kitchen_set is centimetres with no metersPerUnit metadatum, so
-            // the importer applies no unit scale; bring it to metres here.
-            if (auto* t = registry.try_get<Vapor::TransformComponent>(root)) {
+    // The model lives in one swappable slot driven by the ImGui picker below.
+    // maxDepth=1 lists top-level models plus a sub-folder's entry file
+    // (kitchen/Kitchen_set.usd) without flooding the list with Kitchen_set's
+    // hundreds of referenced prop .usd files.
+    const std::vector<std::string> models =
+        FileSystem::instance().list("models", "usd;usda;usdc;usdz", 1);
+    entt::entity modelRoot = entt::null;
+    int currentIndex = -1;   // model currently on screen
+    int selectedIndex = -1;  // set by the picker; applied before the next frame
+
+    // Replace the on-screen model with models[idx]. A failed import leaves the
+    // slot empty (no crash). Destroying the old subtree stops it drawing; its
+    // geometry stays in the RenderScene's append-only pool.
+    auto swapTo = [&](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(models.size())) return;
+        if (modelRoot != entt::null) {
+            destroyModel(registry, modelRoot);
+            modelRoot = entt::null;
+        }
+        modelRoot = importModel(registry, *scene, models[idx], models[idx]);
+        if (modelRoot != entt::null && models[idx].find("Kitchen_set") != std::string::npos) {
+            // Kitchen_set is centimetres with no metersPerUnit metadatum, so the
+            // importer applies no unit scale; bring it to metres.
+            if (auto* t = registry.try_get<Vapor::TransformComponent>(modelRoot)) {
                 t->scale = glm::vec3(0.01f);
                 t->isDirty = true;
             }
         }
-    } else {
-        fmt::print("Kitchen_set not found — run scripts/downloadUSDSamples.sh to fetch it "
-                   "(showing the sample cube instead)\n");
-    }
+        // importModel appended the new geometry to the staging lists; upload it.
+        renderer->stage(scene);
+        scene->stagedMeshes.clear();
+        scene->stagedMeshTransforms.clear();
+        currentIndex = idx;
+        selectedIndex = idx;
+    };
+    if (models.empty())
+        fmt::print("No models found under Res/models — run scripts/downloadUSDSamples.sh.\n");
 
     // ---- Environment -------------------------------------------------------
     {
@@ -215,10 +262,31 @@ auto main(int argc, char* args[]) -> int {
         fly.pitch = 12.0f;  // slightly down
     }
 
-    // Everything imported above lands in the staging list; register it once.
-    renderer->stage(scene);
-    scene->stagedMeshes.clear();
-    scene->stagedMeshTransforms.clear();
+    // Load the first model as the initial view (swapTo stages it); the ImGui
+    // picker swaps thereafter. Nothing to draw yet if the list is empty.
+    if (!models.empty()) {
+        swapTo(0);
+    } else {
+        renderer->stage(scene);
+        scene->stagedMeshes.clear();
+        scene->stagedMeshTransforms.clear();
+    }
+
+    // Model picker — an ImGui list. Clicking an entry requests a swap that is
+    // applied before the next frame (not from inside this callback, which runs
+    // mid-frame during invokeImGuiCallback).
+    renderer->setImGuiCallback([&] {
+        ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(300, 0), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Models");
+        if (models.empty()) {
+            ImGui::TextUnformatted("No models under Res/models");
+        } else {
+            for (int i = 0; i < static_cast<int>(models.size()); ++i)
+                if (ImGui::Selectable(models[i].c_str(), i == currentIndex)) selectedIndex = i;
+        }
+        ImGui::End();
+    });
 
     fmt::print("USDViewer loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
 
@@ -282,6 +350,9 @@ auto main(int argc, char* args[]) -> int {
         camData.nearPlane = cam.near;
         camData.farPlane = cam.far;
         camData.position = cam.position;
+
+        // Apply a picker request from last frame's ImGui, before the frame opens.
+        if (selectedIndex != currentIndex) swapTo(selectedIndex);
 
         renderer->beginFrame(camData);
         ImGui::NewFrame();
