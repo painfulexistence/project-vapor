@@ -7700,7 +7700,7 @@ void Renderer::drawPostProcessImGui() {
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("Stylized / Retro (Atmospheric)##pp")) {
-        flagBox("VHS (curve + wobble + glitch)", p.enableVHS);
+        flagBox("VHS (jitter + dropout + tape noise)", p.enableVHS);
         flagBox("CRT (barrel + scanlines)", p.enableCRT);
         flagBox("Sobel edges", p.enableSobel);
         bool poster = flagBox("Posterize", p.enablePosterize);

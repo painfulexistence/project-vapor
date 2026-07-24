@@ -98,53 +98,37 @@ float3 adjustContrast(float3 color, float contrast) {
     return (color - 0.5) * contrast + 0.5;
 }
 
-// ─── Stylized-effect helpers (ported from Atmospheric post_composite.frag) ───
+// ─── Stylized-effect helpers ────────────────────────────────────────────────
 
-// GLSL-style mod: matches glsl mod() for negative operands (fmod does not).
-static inline float glmod(float x, float y) { return x - y * floor(x / y); }
-
-static inline float onOff(float a, float b, float c, float t) {
-    return step(c, sin(t + a * cos(t * b)));
-}
-
-// Hash noise in [0,1) — shared by the VHS glitch stripes and the film grain.
-// Classic sin-hash: sin() bounds the value before the large multiply, so it
-// stays well-conditioned for big pixel-coordinate inputs (film grain) unlike a
-// fract(p*k) hash, which bands at high resolution.
+// Hash noise in [0,1). Classic sin-hash: sin() bounds the value before the
+// large multiply, so it stays well-conditioned for big pixel-coordinate inputs
+// (film grain) unlike a fract(p*k) hash, which bands at high resolution.
 static inline float hash21(float2 p) {
     return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
 }
 
-// Ryk's ramp: a soft band peaking between [start, end] in y.
-static inline float vhsRamp(float y, float start, float end) {
-    float inside = step(start, y) - step(end, y);
-    float fact = (y - start) / (end - start) * inside;
-    return (1.0 - fact) * inside;
+// Smooth 1D value noise built from the hash (used by the VHS emulation).
+static inline float vhsSmoothNoise(float x, float seed) {
+    float i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(hash21(float2(i, seed)), hash21(float2(i + 1.0, seed)), f);
 }
 
-// Scrolling glitch stripes (Ryk VCR "stripes") — the noisy horizontal dropout
-// bands that were missing from the first port.
-static inline float vhsStripes(float2 uv, float t) {
-    float band = vhsRamp(glmod(uv.y * 4.0 + t / 2.0 + sin(t + sin(t * 0.63)), 1.0), 0.5, 0.6);
-    float noi = hash21(uv * float2(12.0, 4.0) + float2(1.0, t));
-    return band * noi;
+// Per-scanline horizontal jitter: two sway frequencies plus a random per-band
+// drift, giving the unstable-head wobble.
+static inline float vhsLineJitter(float y, float t) {
+    return sin(y * 11.0  - t * 2.3) * 0.0035
+         + sin(y * 140.0 + t * 7.0) * 0.0012
+         + (vhsSmoothNoise(y * 9.0 + t * 0.8, 17.0) - 0.5) * 0.02;
 }
 
-static inline float2 vhsScreenDistort(float2 uv) {
-    uv -= 0.5;
-    uv = uv * 1.2 * (1.0 / 1.2 + 2.0 * uv.x * uv.x * uv.y * uv.y);
-    return uv + 0.5;
-}
-
-static inline float2 vhsTracking(float2 uv, float t) {
-    float2 look = uv;
-    float wy = look.y - glmod(t / 4.0, 1.0);
-    float window = 1.0 / (1.0 + 20.0 * wy * wy);
-    look.x += sin(look.y * 10.0 + t) / 50.0 * onOff(4.0, 4.0, 0.3, t) * (1.0 + cos(t * 80.0)) * window;
-    float vShift = 0.4 * onOff(2.0, 3.0, 0.9, t) *
-                   (sin(t) * sin(t * 20.0) + (0.5 + 0.1 * sin(t * 200.0) * cos(t)));
-    look.y = glmod(look.y + vShift, 1.0);
-    return look;
+// Scrolling tape dropout: a soft band sweeping down the frame, broken by
+// speckle so it reads as signal loss rather than a clean bar.
+static inline float vhsDropout(float2 uv, float t) {
+    float sweep = fract(t * 0.19 + vhsSmoothNoise(t, 5.0) * 0.3);
+    float band  = smoothstep(0.05, 0.0, abs(uv.y - sweep));
+    float speckle = step(0.55, hash21(float2(floor(uv.x * 120.0), floor(uv.y * 240.0) + floor(t * 24.0))));
+    return band * speckle;
 }
 
 // 3x3 Sobel gradient magnitude of the screen texture's luminance.
@@ -176,21 +160,28 @@ fragment float4 fragmentMain(
     float2 uv = in.uv;
 
     // ========================================================================
-    // VHS: screen curvature + tracking wobble (Atmospheric port). The
-    // vignette/stripe factors come from the curved uv and apply post-tonemap.
+    // VHS (original implementation): per-line horizontal jitter warps the uv
+    // before sampling; the tape artifacts (scanlines, dropout, hiss, chroma
+    // bleed, desat, vignette) are gathered here and composited post-tonemap.
     // ========================================================================
-    float vhsVignette = 1.0;
-    float vhsStripe   = 1.0;
-    float vhsGlitch   = 0.0;
+    float  vhsScan   = 1.0;            // scanline brightness modulation
+    float3 vhsAdd    = float3(0.0);    // additive tape artifacts (dropout/hiss)
+    float  vhsVig    = 1.0;            // soft edge vignette
+    float  vhsDesat  = 0.0;            // desaturation amount
+    float  vhsChroma = 0.0;            // horizontal chroma-bleed offset
     if (params.enableVHS > 0.5) {
-        uv = vhsScreenDistort(uv);
-        float vigAmt = 3.0 + 0.3 * sin(params.time + 5.0 * cos(params.time * 5.0));
-        vhsVignette = (1.0 - vigAmt * (uv.y - 0.5) * (uv.y - 0.5)) *
-                      (1.0 - vigAmt * (uv.x - 0.5) * (uv.x - 0.5));
-        vhsStripe   = (12.0 + glmod(uv.y * 30.0 + params.time, 1.0)) / 13.0;
-        // Glitch dropout bands from the curved-but-untracked uv (Ryk stripes).
-        vhsGlitch   = vhsStripes(uv, params.time);
-        uv = vhsTracking(uv, params.time);
+        float t = params.time;
+        uv.x += vhsLineJitter(uv.y, t);
+        vhsScan = 0.88 + 0.12 * sin(uv.y * 720.0);
+        float drop = vhsDropout(uv, t);
+        float hiss = hash21(float2(uv.x * 640.0, floor(uv.y * 480.0) + floor(t * 30.0))) - 0.5;
+        float headSwitch = smoothstep(0.05, 0.0, uv.y) *
+                           (hash21(float2(uv.x * 200.0, floor(t * 30.0))) - 0.2);
+        vhsAdd = float3(drop * 0.5 + hiss * 0.10 + headSwitch * 0.6);
+        vhsDesat = 0.15;
+        float2 vd = uv - 0.5;
+        vhsVig = 1.0 - dot(vd, vd) * 0.5;
+        vhsChroma = 0.004;
     }
 
     // ========================================================================
@@ -219,6 +210,8 @@ fragment float4 fragmentMain(
     float2 rOff = caDirection * caAmount;
     float2 bOff = -caDirection * caAmount;
     if (params.enableCRT > 0.5) { rOff += float2(0.001, 0.0); bOff += float2(-0.001, 0.0); }
+    // VHS chroma bleed: a purely horizontal R/B smear (low chroma bandwidth).
+    if (params.enableVHS > 0.5) { rOff.x += vhsChroma; bOff.x -= vhsChroma; }
 
     // Sample RGB channels with offset
     float2 uvR = uv + rOff;
@@ -276,9 +269,13 @@ fragment float4 fragmentMain(
         color *= vignette;
     }
 
-    // VHS overlays: additive glitch stripes, then vignette + scanline modulation.
-    color += vhsGlitch;
-    color *= vhsVignette * vhsStripe;
+    // VHS overlays (LDR): desaturate, scanlines, additive tape artifacts, edge
+    // vignette. All factors are neutral (no-ops) when VHS is disabled.
+    float vhsLum = dot(color, float3(0.2126, 0.7152, 0.0722));
+    color = mix(color, float3(vhsLum), vhsDesat);
+    color *= vhsScan;
+    color += vhsAdd;
+    color *= vhsVig;
     if (params.enableCRT > 0.5) color += sin(uv.y * 800.0 + params.time * 10.0) * 0.04;
 
     // Film grain (LDR, screen-space). Static by default; Animated reseeds each
