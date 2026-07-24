@@ -5463,6 +5463,19 @@ namespace {
                       uint32_t(z) * 83492791u ^ seed);
     }
     float cnFloat(uint32_t h) { return float(h & 0xFFFFFFu) / 16777216.0f; }
+
+    // float32 -> float16 (round-to-zero, denormals flushed) for the R16F bakes.
+    // 8-bit volumes banded visibly: the shader's coverage remap stretches the
+    // top of the value range ~4x, magnifying 1/255 steps into blocky contours.
+    uint16_t cnHalf(float f) {
+        uint32_t x; std::memcpy(&x, &f, 4);
+        uint32_t sign = (x >> 16) & 0x8000u;
+        int32_t  e = int32_t((x >> 23) & 0xFFu) - 127 + 15;
+        uint32_t m = (x >> 13) & 0x3FFu;
+        if (e <= 0) return uint16_t(sign);
+        if (e >= 31) return uint16_t(sign | 0x7C00u);
+        return uint16_t(sign | (uint32_t(e) << 10) | m);
+    }
     int cnWrap(int c, int period) { return ((c % period) + period) % period; }
 
     // Worley distance over a wrapped lattice of `period` cells; p in cell units.
@@ -5514,7 +5527,7 @@ void Renderer::createCloudNoiseTextures() {
     // shapeUV*4/8/16 shader math, so one tile spans 1.0 of the shape UV.
     {
         const int N = 128;
-        std::vector<uint8_t> data(size_t(N) * N * N);
+        std::vector<uint16_t> data(size_t(N) * N * N);
         size_t i = 0;
         for (int z = 0; z < N; ++z)
         for (int y = 0; y < N; ++y)
@@ -5526,19 +5539,19 @@ void Renderer::createCloudNoiseTextures() {
             float w3 = 1.0f - tileableWorley(uvw * 16.0f, 16, 0xC3u);
             float fbm = w1 * 0.625f + w2 * 0.25f + w3 * 0.125f;
             float v = glm::clamp((perlin - (fbm - 1.0f)) / (1.0f - (fbm - 1.0f)), 0.0f, 1.0f);
-            data[i] = uint8_t(v * 255.0f + 0.5f);
+            data[i] = cnHalf(v);
         }
         TextureDesc d;
         d.width = N; d.height = N; d.depth = N;
-        d.format = PixelFormat::R8_UNORM;
+        d.format = PixelFormat::R16_FLOAT;
         d.usage = TextureUsage::Sampled;
         cloudShapeNoiseTex = rhi->createTexture(d);
-        rhi->updateTexture(cloudShapeNoiseTex, data.data(), data.size());
+        rhi->updateTexture(cloudShapeNoiseTex, data.data(), data.size() * sizeof(uint16_t));
     }
     // Detail 32^3: Worley FBM erosion at 2/4/8 cells per tile (old detailUV*2/4/8).
     {
         const int N = 32;
-        std::vector<uint8_t> data(size_t(N) * N * N);
+        std::vector<uint16_t> data(size_t(N) * N * N);
         size_t i = 0;
         for (int z = 0; z < N; ++z)
         for (int y = 0; y < N; ++y)
@@ -5548,14 +5561,14 @@ void Renderer::createCloudNoiseTextures() {
             float d2 = 1.0f - tileableWorley(uvw * 4.0f, 4, 0xE5u);
             float d3 = 1.0f - tileableWorley(uvw * 8.0f, 8, 0xF6u);
             float v = glm::clamp(d1 * 0.625f + d2 * 0.25f + d3 * 0.125f, 0.0f, 1.0f);
-            data[i] = uint8_t(v * 255.0f + 0.5f);
+            data[i] = cnHalf(v);
         }
         TextureDesc d;
         d.width = N; d.height = N; d.depth = N;
-        d.format = PixelFormat::R8_UNORM;
+        d.format = PixelFormat::R16_FLOAT;
         d.usage = TextureUsage::Sampled;
         cloudDetailNoiseTex = rhi->createTexture(d);
-        rhi->updateTexture(cloudDetailNoiseTex, data.data(), data.size());
+        rhi->updateTexture(cloudDetailNoiseTex, data.data(), data.size() * sizeof(uint16_t));
     }
     // Weather map 512^2 RGBA8, tiling every 1.0 of weather UV (20 km world):
     // R = coverage base (domain-warped FBM — fronts/streets/clear gaps instead

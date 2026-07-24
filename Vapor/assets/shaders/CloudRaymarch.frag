@@ -196,7 +196,9 @@ vec2 sampleWeather(vec3 worldPos) {
     // so macro shapes lag the internal churn); small time term keeps the
     // pattern evolving. Coverage/type come pre-shaped from the weather map.
     vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
-    vec2 w = texture(weatherMapTex, weatherUV).rg;
+    // Half frequency (40 km tile): the 20 km tile repeated 3-5x to the
+    // horizon and the eye locked onto the pattern.
+    vec2 w = texture(weatherMapTex, weatherUV * 0.5).rg;
     return vec2(w.r * cloudCoverage, w.g);
 }
 
@@ -308,16 +310,18 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     float transmittance = 1.0;
     float cosTheta = dot(rayDir, sunDirection);
 
-    // Quadratic step distribution: fine steps near the ray entry, coarse far.
-    // From the ground the entry is the cloud base (sharper bottoms); INSIDE the
-    // layer the entry is the camera (t0 = 0) — the fly-through case, where the
-    // old uniform rayLength/N gave ~km steps that mushed everything nearby.
-    // Each step integrates over its actual length dt (Beer-Lambert is
-    // length-aware, so the integral stays correct under the warp).
+    // Step distribution: UNIFORM when viewing the layer from outside (the far
+    // steps of a quadratic warp are ~2x coarser, and their larger per-frame
+    // jitter showed as vertical shudder whenever camera rotation invalidated
+    // the temporal history), QUADRATIC (fine near the camera) only when inside
+    // the layer — the fly-through case, where near-field detail is what
+    // matters and the in-cloud view masks far-step jitter. Each step
+    // integrates over its actual length dt, so Beer-Lambert stays correct.
+    float warpPow = (tRange.x <= 0.001) ? 2.0 : 1.0;
     float tPrev = tRange.x;
     for (uint i = 0u; i < primarySteps; i++) {
         float u = (float(i) + blueNoise) / float(primarySteps);
-        float t = tRange.x + rayLength * u * u;
+        float t = tRange.x + rayLength * pow(u, warpPow);
         float dt = max(t - tPrev, 1e-3);
         tPrev = t;
 

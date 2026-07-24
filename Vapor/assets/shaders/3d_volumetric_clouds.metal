@@ -163,7 +163,7 @@ float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data,
 float2 sampleWeather(float3 worldPos, constant VolumetricCloudData& data,
                      texture2d<float, access::sample> weatherTex) {
     float2 weatherUV = (worldPos.xz + data.windOffset.xz * 0.6) * 0.00005 + data.time * 0.0002;
-    float2 w = weatherTex.sample(cloudNoiseSampler, weatherUV).rg;
+    float2 w = weatherTex.sample(cloudNoiseSampler, weatherUV * 0.5).rg;  // 40 km tile
     return float2(w.r * data.cloudCoverage, w.g);
 }
 
@@ -346,14 +346,14 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // View-sun angle for lighting
     float cosTheta = dot(rayDir, data.sunDirection);
 
-    // Quadratic step distribution (twin of CloudRaymarch.frag): fine steps at
-    // the ray entry — the cloud base from the ground, the CAMERA when flying
-    // inside the layer — coarse toward the exit. Each step integrates over its
-    // actual length dt, so Beer-Lambert stays correct under the warp.
+    // Step distribution (twin of CloudRaymarch.frag): UNIFORM from outside the
+    // layer (quadratic far-step jitter showed as shudder under rotation),
+    // QUADRATIC fine-near-camera only when inside — the fly-through case.
+    float warpPow = (tRange.x <= 0.001) ? 2.0 : 1.0;
     float tPrev = tRange.x;
     for (uint i = 0; i < data.primarySteps; i++) {
         float u = (float(i) + blueNoise) / float(data.primarySteps);
-        float t = tRange.x + rayLength * u * u;
+        float t = tRange.x + rayLength * pow(u, warpPow);
         float dt = max(t - tPrev, 1e-3);
         tPrev = t;
 

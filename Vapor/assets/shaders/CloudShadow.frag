@@ -122,7 +122,7 @@ float sampleCloudShape(vec3 worldPos) {
 
 vec2 sampleWeather(vec3 worldPos) {
     vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
-    vec2 w = texture(weatherMapTex, weatherUV).rg;
+    vec2 w = texture(weatherMapTex, weatherUV * 0.5).rg;  // 40 km tile (raymarch twin)
     return vec2(w.r * cloudCoverage, w.g);
 }
 
