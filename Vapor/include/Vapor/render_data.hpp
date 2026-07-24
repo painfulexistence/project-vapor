@@ -34,6 +34,10 @@ struct Drawable {
     glm::mat4 transform;
     MeshId mesh = INVALID_MESH_ID;
     MaterialId material = INVALID_MATERIAL_ID;
+    // Shadow passes (PSSM cascades + near map) skip drawables with this off.
+    // For dense decorative geometry (the MicroVoxel demo's quad flora) the
+    // caster set shrinks by hundreds of draws per cascade.
+    bool castShadow = true;
     glm::vec3 aabbMin;
     glm::vec3 aabbMax;
     glm::vec4 color = glm::vec4(1.0f);
@@ -403,6 +407,42 @@ struct alignas(16) VolumeRenderData {
     glm::vec4 sunDirection = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);  // xyz
     glm::vec4 sunColor = glm::vec4(1.0f, 1.0f, 1.0f, 12.0f); // xyz; w = sunIntensity
     glm::vec4 params = glm::vec4(48.0f, 8.0f, 0.0f, 0.0f);   // x = steps, y = shadow steps
+};
+
+// MicroVoxel raymarch (sparse-brick voxel volumes). vec4-only layout so the
+// MSL and std430 twins are byte-identical (MicroVoxel.frag /
+// 3d_microvoxel.metal). Padded to a 256-byte stride so per-volume slices of
+// one buffer can be bound at offsets that satisfy every backend's storage
+// buffer offset alignment.
+struct alignas(16) MicroVoxelRenderData {
+    glm::mat4 viewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f, 0.0f, 0.0f, 256.0f);  // xyz; w = maxRaySteps
+    glm::vec4 volumeOrigin = glm::vec4(0.0f, 0.0f, 0.0f, 0.05f);     // xyz world min corner; w = voxelSize
+    glm::vec4 gridDim = glm::vec4(256.0f, 256.0f, 256.0f, 4.0f);     // xyz voxel counts; w = emissiveStrength
+    glm::vec4 sunDirection = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);      // xyz toward the sun; w = shadowEnabled
+    glm::vec4 sunColor = glm::vec4(1.0f, 0.95f, 0.85f, 10.0f);       // xyz; w = sunIntensity
+    glm::vec4 ambientSky = glm::vec4(0.55f, 0.7f, 0.95f, 0.5f);      // xyz; w = ambientIntensity
+    glm::vec4 ambientGround = glm::vec4(0.25f, 0.22f, 0.2f, 1.0f);   // xyz; w = albedo hash variation
+    glm::vec4 params = glm::vec4(0.7f, 0.0f, 1.0f, 0.0f);            // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
+    // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
+    // (offsets into the shared voxel buffers; exact in float well past any
+    // realistic table size — everything stays vec4 for the MSL/std430 twins).
+    glm::vec4 extra0 = glm::vec4(0.0f);
+    glm::vec4 _pad[3] = {};
+};
+static_assert(sizeof(MicroVoxelRenderData) == 256,
+              "MicroVoxelRenderData must stay at the 256-byte per-volume stride the shaders assume");
+
+// MicroVoxel traced-GI shared params (MicroVoxelGI.comp / MicroVoxelAtrous.comp
+// / MicroVoxelGIComposite.frag and their MSL twins in 3d_microvoxel_gi.metal).
+struct alignas(16) MicroVoxelGIRenderData {
+    glm::mat4 invViewProj = glm::mat4(1.0f);
+    glm::mat4 prevViewProj = glm::mat4(1.0f);
+    glm::vec4 cameraPosition = glm::vec4(0.0f);      // xyz; w = frameIndex
+    glm::vec4 prevCameraPosition = glm::vec4(0.0f);  // xyz; w = temporal blend (history weight)
+    glm::vec4 params = glm::vec4(1.0f, -1.0f, 0.0f, 0.0f);  // x = giStrength, y = splitX, z = giWidth, w = giHeight
+    glm::vec4 sigmas = glm::vec4(0.5f, 64.0f, 8.0f, 0.0f);  // x = depth, y = normal, z = luma, w = GI debug view
+    glm::vec4 counts = glm::vec4(0.0f);  // x = volumeCount, y = crossVolume (0/1)
 };
 
 // CPU-side contract for the artist-facing volumetric-cloud tunables — the

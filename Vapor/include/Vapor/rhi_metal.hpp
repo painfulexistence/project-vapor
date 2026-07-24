@@ -119,6 +119,7 @@ public:
     void drawIndexedIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
     void drawIndirect(BufferHandle argsBuffer, size_t offset, Uint32 drawCount, Uint32 stride) override;
     void drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY = 1, Uint32 groupCountZ = 1) override;
+    void drawMeshTasksIndirect(BufferHandle argsBuffer, size_t offset) override;
 
     // Indirect command buffers + bindless texture tables (see rhi.hpp).
     IndirectCommandBufferHandle createIndirectCommandBuffer(Uint32 maxCommands) override;
@@ -151,6 +152,7 @@ public:
     void setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) override;
     void setComputeBytes(const void* data, size_t size, Uint32 binding) override;
     void dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) override;
+    void dispatchIndirect(BufferHandle argsBuffer, size_t offset) override;
     void setScissor(int32_t x, int32_t y, Uint32 width, Uint32 height) override;
 
     // ========================================================================

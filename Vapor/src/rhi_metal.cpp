@@ -1610,6 +1610,20 @@ void RHI_Metal::drawMeshTasks(Uint32 groupCountX, Uint32 groupCountY, Uint32 gro
         MTL::Size::Make(currentMeshThreads, 1, 1));
 }
 
+void RHI_Metal::drawMeshTasksIndirect(BufferHandle argsBuffer, size_t offset) {
+    if (!currentRenderEncoder || !currentPipelineIsMesh) return;
+    auto argsIt = buffers.find(argsBuffer.id);
+    if (argsIt == buffers.end()) return;
+    // Task-grid size {x,y,z} is read from the args buffer on the GPU; the
+    // threadgroup shapes still come from the bound pipeline's desc, exactly
+    // as in the direct call above.
+    currentRenderEncoder->drawMeshThreadgroups(
+        argsIt->second.buffer.get(),
+        static_cast<NS::UInteger>(offset),
+        MTL::Size::Make(currentTaskThreads, 1, 1),
+        MTL::Size::Make(currentMeshThreads, 1, 1));
+}
+
 void RHI_Metal::setFragmentBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
     auto it = buffers.find(buffer.id);
     if (it != buffers.end() && currentRenderEncoder) {
@@ -2437,4 +2451,20 @@ void RHI_Metal::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCou
         MTL::Size threadgroups(groupCountX, groupCountY, groupCountZ);
         currentComputeEncoder->dispatchThreadgroups(threadgroups, threadsPerGroup);
     }
+}
+
+void RHI_Metal::dispatchIndirect(BufferHandle argsBuffer, size_t offset) {
+    if (!currentComputeEncoder) return;
+    auto argsIt = buffers.find(argsBuffer.id);
+    if (argsIt == buffers.end()) return;
+    // Threadgroup counts come from the args buffer (written by an earlier
+    // dispatch); the threadgroup shape still comes from the bound pipeline's
+    // desc, same as dispatch() above.
+    MTL::Size threadsPerGroup(1, 1, 1);
+    auto it = computePipelines.find(currentComputePipeline.id);
+    if (it != computePipelines.end()) {
+        threadsPerGroup = MTL::Size(it->second.tgX, it->second.tgY, it->second.tgZ);
+    }
+    currentComputeEncoder->dispatchThreadgroups(
+        argsIt->second.buffer.get(), static_cast<NS::UInteger>(offset), threadsPerGroup);
 }

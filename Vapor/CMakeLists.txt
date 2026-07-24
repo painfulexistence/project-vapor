@@ -98,8 +98,10 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
+    src/voxel_world.cpp
     # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
     src/renderer.cpp
+    src/tessellation.cpp
     src/rhi_vulkan.cpp
     src/rml_renderer_rhi.cpp
     src/render_scene.cpp
