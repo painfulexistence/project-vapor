@@ -44,6 +44,8 @@ layout(std430, set = 1, binding = 0) readonly buffer PostBuf {
     // TV signal glitch.
     float enableGlitch;
     float glitchIntensity;
+    // Edge view (gradient magnitude replaces the image).
+    float enableEdges;
 };
 
 vec3 aces(vec3 x) {
@@ -89,13 +91,14 @@ float vhsLineJitter(float y, float t) {
          + (vhsSmoothNoise(y * 9.0 + t * 0.8, 17.0) - 0.5) * 0.02;
 }
 
-// Scrolling tape dropout: a soft band sweeping down the frame, broken by
-// speckle so it reads as signal loss rather than a clean bar.
+// Tape dropout: brief BRIGHT HORIZONTAL streaks where the head loses contact.
+// A rare subset of scanlines lights up with a moving bright dash along x — real
+// VHS dropout runs along the scanline, not as a grid of square blocks.
 float vhsDropout(vec2 uv, float t) {
-    float sweep = fract(t * 0.19 + vhsSmoothNoise(t, 5.0) * 0.3);
-    float band  = smoothstep(0.05, 0.0, abs(uv.y - sweep));
-    float speckle = step(0.55, hash21(vec2(floor(uv.x * 120.0), floor(uv.y * 240.0) + floor(t * 24.0))));
-    return band * speckle;
+    float ly   = floor(uv.y * 240.0);
+    float lit  = step(0.978, hash21(vec2(ly, floor(t * 10.0))));
+    float dash = smoothstep(0.5, 0.95, vhsSmoothNoise(uv.x * 40.0 - t * 6.0, ly));
+    return lit * dash;
 }
 
 // TV signal glitch: bursty blocky horizontal displacement + RGB tearing.
@@ -130,6 +133,15 @@ float sobelMagnitude(vec2 uv) {
     float gx = -tl + tr - 2.0 * l + 2.0 * r - bl + br;
     float gy = -tl - 2.0 * tp - tr + bl + 2.0 * bt + br;
     return sqrt(gx * gx + gy * gy);
+}
+
+// Edge view: per-channel gradient magnitude (central differences). Replaces the
+// image with an outline; distinct from the Sobel overlay above.
+vec3 edgeGradient(vec2 uv) {
+    vec2 ts = 1.0 / vec2(textureSize(texScreen, 0));
+    vec3 hgr = texture(texScreen, uv + vec2(ts.x, 0.0)).rgb - texture(texScreen, uv - vec2(ts.x, 0.0)).rgb;
+    vec3 vgr = texture(texScreen, uv + vec2(0.0, ts.y)).rgb - texture(texScreen, uv - vec2(0.0, ts.y)).rgb;
+    return sqrt(hgr * hgr + vgr * vgr);
 }
 
 void main() {
@@ -231,7 +243,11 @@ void main() {
         color = adjustContrast(color, contrast);
     }
 
-    // Posterize (Atmospheric port; quantize LDR into N steps).
+    // Edge view: replace the image with its gradient (outline). Distinct from
+    // Sobel (overlay). Later stylizations still apply on top.
+    if (enableEdges > 0.5) color = edgeGradient(uv);
+
+    // Posterize (quantize LDR into N steps).
     if (enablePosterize > 0.5) {
         float lv = max(posterizeLevels, 1.0);
         color = floor(color * lv) / lv;

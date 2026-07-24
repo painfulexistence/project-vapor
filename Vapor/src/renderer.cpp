@@ -7645,6 +7645,7 @@ void Renderer::drawPostProcessImGui() {
     flagBox("VHS", p.enableVHS);           ImGui::SameLine();
     flagBox("CRT", p.enableCRT);           ImGui::SameLine();
     flagBox("Sobel", p.enableSobel);       ImGui::SameLine();
+    flagBox("Edges", p.enableEdges);       ImGui::SameLine();
     flagBox("Posterize", p.enablePosterize); ImGui::SameLine();
     flagBox("Film Grain", p.enableFilmGrain); ImGui::SameLine();
     flagBox("Glitch", p.enableGlitch);
@@ -7708,7 +7709,8 @@ void Renderer::drawPostProcessImGui() {
         ImGui::DragFloat("Glitch intensity", &p.glitchIntensity, 0.02f, 0.0f, 3.0f);
         ImGui::EndDisabled();
         ImGui::TextDisabled("VHS / CRT / Glitch stack — enable any combination.");
-        flagBox("Sobel edges", p.enableSobel);
+        flagBox("Sobel edges (overlay on image)", p.enableSobel);
+        flagBox("Edges (outline only, replaces image)", p.enableEdges);
         bool poster = flagBox("Posterize", p.enablePosterize);
         ImGui::BeginDisabled(!poster);
         ImGui::DragFloat("Levels", &p.posterizeLevels, 0.5f, 2.0f, 32.0f);

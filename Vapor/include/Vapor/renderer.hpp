@@ -733,6 +733,9 @@ private:
         // displacement + RGB tearing.
         float enableGlitch = 0.0f;
         float glitchIntensity = 1.0f;
+        // Edge view: replace the image with its gradient magnitude (outline
+        // look). Distinct from Sobel, which overlays edges on the image.
+        float enableEdges = 0.0f;
     };
     PostProcessParams postProcessParams;
     BufferHandle postProcessParamsBuffer;  // Vulkan PostProcess.frag set1 b0

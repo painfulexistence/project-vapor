@@ -2414,6 +2414,7 @@ public:
             float filmGrainAnimated;
             float enableGlitch;
             float glitchIntensity;
+            float enableEdges;
         } gpuParams = { r.postProcessParams.chromaticAberrationStrength,
                         r.postProcessParams.chromaticAberrationFalloff,
                         r.postProcessParams.vignetteStrength,
@@ -2429,7 +2430,8 @@ public:
                         0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
                         5.0f, 0.0f,               // posterizeLevels, time
                         0.0f, 0.05f, 0.0f,        // film grain: off, strength, static
-                        0.0f, 1.0f };             // glitch: off, intensity
+                        0.0f, 1.0f,               // glitch: off, intensity
+                        0.0f };                   // edges off
 
         // Create render pass descriptor
         auto postPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
@@ -7006,6 +7008,7 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
             float filmGrainAnimated;
             float enableGlitch;
             float glitchIntensity;
+            float enableEdges;
         } params = {
             0.0f, // chromaticAberrationStrength
             0.0f, // chromaticAberrationFalloff
@@ -7022,7 +7025,8 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
             0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
             5.0f, 0.0f,               // posterizeLevels, time
             0.0f, 0.05f, 0.0f,        // film grain: off, strength, static
-            0.0f, 1.0f                // glitch: off, intensity
+            0.0f, 1.0f,               // glitch: off, intensity
+            0.0f                      // edges off
         };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
@@ -7106,6 +7110,7 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
             float filmGrainAnimated;
             float enableGlitch;
             float glitchIntensity;
+            float enableEdges;
         } params = {
             0.0f, // chromaticAberrationStrength
             0.0f, // chromaticAberrationFalloff
@@ -7122,7 +7127,8 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
             0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
             5.0f, 0.0f,               // posterizeLevels, time
             0.0f, 0.05f, 0.0f,        // film grain: off, strength, static
-            0.0f, 1.0f                // glitch: off, intensity
+            0.0f, 1.0f,               // glitch: off, intensity
+            0.0f                      // edges off
         };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);

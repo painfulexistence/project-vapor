@@ -58,6 +58,9 @@ struct PostProcessParams {
     // TV signal glitch
     float enableGlitch;
     float glitchIntensity;
+
+    // Edge view (gradient magnitude replaces the image)
+    float enableEdges;
 };
 
 vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
@@ -126,13 +129,14 @@ static inline float vhsLineJitter(float y, float t) {
          + (vhsSmoothNoise(y * 9.0 + t * 0.8, 17.0) - 0.5) * 0.02;
 }
 
-// Scrolling tape dropout: a soft band sweeping down the frame, broken by
-// speckle so it reads as signal loss rather than a clean bar.
+// Tape dropout: brief BRIGHT HORIZONTAL streaks where the head loses contact.
+// A rare subset of scanlines lights up with a moving bright dash along x — real
+// VHS dropout runs along the scanline, not as a grid of square blocks.
 static inline float vhsDropout(float2 uv, float t) {
-    float sweep = fract(t * 0.19 + vhsSmoothNoise(t, 5.0) * 0.3);
-    float band  = smoothstep(0.05, 0.0, abs(uv.y - sweep));
-    float speckle = step(0.55, hash21(float2(floor(uv.x * 120.0), floor(uv.y * 240.0) + floor(t * 24.0))));
-    return band * speckle;
+    float ly   = floor(uv.y * 240.0);
+    float lit  = step(0.978, hash21(float2(ly, floor(t * 10.0))));
+    float dash = smoothstep(0.5, 0.95, vhsSmoothNoise(uv.x * 40.0 - t * 6.0, ly));
+    return lit * dash;
 }
 
 // TV signal glitch: bursty blocky horizontal displacement + RGB tearing.
@@ -167,6 +171,15 @@ static inline float sobelMagnitude(texture2d<float, access::sample> tex, sampler
     float gx = -tl + tr - 2.0 * l + 2.0 * r - bl + br;
     float gy = -tl - 2.0 * tp - tr + bl + 2.0 * bt + br;
     return sqrt(gx * gx + gy * gy);
+}
+
+// Edge view: per-channel gradient magnitude (central differences). Replaces the
+// image with an outline; distinct from the Sobel overlay above.
+static inline float3 edgeGradient(texture2d<float, access::sample> tex, sampler s, float2 uv) {
+    float2 ts = 1.0 / float2(tex.get_width(), tex.get_height());
+    float3 hgr = tex.sample(s, uv + float2(ts.x, 0.0)).rgb - tex.sample(s, uv - float2(ts.x, 0.0)).rgb;
+    float3 vgr = tex.sample(s, uv + float2(0.0, ts.y)).rgb - tex.sample(s, uv - float2(0.0, ts.y)).rgb;
+    return sqrt(hgr * hgr + vgr * vgr);
 }
 
 fragment float4 fragmentMain(
@@ -293,7 +306,13 @@ fragment float4 fragmentMain(
     }
 
     // ========================================================================
-    // Posterize (Atmospheric port; quantize LDR into N steps)
+    // Edge view: replace the image with its gradient magnitude (outline look).
+    // Distinct from Sobel (which overlays). Later stylizations apply on top.
+    // ========================================================================
+    if (params.enableEdges > 0.5) color = edgeGradient(texScreen, s, uv);
+
+    // ========================================================================
+    // Posterize (quantize LDR into N steps)
     // ========================================================================
     if (params.enablePosterize > 0.5) {
         float lv = max(params.posterizeLevels, 1.0);
