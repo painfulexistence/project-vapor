@@ -4148,6 +4148,12 @@ void Renderer::shadowPass() {
     // while cascades started at rtEnd, leaving [nearShadowEnd, rtEnd] unshadowed
     // because RHIMain.frag never consumed the RT shadow.)
     const float rtEnd = pssmRTMaxDist;
+    // Cap the cascade far well short of the (possibly tens-of-km) camera far
+    // plane so the 3 cascades pack their resolution into the range shadows are
+    // actually visible in; pixels past shadowFar fall outside every cascade and
+    // the frag returns "lit" (fog/aerial perspective covers them). Clamped
+    // above rtEnd so there's always a positive cascade range.
+    const float shadowFar = glm::clamp(pssmShadowDistance, rtEnd + 1.0f, farClip);
 
     // Cascade split distances (view space). splits[0] = near end, splits[3] = far.
     float splits[4];
@@ -4155,8 +4161,8 @@ void Renderer::shadowPass() {
     const float lambda = 0.7f;  // 0 = uniform, 1 = logarithmic
     for (int i = 1; i <= 3; i++) {
         float p = float(i) / 3.0f;
-        float logS = rtEnd * std::pow(farClip / glm::max(rtEnd, 0.1f), p);
-        float uniS = rtEnd + (farClip - rtEnd) * p;
+        float logS = rtEnd * std::pow(shadowFar / glm::max(rtEnd, 0.1f), p);
+        float uniS = rtEnd + (shadowFar - rtEnd) * p;
         splits[i] = lambda * logS + (1.0f - lambda) * uniS;
     }
 
@@ -4175,11 +4181,11 @@ void Renderer::shadowPass() {
 
     PSSMRenderData gpuData;
     gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
-    gpuData.blendRange = (farClip - rtEnd) * 0.05f;
+    gpuData.blendRange = (shadowFar - rtEnd) * 0.05f;
 
     for (int ci = 0; ci < 3; ci++) {
-        float splitNear = glm::clamp(splits[ci],     nearClip, farClip);
-        float splitFar  = glm::clamp(splits[ci + 1], nearClip, farClip);
+        float splitNear = glm::clamp(splits[ci],     nearClip, shadowFar);
+        float splitFar  = glm::clamp(splits[ci + 1], nearClip, shadowFar);
         float nearNDCz = viewDepthToNDCz(splitNear);
         float farNDCz  = viewDepthToNDCz(splitFar);
 
@@ -8819,6 +8825,11 @@ void Renderer::drawGraphicsImGui() {
                 if (ImGui::Combo("PCF samples", &idx, pcfLabels, 4)) pssmPcfSampleCount = pcfValues[idx];
             }
             ImGui::SliderFloat("Cascade blend", &pssmCascadeBlendRange, 0.0f, 10.0f);
+            // Cascade coverage cap, decoupled from the camera far plane — the
+            // fix for distant open-world terrain reading as unshadowed (see
+            // pssmShadowDistance). Lower = crisper near/mid shadows; beyond it
+            // the ground is lit (fog hides the handover).
+            ImGui::SliderFloat("Shadow distance", &pssmShadowDistance, 200.0f, 8000.0f);
             ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
             if (TextureHandle vt = capabilities.raytracing ? shadowRT : debugView("nearShadow", nearShadowMap, TextureSwizzle::RRR1, 0); vt.isValid()) {
                 if (void* id = getImGuiTextureID(vt)) {

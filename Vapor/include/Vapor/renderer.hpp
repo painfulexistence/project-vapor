@@ -1120,6 +1120,16 @@ private:
     // PSSM: distance where RT near-field shadows hand over to the cascades
     // (native pssmRTMaxDist, panel-tunable 5..200).
     float pssmRTMaxDist = 12.0f;  // near shadow extent [near, this] (character scale); cascades beyond
+    // Cascade coverage cap (view-space metres), DECOUPLED from the camera far
+    // plane: the 3 cascades split [rtEnd, min(farClip, this)] instead of the
+    // whole [rtEnd, farClip]. Open-world scenes push the far plane out to tens
+    // of km (the terrain demo: 30 km); spreading 3 cascades over that gives the
+    // last one metre-sized texels, so distant terrain reads as unshadowed
+    // anyway — capping here packs the resolution into the range that matters
+    // and lets aerial-perspective/fog hide the rest. Beyond the cap the shadow
+    // term is "lit" (fragments fall outside every cascade frustum — no shader
+    // change needed). Large default = a no-op for normal (far <= ~2 km) scenes.
+    float pssmShadowDistance = 2500.0f;
     Uint32 pssmPcfSampleCount = 16;  // PCF taps: 4/8/16/32 (honoured by both Metal and Vulkan shaders)
     float  pssmCascadeBlendRange = 2.0f;  // cascade<->cascade blend width (view units)
     bool   pssmDebugVisualize = false;    // tint cascades for debugging
