@@ -7645,7 +7645,8 @@ void Renderer::drawPostProcessImGui() {
     flagBox("VHS", p.enableVHS);           ImGui::SameLine();
     flagBox("CRT", p.enableCRT);           ImGui::SameLine();
     flagBox("Sobel", p.enableSobel);       ImGui::SameLine();
-    flagBox("Posterize", p.enablePosterize);
+    flagBox("Posterize", p.enablePosterize); ImGui::SameLine();
+    flagBox("Film Grain", p.enableFilmGrain);
     ImGui::Separator();
 
     // Detailed per-effect controls.
@@ -7699,12 +7700,22 @@ void Renderer::drawPostProcessImGui() {
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("Stylized / Retro (Atmospheric)##pp")) {
-        flagBox("VHS (curve + tracking wobble)", p.enableVHS);
+        flagBox("VHS (curve + wobble + glitch)", p.enableVHS);
         flagBox("CRT (barrel + scanlines)", p.enableCRT);
         flagBox("Sobel edges", p.enableSobel);
         bool poster = flagBox("Posterize", p.enablePosterize);
         ImGui::BeginDisabled(!poster);
         ImGui::DragFloat("Levels", &p.posterizeLevels, 0.5f, 2.0f, 32.0f);
+        ImGui::EndDisabled();
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Film Grain##pp")) {
+        flagBox("Enabled##grain", p.enableFilmGrain);
+        ImGui::BeginDisabled(p.enableFilmGrain <= 0.5f);
+        ImGui::DragFloat("Strength", &p.filmGrainStrength, 0.002f, 0.0f, 0.5f, "%.3f");
+        // Static by default; the flicker variant reseeds the grain each frame.
+        bool anim = p.filmGrainAnimated > 0.5f;
+        if (ImGui::Checkbox("Animated (flicker)", &anim)) p.filmGrainAnimated = anim ? 1.0f : 0.0f;
         ImGui::EndDisabled();
         ImGui::TreePop();
     }

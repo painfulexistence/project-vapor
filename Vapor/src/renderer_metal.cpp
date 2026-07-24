@@ -2409,6 +2409,9 @@ public:
             float enablePosterize;
             float posterizeLevels;
             float time;
+            float enableFilmGrain;
+            float filmGrainStrength;
+            float filmGrainAnimated;
         } gpuParams = { r.postProcessParams.chromaticAberrationStrength,
                         r.postProcessParams.chromaticAberrationFalloff,
                         r.postProcessParams.vignetteStrength,
@@ -2422,7 +2425,8 @@ public:
                         r.postProcessParams.exposure,
                         1.0f, 1.0f, 1.0f, 1.0f,   // CA / vignette / grading / tonemap on
                         0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
-                        5.0f, 0.0f };             // posterizeLevels, time
+                        5.0f, 0.0f,               // posterizeLevels, time
+                        0.0f, 0.05f, 0.0f };      // film grain: off, strength, static
 
         // Create render pass descriptor
         auto postPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
@@ -6994,6 +6998,9 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
             float enablePosterize;
             float posterizeLevels;
             float time;
+            float enableFilmGrain;
+            float filmGrainStrength;
+            float filmGrainAnimated;
         } params = {
             0.0f, // chromaticAberrationStrength
             0.0f, // chromaticAberrationFalloff
@@ -7008,7 +7015,8 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
             exposure, // exposure
             1.0f, 1.0f, 1.0f, 1.0f,   // CA / vignette / grading / tonemap on
             0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
-            5.0f, 0.0f                // posterizeLevels, time
+            5.0f, 0.0f,               // posterizeLevels, time
+            0.0f, 0.05f, 0.0f         // film grain: off, strength, static
         };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
@@ -7087,6 +7095,9 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
             float enablePosterize;
             float posterizeLevels;
             float time;
+            float enableFilmGrain;
+            float filmGrainStrength;
+            float filmGrainAnimated;
         } params = {
             0.0f, // chromaticAberrationStrength
             0.0f, // chromaticAberrationFalloff
@@ -7101,7 +7112,8 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
             1.0f, // exposure
             1.0f, 1.0f, 1.0f, 1.0f,   // CA / vignette / grading / tonemap on
             0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
-            5.0f, 0.0f                // posterizeLevels, time
+            5.0f, 0.0f,               // posterizeLevels, time
+            0.0f, 0.05f, 0.0f         // film grain: off, strength, static
         };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);

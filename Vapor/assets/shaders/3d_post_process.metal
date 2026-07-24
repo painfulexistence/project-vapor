@@ -49,6 +49,11 @@ struct PostProcessParams {
     float enablePosterize;
     float posterizeLevels;
     float time;
+
+    // Film grain (independent of VHS)
+    float enableFilmGrain;
+    float filmGrainStrength;
+    float filmGrainAnimated;
 };
 
 vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
@@ -102,6 +107,29 @@ static inline float onOff(float a, float b, float c, float t) {
     return step(c, sin(t + a * cos(t * b)));
 }
 
+// Hash noise in [0,1) — shared by the VHS glitch stripes and the film grain.
+// Classic sin-hash: sin() bounds the value before the large multiply, so it
+// stays well-conditioned for big pixel-coordinate inputs (film grain) unlike a
+// fract(p*k) hash, which bands at high resolution.
+static inline float hash21(float2 p) {
+    return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Ryk's ramp: a soft band peaking between [start, end] in y.
+static inline float vhsRamp(float y, float start, float end) {
+    float inside = step(start, y) - step(end, y);
+    float fact = (y - start) / (end - start) * inside;
+    return (1.0 - fact) * inside;
+}
+
+// Scrolling glitch stripes (Ryk VCR "stripes") — the noisy horizontal dropout
+// bands that were missing from the first port.
+static inline float vhsStripes(float2 uv, float t) {
+    float band = vhsRamp(glmod(uv.y * 4.0 + t / 2.0 + sin(t + sin(t * 0.63)), 1.0), 0.5, 0.6);
+    float noi = hash21(uv * float2(12.0, 4.0) + float2(1.0, t));
+    return band * noi;
+}
+
 static inline float2 vhsScreenDistort(float2 uv) {
     uv -= 0.5;
     uv = uv * 1.2 * (1.0 / 1.2 + 2.0 * uv.x * uv.x * uv.y * uv.y);
@@ -153,12 +181,15 @@ fragment float4 fragmentMain(
     // ========================================================================
     float vhsVignette = 1.0;
     float vhsStripe   = 1.0;
+    float vhsGlitch   = 0.0;
     if (params.enableVHS > 0.5) {
         uv = vhsScreenDistort(uv);
         float vigAmt = 3.0 + 0.3 * sin(params.time + 5.0 * cos(params.time * 5.0));
         vhsVignette = (1.0 - vigAmt * (uv.y - 0.5) * (uv.y - 0.5)) *
                       (1.0 - vigAmt * (uv.x - 0.5) * (uv.x - 0.5));
         vhsStripe   = (12.0 + glmod(uv.y * 30.0 + params.time, 1.0)) / 13.0;
+        // Glitch dropout bands from the curved-but-untracked uv (Ryk stripes).
+        vhsGlitch   = vhsStripes(uv, params.time);
         uv = vhsTracking(uv, params.time);
     }
 
@@ -245,9 +276,19 @@ fragment float4 fragmentMain(
         color *= vignette;
     }
 
-    // VHS overlays + CRT scanlines (final stylized layer)
+    // VHS overlays: additive glitch stripes, then vignette + scanline modulation.
+    color += vhsGlitch;
     color *= vhsVignette * vhsStripe;
     if (params.enableCRT > 0.5) color += sin(uv.y * 800.0 + params.time * 10.0) * 0.04;
+
+    // Film grain (LDR, screen-space). Static by default; Animated reseeds each
+    // frame for a flickering grain. Uses the undistorted screen uv (in.uv).
+    if (params.enableFilmGrain > 0.5) {
+        float2 gseed = in.uv * float2(texScreen.get_width(), texScreen.get_height());
+        if (params.filmGrainAnimated > 0.5) gseed += float2(params.time * 91.7, params.time * 47.3);
+        float g = hash21(gseed) - 0.5;
+        color += g * params.filmGrainStrength;
+    }
 
     // Ensure color is in valid range
     color = saturate(color);

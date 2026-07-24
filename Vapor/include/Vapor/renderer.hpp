@@ -724,6 +724,11 @@ private:
         float enablePosterize = 0.0f;
         float posterizeLevels = 5.0f;     // number of quantization steps
         float time = 0.0f;                // seconds, drives animated VHS/CRT
+        // Film grain (independent of VHS). Static by default; Animated reseeds
+        // the grain each frame for a flickering variant.
+        float enableFilmGrain = 0.0f;
+        float filmGrainStrength = 0.05f;
+        float filmGrainAnimated = 0.0f;   // 0 = static, 1 = flicker
     };
     PostProcessParams postProcessParams;
     BufferHandle postProcessParamsBuffer;  // Vulkan PostProcess.frag set1 b0

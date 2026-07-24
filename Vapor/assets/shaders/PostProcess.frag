@@ -37,6 +37,10 @@ layout(std430, set = 1, binding = 0) readonly buffer PostBuf {
     float enablePosterize;
     float posterizeLevels;
     float time;
+    // Film grain (independent of VHS).
+    float enableFilmGrain;
+    float filmGrainStrength;
+    float filmGrainAnimated;
 };
 
 vec3 aces(vec3 x) {
@@ -62,6 +66,29 @@ vec3 adjustContrast(vec3 col, float k) {
 
 float onOff(float a, float b, float c, float t) {
     return step(c, sin(t + a * cos(t * b)));
+}
+
+// Hash noise in [0,1) — shared by the VHS glitch stripes and the film grain.
+// Classic sin-hash: sin() bounds the value before the large multiply, so it
+// stays well-conditioned for big pixel-coordinate inputs (film grain) unlike a
+// fract(p*k) hash, which bands at high resolution.
+float hash21(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Ryk's ramp: a soft band peaking between [start, end] in y.
+float vhsRamp(float y, float start, float end) {
+    float inside = step(start, y) - step(end, y);
+    float fact = (y - start) / (end - start) * inside;
+    return (1.0 - fact) * inside;
+}
+
+// Scrolling glitch stripes (Ryk VCR "stripes") — the noisy horizontal dropout
+// bands that were missing from the first port.
+float vhsStripes(vec2 uv, float t) {
+    float band = vhsRamp(mod(uv.y * 4.0 + t / 2.0 + sin(t + sin(t * 0.63)), 1.0), 0.5, 0.6);
+    float noi = hash21(uv * vec2(12.0, 4.0) + vec2(1.0, t));
+    return band * noi;
 }
 
 vec2 vhsScreenDistort(vec2 uv) {
@@ -104,12 +131,15 @@ void main() {
     // vignette/stripe factors come from the curved uv and apply post-tonemap.
     float vhsVignette = 1.0;
     float vhsStripe   = 1.0;
+    float vhsGlitch   = 0.0;
     if (enableVHS > 0.5) {
         uv = vhsScreenDistort(uv);
         float vigAmt = 3.0 + 0.3 * sin(time + 5.0 * cos(time * 5.0));
         vhsVignette = (1.0 - vigAmt * (uv.y - 0.5) * (uv.y - 0.5)) *
                       (1.0 - vigAmt * (uv.x - 0.5) * (uv.x - 0.5));
         vhsStripe   = (12.0 + mod(uv.y * 30.0 + time, 1.0)) / 13.0;
+        // Glitch dropout bands from the curved-but-untracked uv (Ryk stripes).
+        vhsGlitch   = vhsStripes(uv, time);
         uv = vhsTracking(uv, time);
     }
 
@@ -181,9 +211,19 @@ void main() {
         color *= vignette;
     }
 
-    // VHS overlays + CRT scanlines (final stylized layer).
+    // VHS overlays: additive glitch stripes, then vignette + scanline modulation.
+    color += vhsGlitch;
     color *= vhsVignette * vhsStripe;
     if (enableCRT > 0.5) color += sin(uv.y * 800.0 + time * 10.0) * 0.04;
+
+    // Film grain (LDR, screen-space). Static by default; Animated reseeds each
+    // frame for a flickering grain. Uses the undistorted screen uv (tex_uv).
+    if (enableFilmGrain > 0.5) {
+        vec2 gseed = tex_uv * vec2(textureSize(texScreen, 0));
+        if (filmGrainAnimated > 0.5) gseed += vec2(time * 91.7, time * 47.3);
+        float g = hash21(gseed) - 0.5;
+        color += g * filmGrainStrength;
+    }
 
     color = clamp(color, 0.0, 1.0);
     Color = offScreen ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(color, 1.0);
