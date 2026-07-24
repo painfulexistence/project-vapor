@@ -1,5 +1,6 @@
 #pragma once
 #include "irenderer.hpp"
+#include <glm/gtc/quaternion.hpp>  // glm::quat (VoxelVolumeGpu orientation)
 #include "rhi.hpp"
 #include "render_data.hpp"
 #include "render_graph.hpp"
@@ -776,6 +777,7 @@ private:
     struct VoxelVolumeGpu {
         std::shared_ptr<Vapor::VoxelWorld> world;
         glm::vec3 origin = glm::vec3(0.0f);
+        glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);  // volume orientation about its pivot
         Uint32 pageTableOffset = 0;  // first page entry in the shared table
         Uint32 brickPoolBase = 0;    // first pool slot in the shared pool
         Uint32 pageEntryCount = 0;   // page-table entries this volume owns

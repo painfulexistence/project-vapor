@@ -468,6 +468,7 @@ namespace Vapor {
                 VoxelVolumeDraw d;
                 d.world = vv.world.value;
                 d.origin = volumeOrigin(reg, entity, *vv.world.value);
+                if (auto* t = reg.try_get<TransformComponent>(entity)) d.rotation = t->rotation;
                 draws.push_back(d);
             }
             renderer->setVoxelVolumes(draws);
@@ -494,10 +495,25 @@ namespace Vapor {
                 auto& vv = view.get<VoxelVolumeComponent>(entity);
                 if (!vv.world.value) continue;
                 const glm::vec3 origin = volumeOrigin(reg, entity, *vv.world.value);
+                // Transform the world ray into the volume's grid frame ([0,
+                // extent]), matching the shader: rotate by the conjugate of the
+                // orientation about the pivot (= entity position = origin + the
+                // x/z half-extent). Identity rotation reduces to ro - origin.
+                glm::quat q(1.0f, 0.0f, 0.0f, 0.0f);
+                glm::vec3 pivot = origin;
+                if (auto* t = reg.try_get<TransformComponent>(entity)) {
+                    q = t->rotation;
+                    pivot = t->position;
+                }
+                const glm::vec3 ext = vv.world.value->extent();
+                const glm::vec3 cXZ(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+                const glm::quat qc = glm::conjugate(q);
+                const glm::vec3 localRo = qc * (ro - pivot) + cXZ;
+                const glm::vec3 localRd = glm::normalize(qc * rd);
                 glm::vec3 localHit;
                 glm::ivec3 cell;
-                if (vv.world.value->raycast(ro - origin, rd, maxDist, localHit, cell)) {
-                    const float d = glm::length(localHit - (ro - origin));
+                if (vv.world.value->raycast(localRo, localRd, maxDist, localHit, cell)) {
+                    const float d = glm::length(localHit - localRo);
                     if (d < best) {
                         best = d;
                         bestWorld = vv.world.value.get();

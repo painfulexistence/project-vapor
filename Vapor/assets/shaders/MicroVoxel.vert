@@ -26,7 +26,13 @@ layout(std430, set = 0, binding = 0) readonly buffer ParamsBuf {
     vec4 ambientSky;       // xyz; w = ambientIntensity
     vec4 ambientGround;    // xyz; w = albedo hash variation strength
     vec4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled
+    vec4 extra0;           // (unused here; keeps the 256-byte layout aligned with the fragment)
+    vec4 rotationQuat;     // volume orientation (x,y,z,w); identity = axis-aligned
 };
+
+vec3 quatRotate(vec4 q, vec3 v) {  // active rotation, q = (x,y,z,w)
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
 
 // Unit cube [0,1]^3 as a 36-vertex triangle list.
 const vec3 cubeVerts[36] = vec3[](
@@ -52,7 +58,12 @@ const vec3 cubeVerts[36] = vec3[](
 
 void main() {
     vec3 extent = gridDim.xyz * volumeOrigin.w;
-    vec3 wp = volumeOrigin.xyz + cubeVerts[gl_VertexIndex] * extent;
+    // Rotate the AABB about the volume pivot (min corner + half the x/z extent),
+    // so a physics-driven orientation turns the whole box. Identity rotation
+    // gives exactly volumeOrigin + vert*extent, the axis-aligned box.
+    vec3 cXZ = vec3(extent.x * 0.5, 0.0, extent.z * 0.5);
+    vec3 pivot = volumeOrigin.xyz + cXZ;
+    vec3 wp = pivot + quatRotate(rotationQuat, cubeVerts[gl_VertexIndex] * extent - cXZ);
     v_worldPos = wp;
     gl_Position = viewProj * vec4(wp, 1.0);
 }

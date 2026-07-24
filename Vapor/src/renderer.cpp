@@ -4918,6 +4918,7 @@ void Renderer::updateVoxelVolumeResources() {
     for (size_t i = 0; i < voxelVolumes.size(); i++) {
         VoxelVolumeGpu& gpu = voxelVolumes[i];
         gpu.origin = desired[i].origin;
+        gpu.rotation = desired[i].rotation;
         Vapor::VoxelWorld& world = *gpu.world;
 
         if (layoutChanged) {
@@ -5019,7 +5020,12 @@ void Renderer::microVoxelPass() {
         d.cameraPosition = glm::vec4(currentCamera.position, microVoxelSettings.cameraPosition.w);
         d.volumeOrigin = glm::vec4(gpu.origin, gpu.world->voxelSizeMeters());
         d.gridDim = glm::vec4(glm::vec3(gpu.world->dim()), microVoxelSettings.gridDim.w);
-        d.sunDirection = glm::vec4(sunDir, microVoxelSettings.sunDirection.w);
+        // Orientation for the shader's local-frame raymarch, and the sun
+        // pre-rotated into that same frame so every lighting term (direct sun,
+        // shadow ray, reflections, sky) stays consistent without the shader
+        // touching its helpers. Identity rotation leaves both unchanged.
+        d.rotationQuat = glm::vec4(gpu.rotation.x, gpu.rotation.y, gpu.rotation.z, gpu.rotation.w);
+        d.sunDirection = glm::vec4(glm::conjugate(gpu.rotation) * sunDir, microVoxelSettings.sunDirection.w);
         d.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
         d.params.w = voxelGIActiveThisFrame ? microVoxelGIStrength : 0.0f;
         // Shared-buffer ranges: the slice index doubles as the palette slot.
@@ -5065,8 +5071,20 @@ void Renderer::microVoxelPass() {
     const Frustum frustum = extractFrustum(viewProj);
     for (Uint32 i = 0; i < written; i++) {
         const VoxelVolumeGpu& gpu = voxelVolumes[i];
-        const glm::vec3 aabbMin = gpu.origin;
-        const glm::vec3 aabbMax = gpu.origin + gpu.world->extent();
+        // World AABB of the (possibly rotated) volume box: the 8 corners rotated
+        // about the pivot, then min/max'd. Identity rotation gives exactly
+        // [origin, origin + extent].
+        const glm::vec3 ext = gpu.world->extent();
+        const glm::vec3 cXZ(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+        const glm::vec3 pivot = gpu.origin + cXZ;
+        glm::vec3 aabbMin(std::numeric_limits<float>::max());
+        glm::vec3 aabbMax(-std::numeric_limits<float>::max());
+        for (int c = 0; c < 8; c++) {
+            const glm::vec3 local((c & 1) ? ext.x : 0.0f, (c & 2) ? ext.y : 0.0f, (c & 4) ? ext.z : 0.0f);
+            const glm::vec3 w = pivot + gpu.rotation * (local - cXZ);
+            aabbMin = glm::min(aabbMin, w);
+            aabbMax = glm::max(aabbMax, w);
+        }
         if (!frustum.isBoxVisible(aabbMin, aabbMax)) continue;
         const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
         rhi->setVertexBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
