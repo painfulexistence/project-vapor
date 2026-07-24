@@ -10,6 +10,7 @@
 #include "tessellation.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
+#include <chrono>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -326,6 +327,15 @@ public:
     // button and sky-config changes (setSky) still force a rebake directly.
     void requestIBLUpdate() override { if (m_iblAutoRebake) iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
+    void setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) override;
+    // MicroVoxel tunables (the same state the ImGui panel edits) — exposed so
+    // demo/gameplay hotkeys can flip debug views and toggles directly.
+    MicroVoxelRenderData& getMicroVoxelSettings() { return microVoxelSettings; }
+    void setMicroVoxelEnabled(bool enabled) { microVoxelEnabled = enabled; }
+    float& getMicroVoxelGIStrength() { return microVoxelGIStrength; }
+    int& getMicroVoxelGIAtrousIterations() { return microVoxelGIAtrousIterations; }
+    float& getMicroVoxelGISplitX() { return microVoxelGISplitX; }
+    bool& getMicroVoxelGICrossVolume() { return microVoxelGICrossVolume; }
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -422,6 +432,16 @@ private:
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
+    void microVoxelPass();
+    // Reconciles the ECS-pushed volume list with the GPU mirrors (create /
+    // destroy buffers) and flushes per-brick dirty batches into the pool.
+    void updateVoxelVolumeResources();
+    // Traced GI over the voxel G-buffer: half-res 1-bounce trace + temporal
+    // accumulation (per-volume dispatches), a-trous denoise iterations, and a
+    // fullscreen composite (albedo * gi * ao added to voxel pixels).
+    void microVoxelGIPass();
+    void microVoxelGIDenoisePass();
+    void microVoxelGICompositePass();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -745,6 +765,70 @@ private:
     TextureHandle volumeTestTexture;     // owned procedural test grid
     bool volumeRenderEnabled = false;    // default OFF until real data lands
     VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // MicroVoxel raymarch (sparse-brick voxel volumes, MicroVoxel.frag /
+    // 3d_microvoxel.metal). Volumes arrive per frame from VoxelVolumeSystem
+    // via setVoxelVolumes(). All volumes share three GPU buffers (page
+    // tables, brick pool, palettes) with per-volume offsets — unlike the
+    // original's fixed sampler slots, shaders can dynamically index any
+    // number of volumes, which is what makes cross-volume GI possible under
+    // the RHI's 8-bindings-per-set limit. Dirty batches still upload per
+    // brick — edits never re-upload a volume.
+    struct VoxelVolumeGpu {
+        std::shared_ptr<Vapor::VoxelWorld> world;
+        glm::vec3 origin = glm::vec3(0.0f);
+        Uint32 pageTableOffset = 0;  // first page entry in the shared table
+        Uint32 brickPoolBase = 0;    // first pool slot in the shared pool
+        Uint32 pageEntryCount = 0;   // page-table entries this volume owns
+        Uint32 brickCapacity = 0;    // pool slots this volume owns
+    };
+
+    BufferHandle voxelPageTableBuffer;  // concatenated per-volume page tables
+    BufferHandle voxelBrickPoolBuffer;  // concatenated per-volume slot ranges
+    BufferHandle voxelPaletteBuffer;    // MAX_VOXEL_VOLUMES x 256 materials
+    static constexpr Uint32 MAX_VOXEL_VOLUMES = 8;
+    std::vector<VoxelVolumeGpu> voxelVolumes;          // renderer-owned GPU mirrors
+    std::vector<Vapor::VoxelVolumeDraw> pendingVoxelVolumes;  // last ECS push
+    PipelineHandle microVoxelPipeline;
+    ShaderHandle microVoxelVS, microVoxelFS;
+    BufferHandle microVoxelDataBuffer;  // frame-slotted, MAX_VOXEL_VOLUMES x 256B slices
+    bool microVoxelEnabled = true;
+    // Persistent tunables (ImGui-editable). microVoxelPass() copies this per
+    // volume and overwrites the per-frame fields (viewProj/camera/origin/sun).
+    MicroVoxelRenderData microVoxelSettings;
+    // Voxel G-buffer (full res), written by the primary pass alongside color:
+    // hitT (R32F), albedo+AO (RGBA8), face-normal/material/volume (RGBA8).
+    TextureHandle voxelHitTRT;
+    TextureHandle voxelAlbedoAORT;
+    TextureHandle voxelNormalMatRT;
+    // Traced GI: half-res accumulation ping-pong (history = RAW temporal, the
+    // filtered result never feeds back) + a-trous ping-pong.
+    TextureHandle voxelGIAccumRT[2];
+    TextureHandle voxelGIAtrousRT[2];
+    Uint32 voxelGIWidth = 0, voxelGIHeight = 0;
+    int voxelGICur = 0;
+    bool voxelGIHistoryValid = false;  // false forces a fresh-sample frame
+    glm::mat4 voxelGIPrevViewProj = glm::mat4(1.0f);
+    glm::vec3 voxelGIPrevCameraPos = glm::vec3(0.0f);
+    Uint32 voxelGIFrameIndex = 0;
+    ComputePipelineHandle microVoxelGIPipeline;
+    ComputePipelineHandle microVoxelAtrousPipeline;
+    ShaderHandle microVoxelGIShader, microVoxelAtrousShader;
+    PipelineHandle microVoxelGICompositePipeline;
+    ShaderHandle microVoxelGICompositeVS, microVoxelGICompositeFS;
+    BufferHandle microVoxelGIParamsBuffer;  // frame-slotted MicroVoxelGIRenderData
+    // GI tunables (ImGui panel + demo hotkeys).
+    float microVoxelGIStrength = 1.0f;
+    float microVoxelGIBlend = 0.93f;        // temporal history weight
+    int microVoxelGIAtrousIterations = 3;
+    glm::vec3 microVoxelGISigmas = glm::vec3(0.5f, 64.0f, 8.0f);  // depth/normal/luma
+    float microVoxelGISplitX = -1.0f;       // >= 0: raw|denoised split compare
+    // Bounce rays test every volume (nearest hit) so light bleeds between
+    // them — the original demo's giCrossVolume, minus its 4-volume cap.
+    bool microVoxelGICrossVolume = true;
+    // Per-frame state shared between the MicroVoxel passes.
+    bool voxelGIActiveThisFrame = false;
+    Uint32 voxelVolumesDrawn = 0;
+    std::array<const VoxelVolumeGpu*, MAX_VOXEL_VOLUMES> voxelVolumesDrawnRefs {};
     // The registry the ECS draw() last rendered with. renderToTexture needs it
     // because the demo's meshes live on ECS entities, not the scene-node tree —
     // the scene-only collectDrawables(scene) finds nothing there. The registry
