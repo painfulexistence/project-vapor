@@ -330,6 +330,11 @@ public:
     virtual void destroyTessellatedMesh(Uint32 /*id*/) {}
     virtual void setTessellatedMeshTransform(Uint32 /*id*/, const glm::mat4& /*model*/) {}
 
+    // Wireframe debug view over the opaque geometry (Main + Tess passes) —
+    // handy for verifying adaptive tessellation. Default no-op; the RHI
+    // renderer implements it (Metal dynamic fill mode / Vulkan Line twins).
+    virtual void setWireframe(bool /*on*/) {}
+
     // Streamed grass ring (TerrainSystem): a fixed instance pool of
     // cellSlots * bladesPerSlot blades; cells stream in/out by rewriting slots
     // in place (the terrain-tile pattern) and each frame draws the resident

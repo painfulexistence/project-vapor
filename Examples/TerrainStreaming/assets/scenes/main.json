@@ -12,7 +12,7 @@
           "noiseOctaves": 9,
           "seed": 20260705,
           "cacheDir": "cache/terrain",
-          "cbtTessellation": false
+          "cbtTessellation": true
         }
       }
     },

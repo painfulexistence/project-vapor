@@ -1326,7 +1326,11 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    // Wireframe pipeline variant (PolygonMode::Line) — guarded by the device
+    // feature so a Line desc silently falls back to Fill on unsupporting HW.
+    rasterizer.polygonMode = (desc.polygonMode == PolygonMode::Line && capabilities.wireframe)
+                                 ? VK_POLYGON_MODE_LINE
+                                 : VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = convertCullMode(desc.cullMode);
     rasterizer.frontFace = desc.frontFaceCounterClockwise ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
@@ -2809,6 +2813,13 @@ void RHI_Vulkan::createLogicalDevice() {
         if (supportedFeatures.multiDrawIndirect) {
             deviceFeatures.multiDrawIndirect = VK_TRUE;
             capabilities.multiDrawIndirect = true;
+        }
+        // Wireframe rasterization (VK_POLYGON_MODE_LINE) — the debug-view fill
+        // mode for PolygonMode::Line pipelines. Enable only when supported so
+        // device creation never fails; the renderer checks capabilities.wireframe.
+        if (supportedFeatures.fillModeNonSolid) {
+            deviceFeatures.fillModeNonSolid = VK_TRUE;
+            capabilities.wireframe = true;
         }
     }
 

@@ -725,6 +725,7 @@ private:
 
     // Graphics pipelines
     PipelineHandle mainPipeline;
+    PipelineHandle mainPipelineWire;  // Vulkan PolygonMode::Line twin (wireframe debug)
     PipelineHandle prePassPipeline;
     PipelineHandle postProcessPipeline;
     PipelineHandle bloomBrightPipeline;
@@ -1443,6 +1444,14 @@ private:
     float tessSplitPixels = 64.0f;
     bool tessPreferMeshShaders = true;  // use the mesh/task path when supported
     bool tessFreeze = false;            // pause split/merge (debug)
+    // Wireframe debug view (opaque geometry: Main + Tess passes). Metal switches
+    // the encoder fill mode live; Vulkan binds PolygonMode::Line pipeline twins
+    // (needs capabilities.wireframe). Great for eyeballing adaptive tessellation
+    // — the triangle density climbs toward the camera and moves as you fly, and
+    // freezes with tessFreeze. Toggle via setWireframe (demo binds it to I).
+    bool wireframe = false;
+    void setWireframe(bool on) override { wireframe = on; }
+    bool isWireframe() const { return wireframe; }
     void tessUpdatePass();
     void tessRenderPass();
 
@@ -1484,8 +1493,9 @@ private:
         tessArgsShader, tessLeafPrepShader;
     ShaderHandle tessVertexShader, tessFragmentShader;
     ShaderHandle tessObjectShader, tessMeshShader, tessMeshFragShader;
-    PipelineHandle tessRenderPipeline;  // instanced compute path
-    PipelineHandle tessMeshPipeline;    // object/mesh path
+    PipelineHandle tessRenderPipeline;      // instanced compute path
+    PipelineHandle tessRenderPipelineWire;  // Vulkan PolygonMode::Line twin (wireframe)
+    PipelineHandle tessMeshPipeline;        // object/mesh path
     BufferHandle tessGridVertexBuffer, tessGridIndexBuffer;
     Uint32 tessGridIndexCount = 0;
     BufferHandle lightCullDataBuffer;

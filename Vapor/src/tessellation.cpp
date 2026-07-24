@@ -257,6 +257,11 @@ void Renderer::createTessellationPipelinesVulkan() {
         p.depthAttachmentFormat = PixelFormat::Depth32Float;
         p.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
         tessRenderPipeline = rhi->createPipeline(p);
+        // Wireframe twin (verifying adaptive subdivision): same PSO, Line fill.
+        if (capabilities.wireframe) {
+            p.polygonMode = PolygonMode::Line;
+            tessRenderPipelineWire = rhi->createPipeline(p);
+        }
     }
 
     tessParamsViaBuffer = true;
@@ -538,6 +543,13 @@ void Renderer::tessRenderPass() {
     };
 
     rhi->beginRenderPass(rp);
+    // Wireframe debug view: Metal switches fill mode on the encoder (covers
+    // both the mesh and instanced routes); Vulkan binds the Line twin below.
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setFillMode(wireframe ? PolygonMode::Line : PolygonMode::Fill);
+    }
+    const bool wireVk = wireframe && backend == GraphicsBackend::Vulkan
+                        && tessRenderPipelineWire.isValid();
     for (const TessInstance& t : m_tessInstances) {
         const TessParamsGpu p = tessFillParams(t);
         if (meshPath) {
@@ -552,7 +564,7 @@ void Renderer::tessRenderPass() {
             rhi->drawMeshTasksIndirect(t.argsBuffer, kTessArgsMeshTasksOffset);
         } else {
             // One grid instance per leaf; instanceCount is GPU-written.
-            rhi->bindPipeline(tessRenderPipeline);
+            rhi->bindPipeline(wireVk ? tessRenderPipelineWire : tessRenderPipeline);
             rhi->setVertexBuffer(0, tessGridVertexBuffer);
             rhi->setVertexBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setVertexBuffer(2, t.leafDataBuffer);

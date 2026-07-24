@@ -125,6 +125,9 @@ bool RHI_Metal::initialize(SDL_Window* window) {
                                           device->supportsFamily(MTL::GPUFamilyMac2);
     // Bindless texture tables ride on Tier-2 argument buffers — same families.
     capabilities.bindlessTextures = capabilities.indirectCommandBuffers;
+    // Wireframe is always available on Metal — set dynamically on the encoder
+    // (setTriangleFillMode), so no pipeline variant or device feature needed.
+    capabilities.wireframe = true;
 
     // Backend telemetry: one grouped "[MTL]" line per --stats interval. Metal is
     // unified memory, so these counts (plus RSS) are the leak-hunt signal.
@@ -1556,6 +1559,12 @@ void RHI_Metal::bindPipeline(PipelineHandle pipeline) {
         currentTaskThreads = res.taskThreads;
         currentMeshThreads = res.meshThreads;
     }
+}
+
+void RHI_Metal::setFillMode(PolygonMode mode) {
+    if (!currentRenderEncoder) return;
+    currentRenderEncoder->setTriangleFillMode(mode == PolygonMode::Line ? MTL::TriangleFillModeLines
+                                                                        : MTL::TriangleFillModeFill);
 }
 
 void RHI_Metal::bindVertexBuffer(BufferHandle buffer, Uint32 binding, size_t offset) {

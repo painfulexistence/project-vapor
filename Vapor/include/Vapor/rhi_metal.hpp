@@ -100,6 +100,7 @@ public:
     // ========================================================================
 
     void bindPipeline(PipelineHandle pipeline) override;
+    void setFillMode(PolygonMode mode) override;
     void bindVertexBuffer(BufferHandle buffer, Uint32 binding, size_t offset) override;
     void bindIndexBuffer(BufferHandle buffer, size_t offset) override;
 

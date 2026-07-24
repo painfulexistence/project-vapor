@@ -207,6 +207,15 @@ enum class CullMode {
     Back,
 };
 
+// Rasterizer fill mode. Line = wireframe (edges only). Vulkan bakes it into the
+// pipeline (needs the fillModeNonSolid device feature — see RHICapabilities);
+// Metal sets it dynamically on the encoder (RHI::setFillMode), so a Fill Metal
+// pipeline can still draw wireframe.
+enum class PolygonMode {
+    Fill,
+    Line,
+};
+
 enum class PrimitiveTopology {
     PointList,
     LineList,
@@ -349,6 +358,9 @@ struct PipelineDesc {
     // passes without depth (e.g. fullscreen post-process to swapchain).
     bool hasDepthAttachment = true;
     CullMode cullMode = CullMode::Back;
+    // Wireframe when Line (Vulkan bakes it in; Metal ignores it here and uses
+    // the dynamic RHI::setFillMode instead). Requires capabilities.wireframe.
+    PolygonMode polygonMode = PolygonMode::Fill;
     bool frontFaceCounterClockwise = true;
     Uint32 sampleCount = 1;
     // Attachment formats this pipeline renders into. Both Metal and Vulkan
@@ -469,6 +481,9 @@ struct RHICapabilities {
     // indexing with runtime arrays + update-after-bind). Required for the
     // Bindless MDI draw mode on either backend.
     bool bindlessTextures = false;
+    // Wireframe rasterization (Vulkan fillModeNonSolid; always true on Metal,
+    // which sets the fill mode dynamically on the encoder).
+    bool wireframe = false;
 };
 
 // ============================================================================
@@ -604,6 +619,11 @@ public:
     // ========================================================================
 
     virtual void bindPipeline(PipelineHandle pipeline) = 0;
+    // Dynamic rasterizer fill mode for the current render encoder. Metal honors
+    // it live (a Fill pipeline draws wireframe); Vulkan can't switch polygon
+    // mode dynamically, so it's a no-op there — bind a PolygonMode::Line
+    // pipeline variant instead. Resets to Fill at each beginRenderPass.
+    virtual void setFillMode(PolygonMode /*mode*/) {}
     virtual void bindVertexBuffer(BufferHandle buffer, Uint32 binding = 0, size_t offset = 0) = 0;
     virtual void bindIndexBuffer(BufferHandle buffer, size_t offset = 0) = 0;
 

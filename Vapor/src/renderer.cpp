@@ -791,6 +791,8 @@ void Renderer::shutdown() {
         if (mainPipeline.isValid()) {
             rhi->destroyPipeline(mainPipeline);
         }
+        if (mainPipelineWire.isValid()) rhi->destroyPipeline(mainPipelineWire);
+        if (tessRenderPipelineWire.isValid()) rhi->destroyPipeline(tessRenderPipelineWire);
 
         // Shutdown batch rendering
         shutdownBatchRendering();
@@ -1900,8 +1902,17 @@ void Renderer::mainRenderPass() {
     // Begin render pass
     rhi->beginRenderPass(renderPassDesc);
 
-    // Bind pipeline
-    rhi->bindPipeline(mainPipeline);
+    // Wireframe (debug): Metal switches fill mode live on the encoder — covers
+    // every main-pass draw path; Vulkan can't, so the default bound path binds
+    // the Line pipeline variant below (GPU-driven/meshlet variants aren't
+    // wire-framed on Vulkan — they're opt-in and off by default).
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setFillMode(wireframe ? PolygonMode::Line : PolygonMode::Fill);
+    }
+
+    // Bind pipeline (the wireframe twin on Vulkan when enabled).
+    const bool wireVk = wireframe && backend == GraphicsBackend::Vulkan && mainPipelineWire.isValid();
+    rhi->bindPipeline(wireVk ? mainPipelineWire : mainPipeline);
 
     // Bind common buffers (same for all drawables).
     // IMPORTANT: vertex and fragment shaders have INDEPENDENT buffer index
@@ -6842,6 +6853,16 @@ void Renderer::createRenderPipeline() {
 
     mainPipeline = rhi->createPipeline(pipelineDesc);
 
+    // Wireframe twin (Vulkan only — Metal switches fill mode dynamically on the
+    // encoder). Same PSO with PolygonMode::Line, bound by mainRenderPass when
+    // the wireframe debug toggle is on; skipped when the device lacks the
+    // fillModeNonSolid feature.
+    if (backend == GraphicsBackend::Vulkan && capabilities.wireframe) {
+        PipelineDesc wireDesc = pipelineDesc;
+        wireDesc.polygonMode = PolygonMode::Line;
+        mainPipelineWire = rhi->createPipeline(wireDesc);
+    }
+
     // Bindless MDI twin: same pipeline with the bindless fragment variant.
     //   Metal:  fragmentMain specialized with kBindlessMaterials (argument
     //           table at buffer 13) + the supportIndirectCommandBuffers opt-in
@@ -9178,6 +9199,16 @@ void Renderer::drawGraphicsImGui() {
         Uint32 grassBlades = 0;
         for (const auto& cell : grassDraws) grassBlades += cell.count;
         ImGui::Text("Grass cells %zu, blades %u", grassDraws.size(), grassBlades);
+        // Adaptive-tessellation debug: leaf count, freeze split/merge, split
+        // threshold, and the wireframe view that makes the subdivision visible.
+        if (!m_tessInstances.empty()) {
+            ImGui::Separator();
+            ImGui::Checkbox("Wireframe (I)", &wireframe);
+            ImGui::Checkbox("Freeze tessellation", &tessFreeze);
+            ImGui::SliderFloat("Split (px)", &tessSplitPixels, 8.0f, 256.0f);
+        } else {
+            ImGui::Checkbox("Wireframe (I)", &wireframe);
+        }
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("MicroVoxel")) {

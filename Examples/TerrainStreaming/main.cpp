@@ -60,7 +60,12 @@ struct FlyCameraSystem {
             glm::vec2 move = input.getVector(Vapor::InputAction::StrafeLeft, Vapor::InputAction::StrafeRight,
                                              Vapor::InputAction::MoveBackward, Vapor::InputAction::MoveForward);
             float vertical = input.getAxis(Vapor::InputAction::MoveDown, Vapor::InputAction::MoveUp);
-            float moveSpeed = fly.moveSpeed * (input.isHeld(Vapor::InputAction::Sprint) ? 50.0f : 1.0f);
+            // X = accelerate (x50, streaming stress), Z = decelerate (x0.2) —
+            // mapped to Sprint/Crouch below. Neither held = base speed.
+            float mult = input.isHeld(Vapor::InputAction::Sprint) ? 50.0f
+                       : input.isHeld(Vapor::InputAction::Crouch) ? 0.2f
+                                                                  : 1.0f;
+            float moveSpeed = fly.moveSpeed * mult;
 
             fly.pitch -= look.y * fly.rotateSpeed * deltaTime;
             fly.yaw -= look.x * fly.rotateSpeed * deltaTime;
@@ -201,10 +206,25 @@ auto main(int argc, char* args[]) -> int {
     }
 
     bool groundClamp = true;
-    fmt::print("WASD move, R/F up/down, IJKL look, LShift sprint (x50), G ground-clamp, "
-               "T teleport +2km, Esc quit.\n");
+    fmt::print("WASD move, R/F up/down, arrows look, X sprint (x50), Z slow, "
+               "I wireframe, G ground-clamp, T teleport +2km, Esc quit.\n");
 
     auto& inputManager = engineCore->getInputManager();
+    // Demo control scheme (overrides the engine defaults for THIS app's input
+    // manager only): arrow keys look (frees I for the wireframe toggle below),
+    // X = accelerate (Sprint), Z = decelerate (Crouch). WASD move + R/F up-down
+    // stay on their defaults.
+    inputManager.unmapKey(SDL_SCANCODE_I);  // was LookUp — now the wireframe key
+    inputManager.unmapKey(SDL_SCANCODE_J);
+    inputManager.unmapKey(SDL_SCANCODE_K);
+    inputManager.unmapKey(SDL_SCANCODE_L);
+    inputManager.mapKey(SDL_SCANCODE_UP, Vapor::InputAction::LookUp);
+    inputManager.mapKey(SDL_SCANCODE_DOWN, Vapor::InputAction::LookDown);
+    inputManager.mapKey(SDL_SCANCODE_LEFT, Vapor::InputAction::LookLeft);
+    inputManager.mapKey(SDL_SCANCODE_RIGHT, Vapor::InputAction::LookRight);
+    inputManager.mapKey(SDL_SCANCODE_X, Vapor::InputAction::Sprint);  // accelerate
+    inputManager.mapKey(SDL_SCANCODE_Z, Vapor::InputAction::Crouch);  // decelerate
+    bool wireframe = false;
     bool quit = false;
     float time = SDL_GetTicks() / 1000.0f;
     float statsTimer = 0.0f;
@@ -230,6 +250,14 @@ auto main(int argc, char* args[]) -> int {
                     if (e.key.scancode == SDL_SCANCODE_G) {
                         groundClamp = !groundClamp;
                         fmt::print("Ground clamp: {}\n", groundClamp ? "on" : "off");
+                    }
+                    if (e.key.scancode == SDL_SCANCODE_I) {
+                        // Wireframe over the opaque geometry — the clearest way
+                        // to watch the adaptive tessellation subdivide (triangle
+                        // density climbs toward the camera and moves as you fly).
+                        wireframe = !wireframe;
+                        renderer->setWireframe(wireframe);
+                        fmt::print("Wireframe: {}\n", wireframe ? "on" : "off");
                     }
                     if (e.key.scancode == SDL_SCANCODE_T) {
                         // Teleport 2 km along the view direction, kept inside
