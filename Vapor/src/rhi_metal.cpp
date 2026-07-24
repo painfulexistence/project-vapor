@@ -127,7 +127,10 @@ bool RHI_Metal::initialize(SDL_Window* window) {
     capabilities.bindlessTextures = capabilities.indirectCommandBuffers;
     // Wireframe is always available on Metal — set dynamically on the encoder
     // (setTriangleFillMode), so no pipeline variant or device feature needed.
+    // Metal's fill mode is inherently dynamic (there's no fill mode in the PSO),
+    // so dynamicPolygonMode is always true too.
     capabilities.wireframe = true;
+    capabilities.dynamicPolygonMode = true;
 
     // Backend telemetry: one grouped "[MTL]" line per --stats interval. Metal is
     // unified memory, so these counts (plus RSS) are the leak-hunt signal.

@@ -361,6 +361,12 @@ struct PipelineDesc {
     // Wireframe when Line (Vulkan bakes it in; Metal ignores it here and uses
     // the dynamic RHI::setFillMode instead). Requires capabilities.wireframe.
     PolygonMode polygonMode = PolygonMode::Fill;
+    // Opt this pipeline's fill mode into RHI::setFillMode (dynamic) instead of
+    // baking `polygonMode`. Metal is always dynamic (ignores the flag); Vulkan
+    // adds VK_DYNAMIC_STATE_POLYGON_MODE_EXT when capabilities.dynamicPolygonMode
+    // — so one Fill pipeline covers wireframe on every draw path, no Line twin.
+    // Ignored (baked Fill) when the device lacks the dynamic-state feature.
+    bool dynamicPolygonMode = false;
     bool frontFaceCounterClockwise = true;
     Uint32 sampleCount = 1;
     // Attachment formats this pipeline renders into. Both Metal and Vulkan
@@ -484,6 +490,11 @@ struct RHICapabilities {
     // Wireframe rasterization (Vulkan fillModeNonSolid; always true on Metal,
     // which sets the fill mode dynamically on the encoder).
     bool wireframe = false;
+    // Fill mode is switchable per-command via RHI::setFillMode (Metal always;
+    // Vulkan when VK_EXT_extended_dynamic_state3 polygon mode is available). When
+    // true, PipelineDesc.dynamicPolygonMode pipelines cover wireframe on every
+    // draw path without a Line pipeline twin.
+    bool dynamicPolygonMode = false;
 };
 
 // ============================================================================

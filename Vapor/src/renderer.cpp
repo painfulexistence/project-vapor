@@ -1902,17 +1902,16 @@ void Renderer::mainRenderPass() {
     // Begin render pass
     rhi->beginRenderPass(renderPassDesc);
 
-    // Wireframe (debug): Metal switches fill mode live on the encoder — covers
-    // every main-pass draw path; Vulkan can't, so the default bound path binds
-    // the Line pipeline variant below (GPU-driven/meshlet variants aren't
-    // wire-framed on Vulkan — they're opt-in and off by default).
-    if (backend == GraphicsBackend::Metal) {
+    // Wireframe (debug): with dynamic polygon mode (Metal always; Vulkan with
+    // extended_dynamic_state3) one setFillMode covers EVERY main-pass draw path
+    // (bindless / MDI / meshlet included). Without it (older Vulkan drivers),
+    // fall back to the baked Line pipeline twin — which only covers the default
+    // bound path, since the GPU-driven variants have no twin.
+    if (capabilities.dynamicPolygonMode) {
         rhi->setFillMode(wireframe ? PolygonMode::Line : PolygonMode::Fill);
     }
-
-    // Bind pipeline (the wireframe twin on Vulkan when enabled).
-    const bool wireVk = wireframe && backend == GraphicsBackend::Vulkan && mainPipelineWire.isValid();
-    rhi->bindPipeline(wireVk ? mainPipelineWire : mainPipeline);
+    const bool wireTwin = wireframe && !capabilities.dynamicPolygonMode && mainPipelineWire.isValid();
+    rhi->bindPipeline(wireTwin ? mainPipelineWire : mainPipeline);
 
     // Bind common buffers (same for all drawables).
     // IMPORTANT: vertex and fragment shaders have INDEPENDENT buffer index
@@ -6851,13 +6850,15 @@ void Renderer::createRenderPipeline() {
     pipelineDesc.hasDepthAttachment = true;
     pipelineDesc.depthAttachmentFormat = PixelFormat::Depth32Float;
 
+    // Wireframe: prefer dynamic fill mode (Metal always; Vulkan with
+    // extended_dynamic_state3) — one pipeline covers wireframe on every draw
+    // path via RHI::setFillMode. Only when the device lacks dynamic polygon
+    // mode do we fall back to a baked Line pipeline twin (Vulkan default path).
+    pipelineDesc.dynamicPolygonMode = capabilities.dynamicPolygonMode;
     mainPipeline = rhi->createPipeline(pipelineDesc);
 
-    // Wireframe twin (Vulkan only — Metal switches fill mode dynamically on the
-    // encoder). Same PSO with PolygonMode::Line, bound by mainRenderPass when
-    // the wireframe debug toggle is on; skipped when the device lacks the
-    // fillModeNonSolid feature.
-    if (backend == GraphicsBackend::Vulkan && capabilities.wireframe) {
+    if (backend == GraphicsBackend::Vulkan && capabilities.wireframe &&
+        !capabilities.dynamicPolygonMode) {
         PipelineDesc wireDesc = pipelineDesc;
         wireDesc.polygonMode = PolygonMode::Line;
         mainPipelineWire = rhi->createPipeline(wireDesc);

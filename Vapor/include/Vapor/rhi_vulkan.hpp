@@ -106,6 +106,7 @@ public:
     // ========================================================================
 
     void bindPipeline(PipelineHandle pipeline) override;
+    void setFillMode(PolygonMode mode) override;
     void bindVertexBuffer(BufferHandle buffer, Uint32 binding, size_t offset) override;
     void bindIndexBuffer(BufferHandle buffer, size_t offset) override;
 
@@ -396,6 +397,10 @@ private:
     VkShaderStageFlags graphicsStageFlags = 0;
     PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasks = nullptr;
     PFN_vkCmdDrawMeshTasksIndirectEXT pfnCmdDrawMeshTasksIndirect = nullptr;
+    // Dynamic polygon mode (VK_EXT_extended_dynamic_state3); null / false when
+    // the device lacks the feature (then wireframe uses Line pipeline twins).
+    PFN_vkCmdSetPolygonModeEXT pfnCmdSetPolygonMode = nullptr;
+    bool dynamicPolygonModeEnabled = false;
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     TextureBinding boundComputeSampled[BINDINGS_PER_SET] = {};
