@@ -101,6 +101,7 @@ set(SOURCES
     src/terrain_tile_cache.cpp
     src/terrain_world.cpp
     src/terrain_texture_gen.cpp
+    src/voxel_world.cpp
     # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
     src/renderer.cpp
     src/tessellation.cpp

@@ -56,6 +56,16 @@ namespace Vapor {
 struct TessellationDesc;
 
 class DebugDraw;
+class VoxelWorld;
+
+// One raymarched micro-voxel volume, resolved from the ECS
+// VoxelVolumeComponent by VoxelVolumeSystem and pushed per frame. The
+// renderer keys its GPU mirrors (page table / brick pool buffers) on the
+// VoxelWorld pointer and pulls per-brick dirty batches from it.
+struct VoxelVolumeDraw {
+    std::shared_ptr<VoxelWorld> world;
+    glm::vec3 origin = glm::vec3(0.0f);  // world-space min corner
+};
 
 // Graphics backend selection
 enum class GraphicsBackend {
@@ -329,6 +339,11 @@ public:
     virtual void updateGrassCell(Uint32 /*slot*/, const std::vector<Vapor::GrassBladeGpu>& /*blades*/) {}
     virtual void setGrassDraws(const std::vector<Vapor::GrassCellDraw>& /*draws*/,
                                const Vapor::GrassSettingsData& /*settings*/) {}
+
+    // Per-frame micro-voxel volume list resolved from the ECS
+    // VoxelVolumeComponent by VoxelVolumeSystem. The RHI renderer raymarches
+    // them (MicroVoxel pass); backends without the pass ignore the list.
+    virtual void setVoxelVolumes(const std::vector<Vapor::VoxelVolumeDraw>& volumes) {}
 
 protected:
     std::function<void()> m_imGuiCallback;
