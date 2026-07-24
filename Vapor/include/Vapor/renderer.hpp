@@ -1370,10 +1370,18 @@ private:
         BufferHandle rootBuffer;      // TessRootGpu[]
         BufferHandle argsBuffer;      // TessArgs (GPU-written indirect args)
         BufferHandle leafDataBuffer;  // TessLeafDataGpu[maxLeaves] (compute path)
+        // TessParams mirror for backends whose inline-constant path can't
+        // carry the 112-byte struct (Vulkan's 64-byte compute push range);
+        // refreshed once per frame, bound at b4 (compute) / b3 (vertex).
+        BufferHandle paramsBuffer;
     };
     std::vector<TessInstance> m_tessInstances;
     Uint32 m_nextTessMeshId = 1;
-    void createTessellationPipelines();  // called from the Metal init block
+    void createTessellationPipelines();        // called from the Metal init block
+    void createTessellationPipelinesVulkan();  // GLSL twins, from the Vulkan init block
+    // True when TessParams travel via TessInstance::paramsBuffer instead of
+    // inline bytes (set by the Vulkan pipeline init).
+    bool tessParamsViaBuffer = false;
     void ensureTessGridBuffers();
     bool tessMeshPathActive() const;
     TessParamsGpu tessFillParams(const TessInstance& t) const;

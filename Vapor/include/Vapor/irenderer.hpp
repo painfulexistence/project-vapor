@@ -312,9 +312,10 @@ public:
     // fan-triangulated into LEB roots and subdivided on the GPU every frame
     // against a screen-space LoD metric, with optional heightfield
     // displacement (TessellationDesc::terrainHeightfield — how TerrainSystem
-    // renders true displaced terrain detail). Returns 0 when the backend has
-    // no tessellation pipelines (currently everything but Metal) or creation
-    // failed; callers must fall back to their mesh path.
+    // renders true displaced terrain detail). Metal runs the mesh/task or
+    // instanced route, Vulkan the GLSL compute + instanced route. Returns 0
+    // when the backend has no tessellation pipelines or creation failed;
+    // callers must fall back to their mesh path.
     virtual Uint32 createTessellatedMesh(const Mesh& /*mesh*/, const TessellationDesc& /*desc*/) { return 0; }
     virtual void destroyTessellatedMesh(Uint32 /*id*/) {}
     virtual void setTessellatedMeshTransform(Uint32 /*id*/, const glm::mat4& /*model*/) {}

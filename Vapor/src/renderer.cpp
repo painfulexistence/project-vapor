@@ -6772,6 +6772,11 @@ void Renderer::createRenderPipeline() {
             // GPU-driven rendering: frustum-cull compute pass.
             gpuCullPipeline = makeCompute("shaders/GpuCull.comp.spv", gpuCullShader);
 
+            // Adaptive tessellation (CBT/LEB): the GLSL twins of the Metal
+            // compute chain + the instanced draw path (no mesh/task route on
+            // Vulkan yet — tessMeshPathActive() falls back on its own).
+            createTessellationPipelinesVulkan();
+
             particleForcePipeline     = makeCompute("shaders/ParticleForce.comp.spv", particleForceShader);
             particleIntegratePipeline = makeCompute("shaders/ParticleIntegrate.comp.spv", particleIntegrateShader);
 

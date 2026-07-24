@@ -650,8 +650,9 @@ namespace Vapor {
             // world-spanning plane; the Tess pass refines it adaptively on the
             // GPU with true heightfield displacement (the same OpenSimplex2
             // FBm field heightAt runs), terrain-aware LoD metric and palette
-            // shading. Metal-only today — createTessellatedMesh returns 0 on
-            // other backends and the classic tile rings below take over.
+            // shading. Runs on Metal and Vulkan; on backends without tess
+            // pipelines createTessellatedMesh returns 0 and the classic tile
+            // rings below take over.
             if (tc.tessMeshId.value != 0) {
                 renderer->destroyTessellatedMesh(tc.tessMeshId.value);
                 tc.tessMeshId.value = 0;

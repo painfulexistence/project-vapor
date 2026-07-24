@@ -192,6 +192,77 @@ void Renderer::createTessellationPipelines() {
     ensureTessGridBuffers();
 }
 
+void Renderer::createTessellationPipelinesVulkan() {
+    // GLSL twins of the MSL kernels (TessClassify/TessReduce*/TessPrepareArgs/
+    // TessLeafPrep.comp + TessRender.vert/.frag), precompiled to SPIR-V by the
+    // asset pipeline. Two deliberate contract differences from Metal, mirrored
+    // in the shaders' binding comments: the CBT is one SSBO at b0 (no separate
+    // atomic view at b1), and TessParams travel in a small per-instance buffer
+    // (compute b4 / vertex b3) because Vulkan's 64-byte push range can't carry
+    // the 112-byte struct that Metal passes as inline bytes. The mesh/task
+    // path stays Metal-only; tessMeshPathActive() falls back to this instanced
+    // route on its own.
+    auto makeKernel = [&](const char* spv, ShaderHandle& sh, Uint32 groupX) -> ComputePipelineHandle {
+        std::string code = readFile(spv);
+        if (code.empty()) return {};
+        ShaderDesc d;
+        d.stage = ShaderStage::Compute;
+        d.code = code.data();
+        d.codeSize = code.size();
+        d.entryPoint = "main";
+        sh = rhi->createShader(d);
+        ComputePipelineDesc cd;
+        cd.computeShader = sh;
+        cd.threadGroupSizeX = groupX;  // matches local_size_x in the .comp
+        return rhi->createComputePipeline(cd);
+    };
+    tessClassifyPipeline = makeKernel("shaders/TessClassify.comp.spv", tessClassifyShader, 64);
+    tessReduceFirstPipeline = makeKernel("shaders/TessReduceFirst.comp.spv", tessReduceFirstShader, 64);
+    tessReduceLevelPipeline = makeKernel("shaders/TessReduceLevel.comp.spv", tessReduceLevelShader, 64);
+    tessArgsPipeline = makeKernel("shaders/TessPrepareArgs.comp.spv", tessArgsShader, 1);
+    tessLeafPrepPipeline = makeKernel("shaders/TessLeafPrep.comp.spv", tessLeafPrepShader, 64);
+
+    std::string tv = readFile("shaders/TessRender.vert.spv");
+    std::string tf = readFile("shaders/TessRender.frag.spv");
+    if (!tv.empty() && !tf.empty()) {
+        ShaderDesc vd;
+        vd.stage = ShaderStage::Vertex;
+        vd.code = tv.data();
+        vd.codeSize = tv.size();
+        vd.entryPoint = "main";
+        tessVertexShader = rhi->createShader(vd);
+        ShaderDesc fd;
+        fd.stage = ShaderStage::Fragment;
+        fd.code = tf.data();
+        fd.codeSize = tf.size();
+        fd.entryPoint = "main";
+        tessFragmentShader = rhi->createShader(fd);
+
+        // Same render-state contract as the Metal instanced pipeline (HDR
+        // color + depth, cull off), with the Vulkan-required explicit formats
+        // and the no-vertex-layout shape the grass/particle passes proved out.
+        PipelineDesc p;
+        p.vertexShader = tessVertexShader;
+        p.fragmentShader = tessFragmentShader;
+        p.vertexLayout.stride = 0;  // vertex-pulled, no vertex descriptor
+        p.vertexLayout.attributes = {};
+        p.topology = PrimitiveTopology::TriangleList;
+        p.blendMode = BlendMode::Opaque;
+        p.depthTest = true;
+        p.depthWrite = true;
+        p.depthCompareOp = CompareOp::LessOrEqual;
+        p.cullMode = CullMode::None;
+        p.sampleCount = 1;
+        p.hasDepthAttachment = true;
+        p.depthAttachmentFormat = PixelFormat::Depth32Float;
+        p.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+        tessRenderPipeline = rhi->createPipeline(p);
+    }
+
+    tessParamsViaBuffer = true;
+    ensureTessGridBuffers();
+}
+
 void Renderer::ensureTessGridBuffers() {
     if (tessGridVertexBuffer.isValid()) return;
     std::vector<glm::vec2> verts;
@@ -294,6 +365,14 @@ Uint32 Renderer::createTessellatedMesh(const Mesh& mesh, const TessellationDesc&
     lb.memoryUsage = MemoryUsage::GPU;
     t.leafDataBuffer = rhi->createBuffer(lb);
 
+    // TessParams mirror (see the TessInstance field): only read where inline
+    // bytes can't carry the struct, but created everywhere — 112 bytes.
+    BufferDesc pb;
+    pb.size = sizeof(TessParamsGpu);
+    pb.usage = BufferUsage::Storage;
+    pb.memoryUsage = MemoryUsage::GPU;
+    t.paramsBuffer = rhi->createBuffer(pb);
+
     rhi->flushUploads();
     m_tessInstances.push_back(t);
     fmt::print("[Tess] mesh {}: {} roots (rootDepth {}), maxDepth {}, CBT {} KB\n",
@@ -308,6 +387,7 @@ void Renderer::destroyTessellatedMesh(Uint32 id) {
         rhi->destroyBuffer(it->rootBuffer);
         rhi->destroyBuffer(it->argsBuffer);
         rhi->destroyBuffer(it->leafDataBuffer);
+        rhi->destroyBuffer(it->paramsBuffer);
         m_tessInstances.erase(it);
         return;
     }
@@ -355,18 +435,33 @@ void Renderer::tessUpdatePass() {
     }
     const bool meshPath = tessMeshPathActive();
 
+    // Vulkan carries TessParams in the per-instance buffer (its 64-byte
+    // compute push range can't fit the 112-byte struct) — refresh each one
+    // before the encoder opens; the whole frame reads the same contents.
+    if (tessParamsViaBuffer) {
+        for (const TessInstance& t : m_tessInstances) {
+            const TessParamsGpu p = tessFillParams(t);
+            rhi->updateBuffer(t.paramsBuffer, &p, 0, sizeof(p));
+        }
+    }
+
     rhi->beginComputePass("TessUpdate");
     for (const TessInstance& t : m_tessInstances) {
         const TessParamsGpu p = tessFillParams(t);
+        // Metal: TessParams as inline bytes; Vulkan: the per-instance buffer.
+        const auto bindParams = [&] {
+            if (tessParamsViaBuffer) rhi->setComputeBuffer(4, t.paramsBuffer);
+            else rhi->setComputeBytes(&p, sizeof(p), 4);
+        };
 
         // Classify: split/merge bit writes, sized by LAST frame's leaf count
         // (the args written by the previous frame's tessPrepareArgs).
         rhi->bindComputePipeline(tessClassifyPipeline);
         rhi->setComputeBuffer(0, t.cbtBuffer);      // read view
-        rhi->setComputeBuffer(1, t.cbtBuffer);      // atomic write view (same buffer)
+        rhi->setComputeBuffer(1, t.cbtBuffer);      // atomic write view (same buffer; unused on Vulkan)
         rhi->setComputeBuffer(2, t.rootBuffer);
         rhi->setComputeBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-        rhi->setComputeBytes(&p, sizeof(p), 4);
+        bindParams();
         rhi->dispatchIndirect(t.argsBuffer, kTessArgsClassifyOffset);
         rhi->computeBarrier();
 
@@ -392,7 +487,7 @@ void Renderer::tessUpdatePass() {
         // and the next frame's classify.
         rhi->bindComputePipeline(tessArgsPipeline);
         rhi->setComputeBuffer(0, t.cbtBuffer);
-        rhi->setComputeBytes(&p, sizeof(p), 4);
+        bindParams();
         rhi->setComputeBuffer(5, t.argsBuffer);
         rhi->dispatch(1, 1, 1);
         rhi->computeBarrier();
@@ -404,7 +499,7 @@ void Renderer::tessUpdatePass() {
             rhi->setComputeBuffer(0, t.cbtBuffer);
             rhi->setComputeBuffer(2, t.rootBuffer);
             rhi->setComputeBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-            rhi->setComputeBytes(&p, sizeof(p), 4);
+            bindParams();
             rhi->setComputeBuffer(6, t.leafDataBuffer);
             rhi->dispatchIndirect(t.argsBuffer, kTessArgsLeafPrepOffset);
         }
@@ -443,7 +538,8 @@ void Renderer::tessRenderPass() {
             rhi->setVertexBuffer(0, tessGridVertexBuffer);
             rhi->setVertexBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setVertexBuffer(2, t.leafDataBuffer);
-            rhi->setVertexBytes(&p, sizeof(p), 3);
+            if (tessParamsViaBuffer) rhi->setVertexBuffer(3, t.paramsBuffer);
+            else rhi->setVertexBytes(&p, sizeof(p), 3);
             rhi->bindIndexBuffer(tessGridIndexBuffer);
             rhi->drawIndexedIndirect(t.argsBuffer, kTessArgsDrawOffset, 1,
                                      sizeof(Vapor::DrawCommand));

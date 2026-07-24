@@ -283,10 +283,11 @@ namespace Vapor {
         float grassWindSpeed = 1.8f;
         // CBT displaced tessellation (opt-in): render the terrain surface as
         // ONE adaptively subdivided plane with true heightfield displacement
-        // (the Tess pass) instead of the streamed tile-mesh rings. Metal-only
-        // today — on backends without tessellation pipelines the classic tile
-        // path takes over automatically. Grass, scatter and height queries are
-        // unaffected (same height source either way).
+        // (the Tess pass) instead of the streamed tile-mesh rings. Runs on
+        // Metal (mesh/task or instanced) and Vulkan (compute + instanced); on
+        // backends without tessellation pipelines the classic tile path takes
+        // over automatically. Grass, scatter and height queries are unaffected
+        // (same height source either way).
         bool cbtTessellation = false;
         bool regenerate = false;       // set true (e.g. from the inspector) to rebuild
         Hidden<std::shared_ptr<TerrainWorld>> world = {};  // owned; created by the system
