@@ -107,12 +107,12 @@ vec2 tvGlitch(float y, float t, float intensity) {
     float tick  = floor(t * 12.0);
     // Coarse blocks that jump left/right (only a sparse subset is active).
     float blk    = floor(y * 20.0);
-    float active = step(0.80, hash21(vec2(blk, tick))) * storm;
-    float coarse = (hash21(vec2(blk, tick + 7.0)) - 0.5) * 0.12 * active;
+    float hit    = step(0.80, hash21(vec2(blk, tick))) * storm;
+    float coarse = (hash21(vec2(blk, tick + 7.0)) - 0.5) * 0.12 * hit;
     // Fine scanline-scale tearing during storms.
     float fine   = (hash21(vec2(floor(y * 220.0), tick)) - 0.5) * 0.02 * storm;
     float shift  = (coarse + fine) * intensity;
-    float split  = (active + storm * 0.3) * 0.015 * intensity;
+    float split  = (hit + storm * 0.3) * 0.015 * intensity;
     return vec2(shift, split);
 }
 
@@ -167,9 +167,9 @@ void main() {
     // here (after VHS, before CRT) so it stacks with both.
     float glitchSplit = 0.0;
     if (enableGlitch > 0.5) {
-        vec2 gl = tvGlitch(uv.y, time, glitchIntensity);
-        uv.x += gl.x;
-        glitchSplit = gl.y;
+        vec2 gd = tvGlitch(uv.y, time, glitchIntensity);
+        uv.x += gd.x;
+        glitchSplit = gd.y;
     }
 
     // CRT: barrel distortion; samples pushed off-screen render black.
