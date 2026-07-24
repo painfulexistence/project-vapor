@@ -111,6 +111,7 @@ struct RenderMaterial {
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
     float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
+    Uint32 shaderModel = 0;     // Vapor::MaterialShader: 0 Standard / 1 Terrain / 2 Grass
     bool useIBL = false;  // native Material::useIBL default (graphics.hpp)
 
     // Texture references (IDs, not handles)
@@ -316,6 +317,26 @@ struct WindRenderData {
     glm::vec3 direction  = glm::vec3(1.0f, 0.0f, 0.0f);
     float     strength   = 1.0f;
     float     turbulence = 0.0f;
+};
+
+// ── Grass ring (streamed instanced blades; see TerrainSystem) ───────────────
+// One draw of a resident grass cell: `slot` selects the fixed instance-pool
+// range (slot * bladesPerSlot), `count` the live blades in it.
+struct GrassCellDraw {
+    Uint32 slot = 0;
+    Uint32 count = 0;
+};
+
+// Per-frame grass look/wind settings, resolved from StreamingTerrainComponent
+// by TerrainSystem. Defaults match the original demo's tuned values.
+struct GrassSettingsData {
+    glm::vec2 windDir = glm::vec2(0.8f, 0.6f);
+    float windStrength = 0.45f;                  // tip sway amplitude (m)
+    float windSpeed = 1.8f;
+    glm::vec3 rootColor = glm::vec3(0.10f, 0.15f, 0.06f);   // shadowed base
+    glm::vec3 tipColor = glm::vec3(0.965f, 0.949f, 0.388f); // golden-yellow tip
+    float fadeStart = 60.0f;                     // blades shrink to zero across
+    float fadeEnd = 90.0f;                       // [fadeStart, fadeEnd] metres
 };
 
 struct alignas(16) FogRenderData {
@@ -631,6 +652,7 @@ struct MaterialDataInput {
     float clearcoat = 0.0f;
     float clearcoatGloss = 1.0f;
     float transmission = 0.0f;  // KHR_materials_transmission (rendering only)
+    Uint32 shaderModel = 0;     // Vapor::MaterialShader: 0 Standard / 1 Terrain / 2 Grass
 
     // Texture data (from Application's Image objects)
     std::shared_ptr<Vapor::Image> albedoMap;

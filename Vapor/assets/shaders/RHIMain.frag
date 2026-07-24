@@ -64,6 +64,9 @@ struct MaterialData {
     float uvScale;
     float iblEnabled;
     float transmission;
+    // Surface shader model (0 Standard / 1 Terrain / 2 Grass). In the C++ tail
+    // after transmission; std430 stride stays 112.
+    float shaderModel;
 };
 
 // Must match DirectionalLightData / PointLightData (C++, stride 48 each)
@@ -239,6 +242,14 @@ layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 layout(set = 2, binding = 10) uniform samplerCube irradianceMap;
 layout(set = 2, binding = 11) uniform samplerCube prefilterMap;
 layout(set = 2, binding = 12) uniform sampler2D brdfLut;
+// Terrain detail layers (grass/rock/dirt/snow), world-space tiled: two arrays
+// (4 albedo, 4 tangent-space normal) SHARED by every terrain tile — bound once
+// per frame (default white when no terrain is staged), sampled only by the
+// shaderModel == 1 (Terrain) branch. b13/b14 are the slots the raised
+// TEXTURE_BINDINGS_PER_SET added; a plain Standard draw keeps them bound (to the
+// default) but never samples them.
+layout(set = 2, binding = 13) uniform sampler2DArray terrainDetailAlbedo;
+layout(set = 2, binding = 14) uniform sampler2DArray terrainDetailNormal;
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -567,6 +578,187 @@ vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
     return (diffuseIBL + specularIBL) * ao * cullIblIntensity;
 }
 
+// ── Terrain surface (shaderModel == 1) ──────────────────────────────────────
+// Faithful port of Atmospheric's terrain.frag (4-layer albedo/normal blend) +
+// terrain_texture_gen defaultSplat (weights), but the weights are recomputed
+// PER-FRAGMENT from height/slope + world-space FBm breakup — no splat texture,
+// so it stays compatible with the fixed-slot terrain streaming. Detail layers
+// tile in WORLD space (continuous across streamed tiles). Per-layer world-space
+// frequency (repeats/metre): grass 4 m, rock ~21 m, dirt 8 m, snow ~13 m.
+const vec4 kTerrainLayerFreq = vec4(0.25, 0.046875, 0.125, 0.078125);
+const uint kTerrainSplatSeed = 7u;
+
+uint tgHash2(int x, int y, uint seed) {
+    uint h = uint(x) * 374761393u + uint(y) * 668265263u + seed * 2654435761u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+float tgHash01(int x, int y, uint seed) { return float(tgHash2(x, y, seed) >> 8) * (1.0 / 16777216.0); }
+float tgSmooth(float t) { return t * t * (3.0 - 2.0 * t); }
+
+// world-space (non-periodic) value-noise FBm, matching WorldFBm() in the CPU gen
+float tgWorldFBm(vec2 p, float wavelength, int octaves, uint seed) {
+    float sum = 0.0, amp = 0.5, freq = 1.0 / wavelength;
+    for (int k = 0; k < octaves; ++k) {
+        float u = p.x * freq, v = p.y * freq;
+        int xi = int(floor(u)), yi = int(floor(v));
+        float fx = tgSmooth(u - float(xi)), fy = tgSmooth(v - float(yi));
+        uint s = seed + uint(k) * 131u;
+        float a = tgHash01(xi, yi, s),     b = tgHash01(xi + 1, yi, s);
+        float c = tgHash01(xi, yi + 1, s), d = tgHash01(xi + 1, yi + 1, s);
+        sum += amp * mix(mix(a, b, fx), mix(c, d, fx), fy);
+        amp *= 0.5; freq *= 2.0;
+    }
+    return sum;
+}
+
+// {grass, rock, dirt, snow} weights (defaultSplat rules, in-shader).
+vec4 terrainSplatWeights(float height01, float slope, vec2 worldXZ) {
+    float b1 = tgWorldFBm(worldXZ, 180.0, 3, kTerrainSplatSeed);
+    float b2 = tgWorldFBm(worldXZ, 45.0, 3, kTerrainSplatSeed + 101u);
+    float rock = smoothstep(0.55, 1.05, slope + 0.25 * (b1 - 0.5));
+    float snowline = 0.62 + 0.08 * (b2 - 0.5);
+    float snow = smoothstep(snowline, snowline + 0.16, height01) * (1.0 - 0.85 * rock);
+    float dirt = 0.55 * smoothstep(0.5, 0.75, b2) * smoothstep(0.18, 0.45, slope + 0.2 * (b1 - 0.5));
+    dirt += 0.6 * smoothstep(0.10, 0.04, height01);
+    dirt = clamp(dirt, 0.0, 1.0) * (1.0 - rock) * (1.0 - snow);
+    float grass = max(1.0 - rock - snow - dirt, 0.0);
+    vec4 w = vec4(grass, rock, dirt, snow);
+    return w / max(w.x + w.y + w.z + w.w, 1e-4);
+}
+
+// ── Terrain height field — FastNoiseLite v1.1.1 OpenSimplex2 FBm, ported
+// function-for-function from the vendored header so per-pixel normals
+// reconstruct the SAME field the streamed mesh (TerrainWorld::heightAt) is
+// built on — which is itself the exact height source of Atmospheric's
+// TerrainStreamer. The LOD mesh only carries vertex normals at its grid
+// spacing (8 m at LOD0), so every octave finer than that is smoothed away by
+// interpolation; re-evaluating the field around each pixel reconstructs the
+// fine normal continuously. Signed-int hashing relies on SPIR-V's defined
+// two's-complement wrapping. Params arrive packed in the terrain material's
+// unused Disney lobe fields (see the terrain material upload in renderer.cpp).
+const int kFnlPrimeX = 501125321;
+const int kFnlPrimeY = 1136930381;
+// Gradients2D is 128 pairs: a 24-direction fan (15 deg steps from 82.5 deg)
+// repeated 5 times, then 8 picks at 45 deg steps (fan indices 1,4,7,...,22).
+const vec2 kFnlFan[24] = vec2[24](
+    vec2(0.130526192220052, 0.99144486137381),   vec2(0.38268343236509, 0.923879532511287),
+    vec2(0.608761429008721, 0.793353340291235),  vec2(0.793353340291235, 0.608761429008721),
+    vec2(0.923879532511287, 0.38268343236509),   vec2(0.99144486137381, 0.130526192220051),
+    vec2(0.99144486137381, -0.130526192220051),  vec2(0.923879532511287, -0.38268343236509),
+    vec2(0.793353340291235, -0.60876142900872),  vec2(0.608761429008721, -0.793353340291235),
+    vec2(0.38268343236509, -0.923879532511287),  vec2(0.130526192220052, -0.99144486137381),
+    vec2(-0.130526192220052, -0.99144486137381), vec2(-0.38268343236509, -0.923879532511287),
+    vec2(-0.608761429008721, -0.793353340291235),vec2(-0.793353340291235, -0.608761429008721),
+    vec2(-0.923879532511287, -0.38268343236509), vec2(-0.99144486137381, -0.130526192220052),
+    vec2(-0.99144486137381, 0.130526192220051),  vec2(-0.923879532511287, 0.38268343236509),
+    vec2(-0.793353340291235, 0.608761429008721), vec2(-0.608761429008721, 0.793353340291235),
+    vec2(-0.38268343236509, 0.923879532511287),  vec2(-0.130526192220052, 0.99144486137381));
+vec2 fnlGradient2(int pairIndex) {
+    return pairIndex < 120 ? kFnlFan[pairIndex % 24] : kFnlFan[1 + 3 * (pairIndex - 120)];
+}
+float fnlGradCoord(int seed, int xPrimed, int yPrimed, float xd, float yd) {
+    int hash = (seed ^ xPrimed ^ yPrimed) * 0x27d4eb2d;
+    hash ^= hash >> 15;
+    hash &= 127 << 1;
+    vec2 g = fnlGradient2(hash >> 1);
+    return xd * g.x + yd * g.y;
+}
+// SingleSimplex (2D OpenSimplex2): input is already frequency-scaled + skewed.
+float fnlSimplex2(int seed, vec2 p) {
+    const float SQRT3 = 1.7320508075688772935;
+    const float G2 = (3.0 - SQRT3) / 6.0;
+    int i = int(floor(p.x)), j = int(floor(p.y));
+    float xi = p.x - float(i), yi = p.y - float(j);
+    float t = (xi + yi) * G2;
+    float x0 = xi - t, y0 = yi - t;
+    i *= kFnlPrimeX;
+    j *= kFnlPrimeY;
+    float n0 = 0.0, n1 = 0.0, n2 = 0.0;
+    float a = 0.5 - x0 * x0 - y0 * y0;
+    if (a > 0.0) n0 = (a * a) * (a * a) * fnlGradCoord(seed, i, j, x0, y0);
+    float c = (2.0 * (1.0 - 2.0 * G2) * (1.0 / G2 - 2.0)) * t
+            + ((-2.0 * (1.0 - 2.0 * G2) * (1.0 - 2.0 * G2)) + a);
+    if (c > 0.0) {
+        float x2 = x0 + (2.0 * G2 - 1.0), y2 = y0 + (2.0 * G2 - 1.0);
+        n2 = (c * c) * (c * c) * fnlGradCoord(seed, i + kFnlPrimeX, j + kFnlPrimeY, x2, y2);
+    }
+    if (y0 > x0) {
+        float x1 = x0 + G2, y1 = y0 + (G2 - 1.0);
+        float b = 0.5 - x1 * x1 - y1 * y1;
+        if (b > 0.0) n1 = (b * b) * (b * b) * fnlGradCoord(seed, i, j + kFnlPrimeY, x1, y1);
+    } else {
+        float x1 = x0 + (G2 - 1.0), y1 = y0 + G2;
+        float b = 0.5 - x1 * x1 - y1 * y1;
+        if (b > 0.0) n1 = (b * b) * (b * b) * fnlGradCoord(seed, i + kFnlPrimeX, j, x1, y1);
+    }
+    return (n0 + n1 + n2) * 99.83685446303647;
+}
+// GetNoise: TransformNoiseCoordinate (frequency + F2 skew) -> GenFractalFBm
+// (lacunarity 2, gain 0.5, weightedStrength 0), then the heightFn mapping
+// noise * 0.5 + 0.5 clamped to [0,1] and scaled — matching heightAt exactly.
+float trHeightAt(vec2 xz, float noiseFreq, int octaves, uint seed, float heightScale) {
+    vec2 p = xz * noiseFreq;
+    const float SQRT3 = 1.7320508075688772935;
+    const float F2 = 0.5 * (SQRT3 - 1.0);
+    p += vec2((p.x + p.y) * F2);
+    const float gain = 0.5;
+    float amp = gain, ampFractal = 1.0;
+    for (int i = 1; i < octaves; ++i) { ampFractal += amp; amp *= gain; }
+    int s = int(seed);
+    float sum = 0.0;
+    amp = 1.0 / ampFractal;  // fractalBounding
+    for (int i = 0; i < octaves; ++i) {
+        sum += fnlSimplex2(s++, p) * amp;
+        p *= 2.0;
+        amp *= gain;
+    }
+    return clamp(sum * 0.5 + 0.5, 0.0, 1.0) * heightScale;
+}
+
+// Fill albedo (linear) + per-pixel world normal from the detail layers. The
+// base surface normal is reconstructed from the terrain height field per
+// fragment (trHeightAt), not the coarse interpolated vertex normal.
+void shadeTerrain(vec3 worldPos, MaterialData mat, float height01, out vec3 albedo, out vec3 N) {
+    // Height-field descriptor packed into the terrain material's spare fields.
+    float noiseFreq   = mat.subsurface;
+    float heightScale = mat.specular;
+    int   octaves     = int(mat.specularTint + 0.5);
+    uint  seed        = floatBitsToUint(mat.anisotropic);
+
+    // Central-difference normal. The sample distance d tracks the pixel's
+    // world-space footprint (>= 1 m), so distant terrain band-limits the noise
+    // the way a mipmapped heightmap would — no shimmer — while near terrain
+    // resolves the finest octave. Sign convention matches buildTileGeometry's
+    // vertex normal: normalize(vec3(hl - hr, 2d, hb - ht)).
+    float fp = max(max(abs(dFdx(worldPos.x)), abs(dFdy(worldPos.x))),
+                   max(abs(dFdx(worldPos.z)), abs(dFdy(worldPos.z))));
+    float d = clamp(fp, 1.0, 64.0);
+    float hl = trHeightAt(worldPos.xz - vec2(d, 0.0), noiseFreq, octaves, seed, heightScale);
+    float hr = trHeightAt(worldPos.xz + vec2(d, 0.0), noiseFreq, octaves, seed, heightScale);
+    float hb = trHeightAt(worldPos.xz - vec2(0.0, d), noiseFreq, octaves, seed, heightScale);
+    float ht = trHeightAt(worldPos.xz + vec2(0.0, d), noiseFreq, octaves, seed, heightScale);
+    vec3 baseN = normalize(vec3(hl - hr, 2.0 * d, hb - ht));
+
+    float slope = length(baseN.xz) / max(baseN.y, 1e-3);  // rise/run
+    vec4 w = terrainSplatWeights(height01, slope, worldPos.xz);
+    vec2 wp = worldPos.xz;
+    vec3 c = vec3(0.0);
+    vec3 dn = vec3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        vec2 uv = wp * kTerrainLayerFreq[i];
+        c  += w[i] * pow(texture(terrainDetailAlbedo, vec3(uv, float(i))).rgb, vec3(2.2));
+        dn += w[i] * (texture(terrainDetailNormal, vec3(uv, float(i))).xyz * 2.0 - 1.0);
+    }
+    albedo = c;
+    dn = normalize(dn + vec3(0.0, 0.0, 1e-4));
+    // perturb the procedural surface normal by the tangent-space detail normal
+    vec3 nn = baseN;
+    vec3 T = normalize(vec3(1.0, 0.0, 0.0) - nn * nn.x);
+    vec3 B = cross(nn, T);
+    N = normalize(T * dn.x + B * dn.y + nn * dn.z);
+}
+
 void main() {
     MaterialData mat = materials[fragMaterialID];
 
@@ -596,6 +788,20 @@ void main() {
         nSample.xy *= mat.normalScale;
         N = normalize(mat3(T, B, N) * nSample);
     }
+
+    // Terrain: replace albedo + normal with the world-space detail-layer splat.
+    // fragUV.x carries height01 (baked by buildTileGeometry); the geometric
+    // normal drives slope. Terrain shades as a rough dielectric through the same
+    // PBR lighting below (shadows / lights / IBL), so it is lit consistently
+    // with the rest of the scene rather than the original's flat sun term.
+    if (mat.shaderModel == 1.0) {
+        vec3 tAlbedo, tN;
+        shadeTerrain(fragPos, mat, clamp(fragUV.x, 0.0, 1.0), tAlbedo, tN);
+        albedo = tAlbedo * instanceColor.rgb;  // detail albedo is already linear
+        N = tN;
+        metallic = 0.0;
+        roughness = 0.95;
+    }
     // Orthonormal tangent frame against the (possibly mapped) N for the
     // anisotropic BRDF term. Degenerate tangent -> arbitrary basis (anisotropic
     // defaults to 0, so the exact axis is moot then).
@@ -611,14 +817,20 @@ void main() {
     vec3 V = normalize(cam.position - fragPos);
 
     // Full Disney material for the direct-lighting BRDF (mirrors Metal's Surface).
+    // Terrain (shaderModel == 1) overloads the Disney lobe fields to carry its
+    // height-field descriptor (see shadeTerrain), so feed the BRDF neutral
+    // dielectric values there instead of the packed data — otherwise specular
+    // would read heightScale (~500) and anisotropic a garbage seed-bit float.
+    // Terrain is meant to shade as a plain rough dielectric anyway.
+    bool isTerrain = (mat.shaderModel == 1.0);
     Surface surf;
     surf.color = albedo;
     surf.roughness = roughness;
     surf.metallic = metallic;
-    surf.subsurface = mat.subsurface;
-    surf.specular = mat.specular;
-    surf.specularTint = mat.specularTint;
-    surf.anisotropic = mat.anisotropic;
+    surf.subsurface = isTerrain ? 0.0 : mat.subsurface;
+    surf.specular = isTerrain ? 0.5 : mat.specular;
+    surf.specularTint = isTerrain ? 0.0 : mat.specularTint;
+    surf.anisotropic = isTerrain ? 0.0 : mat.anisotropic;
     surf.sheen = mat.sheen;
     surf.sheenTint = mat.sheenTint;
     surf.clearcoat = mat.clearcoat;

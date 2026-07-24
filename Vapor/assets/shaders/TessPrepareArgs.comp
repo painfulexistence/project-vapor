@@ -1,0 +1,55 @@
+#version 450
+// Adaptive GPU tessellation — indirect args kernel (Vulkan twin of
+// tessPrepareArgs in 3d_tess_update.metal). Single thread: from the reduced
+// leaf count, write next frame's classify dispatch, this frame's leafPrep
+// dispatch, the indirect draw command (one grid instance per leaf) and the
+// mesh-path task grid — the CPU never sees any of these numbers.
+//
+// b0 = CBT storage (read; leaf count at word 0)
+// b4 = TessParams (per-instance buffer — see TessClassify.comp)
+// b5 = TessArgs, addressed as a flat uint[16] (field offsets are load-bearing:
+//      classify@0, leafPrep@12, draw@24, meshTasks@44, leafCount@56 bytes —
+//      see kTessArgs* in tessellation.hpp)
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer CbtBuf { uint cbt[]; };
+layout(std430, binding = 4) readonly buffer ParamsBuf {
+    mat4 model;
+    uint maxDepth;
+    uint rootDepth;
+    uint rootCount;
+    uint maxLeaves;
+    float splitPixels;
+    float screenHeight;
+    float displacementScale;
+    uint flags;
+    uint gridIndexCount;
+    float terrainFrequency;
+    uint terrainSeed;
+    uint terrainOctaves;
+} params;
+layout(std430, binding = 5) writeonly buffer ArgsBuf { uint args[]; };
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+    uint leafCount = cbt[0];
+    uint drawn = min(leafCount, params.maxLeaves);
+
+    args[0] = (leafCount + 63u) / 64u;  // classify dispatch
+    args[1] = 1u;
+    args[2] = 1u;
+    args[3] = (drawn + 63u) / 64u;      // leafPrep dispatch
+    args[4] = 1u;
+    args[5] = 1u;
+    args[6] = params.gridIndexCount;    // draw: indexCount
+    args[7] = drawn;                    // draw: instanceCount (one per leaf)
+    args[8] = 0u;                       // draw: firstIndex
+    args[9] = 0u;                       // draw: vertexOffset
+    args[10] = 0u;                      // draw: firstInstance
+    args[11] = (drawn + 31u) / 32u;     // mesh-path task grid
+    args[12] = 1u;
+    args[13] = 1u;
+    args[14] = leafCount;
+    args[15] = 0u;
+}

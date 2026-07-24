@@ -98,6 +98,9 @@ set(SOURCES
     src/character_controller.cpp
     src/vehicle_controller.cpp
     src/fluid_volume.cpp
+    src/terrain_tile_cache.cpp
+    src/terrain_world.cpp
+    src/terrain_texture_gen.cpp
     # RHI architecture files (replacing renderer_metal.cpp and renderer_vulkan.cpp)
     src/renderer.cpp
     src/tessellation.cpp
@@ -160,6 +163,10 @@ target_include_directories(Vapor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include/Vapor
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/miniaudio
+    # Vendored FastNoiseLite v1.1.1 (single MIT header, like stb): the terrain
+    # height source — the same library/version Atmospheric's TerrainStreamer
+    # uses, so streamed terrain reproduces its OpenSimplex2 FBm exactly.
+    ${CMAKE_CURRENT_SOURCE_DIR}/FastNoiseLite
 )
 
 if(FFMPEG_FOUND)

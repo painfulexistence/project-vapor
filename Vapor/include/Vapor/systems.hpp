@@ -1,14 +1,21 @@
 #pragma once
 
 #include "components.hpp"
+#include "engine_core.hpp"
 #include "input_manager.hpp"
+#include "mesh_builder.hpp"
 #include "physics_3d.hpp"
 #include "render_data.hpp"
 #include "renderer.hpp"
 #include "render_scene.hpp"
+#include "terrain_texture_gen.hpp"
+#include "terrain_world.hpp"
+#include <SDL3/SDL_filesystem.h>
 #include <entt/entt.hpp>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <limits>
 #include <memory>
 #include <random>
 #include <vector>
@@ -440,6 +447,514 @@ namespace Vapor {
 
                 break;  // singleton: the first sky entity wins
             }
+        }
+    };
+
+    // ============================================================================
+    // Streamed terrain — owns each StreamingTerrainComponent's TerrainWorld
+    // (see terrain_world.hpp). First sight prewarms the whole world at the
+    // coarsest LOD on task-scheduler workers (full horizon on frame one);
+    // every frame after, concentric detail rings around the active camera
+    // refine tiles by rewriting a fixed per-LOD mesh slot pool in place
+    // (IRenderer::updateMeshGeometry — no GPU allocation while streaming),
+    // and deterministic tree/rock scatter entities churn in a ring.
+    // ============================================================================
+    class TerrainSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer, std::shared_ptr<RenderScene> scene) {
+            if (!renderer || !scene) return;
+            auto view = reg.view<StreamingTerrainComponent>();
+            for (auto entity : view) {
+                auto& tc = view.get<StreamingTerrainComponent>(entity);
+                if (!tc.world.value || tc.regenerate) initTerrain(reg, renderer, scene, tc);
+                TerrainWorld& world = *tc.world.value;
+
+                glm::vec3 camPos(0.0f);
+                auto camView = reg.view<VirtualCameraComponent>();
+                for (auto ce : camView) {
+                    const auto& cam = camView.get<VirtualCameraComponent>(ce);
+                    if (cam.isActive) {
+                        camPos = cam.position;
+                        break;
+                    }
+                }
+
+                // CBT tessellation renders the surface as one displaced tess
+                // instance — tile-ring streaming is off, but scatter, grass
+                // and height queries run unchanged (same height source).
+                const bool tessTerrain = tc.tessMeshId.value != 0;
+
+                const glm::ivec2 camTile = world.worldToTile(camPos.x, camPos.z);
+                if (camTile != world.lastCamTile) {
+                    world.lastCamTile = camTile;
+                    // Demotions to the always-resident base coat are free —
+                    // apply first so freed slots can serve incoming tiles.
+                    if (!tessTerrain) {
+                        for (int t : world.computeTargets(camTile)) demoteToBase(reg, world, t);
+                    }
+                    updateScatter(reg, world, tc, camTile);
+                }
+                if (!tessTerrain) {
+                    enqueueBuilds(world);
+                    applyResults(reg, renderer, world);
+                }
+                updateGrass(renderer, world, tc, camPos);
+                break;  // singleton: the first terrain entity wins
+            }
+        }
+
+        // Terrain height under (x, z) — ground clamps, spawns, teleports.
+        static float groundHeight(entt::registry& reg, float x, float z, float fallback = 0.0f) {
+            auto view = reg.view<StreamingTerrainComponent>();
+            for (auto entity : view) {
+                auto& tc = view.get<StreamingTerrainComponent>(entity);
+                if (tc.world.value) return tc.world.value->heightAt(x, z);
+            }
+            return fallback;
+        }
+
+    private:
+        static entt::entity makeTileEntity(entt::registry& reg, const std::shared_ptr<Mesh>& mesh,
+                                           const char* name, bool visible) {
+            auto e = reg.create();
+            reg.emplace<NameComponent>(e, NameComponent { name });
+            reg.emplace<TransformComponent>(e);  // identity — world coords baked into vertices
+            auto& mr = reg.emplace<MeshRendererComponent>(e);
+            mr.meshes.push_back(mesh);
+            mr.visible = visible;
+            return e;
+        }
+
+        static void destroyTerrainEntities(entt::registry& reg, TerrainWorld& world) {
+            for (auto& slot : world.baseSlots) {
+                if (slot.entity != entt::null) reg.destroy(slot.entity);
+            }
+            for (auto& pool : world.finePools) {
+                for (auto& slot : pool) {
+                    if (slot.entity != entt::null) reg.destroy(slot.entity);
+                }
+            }
+            for (auto& [tile, ents] : world.scatterEntities) {
+                for (auto e : ents) reg.destroy(e);
+            }
+        }
+
+        static void initTerrain(entt::registry& reg, IRenderer* renderer,
+                                const std::shared_ptr<RenderScene>& scenePtr,
+                                StreamingTerrainComponent& tc) {
+            RenderScene& scene = *scenePtr;
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            if (tc.world.value) {
+                // Rebuild: drain any in-flight jobs against the old world and
+                // drop its entities; the old TerrainWorld dies with its refs.
+                scheduler.waitForAll();
+                destroyTerrainEntities(reg, *tc.world.value);
+            }
+            tc.regenerate = false;
+
+            auto world = std::make_shared<TerrainWorld>();
+            TerrainConfig cfg;
+            cfg.worldSize = tc.worldSize;
+            cfg.tileSize = tc.tileSize;
+            cfg.heightScale = tc.heightScale;
+            cfg.noiseFrequency = tc.noiseFrequency;
+            cfg.noiseOctaves = tc.noiseOctaves;
+            cfg.seed = tc.seed;
+            // Baked-tile cache: resolve a relative dir against the executable
+            // base path (SDL_GetBasePath, like Atmospheric's demo) so scene
+            // JSON stays portable and the bake never lands in a random cwd.
+            cfg.cacheDir = tc.cacheDir;
+            if (!cfg.cacheDir.empty() && !std::filesystem::path(cfg.cacheDir).is_absolute()) {
+                if (const char* base = SDL_GetBasePath()) cfg.cacheDir = std::string(base) + cfg.cacheDir;
+            }
+            cfg.lod0RadiusTiles = tc.lod0RadiusTiles;
+            cfg.lod1RadiusTiles = tc.lod1RadiusTiles;
+            cfg.lod2RadiusTiles = tc.lod2RadiusTiles;
+            cfg.scatterRadiusTiles = tc.scatterRadiusTiles;
+            cfg.scatterPerTile = tc.scatterPerTile;
+            cfg.grassDensity = tc.grassDensity;
+            cfg.grassRadius = tc.grassRadius;
+            cfg.grassBladeHeight = tc.grassBladeHeight;
+            cfg.grassHeightBand = tc.grassHeightBand;
+            cfg.grassCoverage = tc.grassCoverage;
+            world->configure(cfg);
+            tc.world.value = world;
+
+            // Grass ring: a fixed pool of cell slots in the renderer's shared
+            // instance buffer (the tile-slot pattern — streaming rewrites slots
+            // in place, never allocates). Pool = every cell whose centre can
+            // fall inside the ring, plus slack for transitions.
+            renderer->setGrassDraws({}, {});
+            if (tc.grassDensity > 0.0f) {
+                const float cs = cfg.grassCellSize;
+                const float ringR = tc.grassRadius / cs + 1.0f;
+                const Uint32 slots = static_cast<Uint32>(std::ceil(3.14159265f * ringR * ringR)) + 8u;
+                const Uint32 perSlot = static_cast<Uint32>(std::ceil(tc.grassDensity * cs * cs));
+                if (renderer->configureGrassPool(slots, perSlot)) {
+                    world->grassSlotCount = slots;
+                    world->grassBladesPerSlot = perSlot;
+                    world->grassFreeSlots.clear();
+                    for (int s = static_cast<int>(slots) - 1; s >= 0; s--) world->grassFreeSlots.push_back(s);
+                }
+            }
+
+            // Terrain surface: the Main pass's terrain branch (splat-blended
+            // detail layers, world-space tiled) — push the generated
+            // grass/rock/dirt/snow layers once. The palette LUT stays as the
+            // material's albedoMap so backends without the terrain branch
+            // still show the height/slope banding as a fallback.
+            {
+                auto grassL = TerrainTextureGen::generateGrass();
+                auto rockL = TerrainTextureGen::generateRock();
+                auto dirtL = TerrainTextureGen::generateDirt();
+                auto snowL = TerrainTextureGen::generateSnow();
+                renderer->setTerrainDetailLayers({ grassL.albedo, rockL.albedo, dirtL.albedo, snowL.albedo },
+                                                 { grassL.normal, rockL.normal, dirtL.normal, snowL.normal });
+            }
+            // The height-field descriptor the Main pass's terrain branch needs to
+            // reconstruct per-pixel normals from the same noise the mesh uses.
+            renderer->setTerrainHeightField(cfg.noiseFrequency, cfg.noiseOctaves, cfg.seed, cfg.heightScale);
+            auto lut = world->buildPaletteLUT();
+            scene.images.push_back(lut);
+            auto terrainMat = std::make_shared<Material>();
+            terrainMat->albedoMap = lut;
+            terrainMat->roughnessFactor = 0.95f;
+            terrainMat->metallicFactor = 0.0f;
+            terrainMat->materialShader = MaterialShader::Terrain;
+            scene.materials.push_back(terrainMat);
+
+            // Scatter prototypes (0 = tree, 1 = rock) drawn as GPU instances.
+            {
+                auto treeMat = std::make_shared<Material>();
+                treeMat->baseColorFactor = glm::vec4(0.16f, 0.42f, 0.18f, 1.0f);
+                treeMat->roughnessFactor = 0.9f;
+                scene.materials.push_back(treeMat);
+                auto treeMesh = MeshBuilder::buildCube(1.0f);
+                treeMesh->material = treeMat;
+                scene.addMesh(treeMesh);
+                world->scatterMeshes.push_back(treeMesh);
+
+                auto rockMat = std::make_shared<Material>();
+                rockMat->baseColorFactor = glm::vec4(0.45f, 0.44f, 0.42f, 1.0f);
+                rockMat->roughnessFactor = 0.95f;
+                scene.materials.push_back(rockMat);
+                // A low-poly sphere reads as a boulder (the original demo used
+                // CreateSphere for rocks); trees stay cubes.
+                auto rockMesh = MeshBuilder::buildSphere(0.5f, 12, 8);
+                rockMesh->material = rockMat;
+                scene.addMesh(rockMesh);
+                world->scatterMeshes.push_back(rockMesh);
+            }
+
+            // CBT displaced tessellation (opt-in): hand the renderer ONE flat
+            // world-spanning plane; the Tess pass refines it adaptively on the
+            // GPU with true heightfield displacement (the same OpenSimplex2
+            // FBm field heightAt runs), terrain-aware LoD metric and palette
+            // shading. Runs on Metal and Vulkan; on backends without tess
+            // pipelines createTessellatedMesh returns 0 and the classic tile
+            // rings below take over.
+            if (tc.tessMeshId.value != 0) {
+                renderer->destroyTessellatedMesh(tc.tessMeshId.value);
+                tc.tessMeshId.value = 0;
+            }
+            if (tc.cbtTessellation) {
+                std::vector<VertexData> planeVerts;
+                std::vector<Uint32> planeInds;
+                const int quads = 16;// 1536 LEB roots; maxDepth 25 reaches sub-metre leaves
+                const float halfW = 0.5f * cfg.worldSize;
+                for (int z = 0; z <= quads; z++) {
+                    for (int x = 0; x <= quads; x++) {
+                        VertexData v {};
+                        v.position = glm::vec3(-halfW + cfg.worldSize * x / static_cast<float>(quads), 0.0f,
+                                               -halfW + cfg.worldSize * z / static_cast<float>(quads));
+                        v.uv = glm::vec2(x / static_cast<float>(quads), z / static_cast<float>(quads));
+                        v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+                        v.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                        planeVerts.push_back(v);
+                    }
+                }
+                for (int z = 0; z < quads; z++) {
+                    for (int x = 0; x < quads; x++) {
+                        const Uint32 v00 = static_cast<Uint32>(z * (quads + 1) + x);
+                        const Uint32 v10 = v00 + 1;
+                        const Uint32 v01 = v00 + static_cast<Uint32>(quads + 1);
+                        const Uint32 v11 = v01 + 1;
+                        // Same winding as buildTileGeometry's tile quads.
+                        planeInds.insert(planeInds.end(), { v00, v01, v11, v00, v11, v10 });
+                    }
+                }
+                Mesh plane;// CPU-only: consumed by buildTessRoots, never staged
+                plane.vertices = planeVerts;
+                plane.indices = planeInds;
+                TessellationDesc td;
+                td.maxDepth = 25;
+                td.displacementScale = cfg.heightScale;
+                td.terrainHeightfield = true;
+                td.terrainFrequency = cfg.noiseFrequency;
+                td.terrainOctaves = cfg.noiseOctaves;
+                td.terrainSeed = cfg.seed;
+                tc.tessMeshId.value = renderer->createTessellatedMesh(plane, td);
+            }
+            const bool tessTerrain = tc.tessMeshId.value != 0;
+
+            // Base coat: every tile's coarsest-LOD mesh, built in parallel and
+            // staged before the first frame — the whole horizon is present at
+            // boot. Skipped entirely when the CBT tess instance carries the
+            // surface (no tile entities exist then; streaming stays off).
+            const int total = tessTerrain ? 0 : world->tileCount();
+            for (int t = 0; t < total; t++) {
+                world->baseSlots[t].mesh = std::make_shared<Mesh>();
+                scheduler.submitTask([world, t] {
+                    std::vector<VertexData> verts;
+                    std::vector<Uint32> inds;
+                    glm::vec3 mn, mx;
+                    world->buildTileGeometry(t % world->tilesPerAxis(), t / world->tilesPerAxis(),
+                                             TerrainWorld::LOD_COUNT - 1, verts, inds, mn, mx);
+                    auto& mesh = *world->baseSlots[t].mesh;
+                    mesh.initialize(verts, inds);
+                    mesh.localAABBMin = mn;
+                    mesh.localAABBMax = mx;
+                });
+            }
+            scheduler.waitForAll();
+            for (int t = 0; t < total; t++) {
+                TerrainWorld::Slot& slot = world->baseSlots[t];
+                slot.mesh->material = terrainMat;
+                scene.addMesh(slot.mesh);
+                slot.entity = makeTileEntity(reg, slot.mesh, "Terrain.Base", /*visible=*/true);
+            }
+
+            // Fine pools: registered once with a flat placeholder per LOD;
+            // contents are rewritten in place as the rings move. (Off with the
+            // CBT tess instance, like the base coat.)
+            for (int lod = 0; !tessTerrain && lod < TerrainWorld::LOD_COUNT - 1; lod++) {
+                std::vector<VertexData> verts;
+                std::vector<Uint32> inds;
+                glm::vec3 mn, mx;
+                world->buildTileGeometry(0, 0, lod, verts, inds, mn, mx);
+                world->finePools[lod].resize(TerrainWorld::kLodSlots[lod]);
+                world->freeSlots[lod].clear();
+                for (int s = 0; s < TerrainWorld::kLodSlots[lod]; s++) {
+                    TerrainWorld::Slot& slot = world->finePools[lod][s];
+                    slot.mesh = std::make_shared<Mesh>();
+                    slot.mesh->initialize(verts, inds);
+                    slot.mesh->material = terrainMat;
+                    scene.addMesh(slot.mesh);
+                    slot.entity = makeTileEntity(reg, slot.mesh, "Terrain.Fine", /*visible=*/false);
+                    world->freeSlots[lod].push_back(s);
+                }
+            }
+
+            // Register everything just added. The staging list is cleared like
+            // app code does post-stage; anything the app staged earlier this
+            // frame has already been consumed by its own stage() call.
+            renderer->stage(scenePtr);
+            scene.stagedMeshes.clear();
+            scene.stagedMeshTransforms.clear();
+        }
+
+        static void demoteToBase(entt::registry& reg, TerrainWorld& world, int t) {
+            TerrainWorld::Tile& tile = world.tiles[t];
+            if (tile.fineSlot >= 0) {
+                TerrainWorld::Slot& slot = world.finePools[tile.currentLod][tile.fineSlot];
+                reg.get<MeshRendererComponent>(slot.entity).visible = false;
+                world.freeSlots[tile.currentLod].push_back(tile.fineSlot);
+                tile.fineSlot = -1;
+            }
+            reg.get<MeshRendererComponent>(world.baseSlots[t].entity).visible = true;
+            tile.currentLod = TerrainWorld::LOD_COUNT - 1;
+        }
+
+        static void enqueueBuilds(TerrainWorld& world) {
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            for (int t = 0; t < static_cast<int>(world.tiles.size()); t++) {
+                TerrainWorld::Tile& tile = world.tiles[t];
+                if (tile.buildPending || tile.targetLod == tile.currentLod ||
+                    tile.targetLod == TerrainWorld::LOD_COUNT - 1) {
+                    continue;
+                }
+                if (world.freeSlots[tile.targetLod].empty()) continue;  // pool busy; retry next frame
+                if (world.inFlight.load(std::memory_order_relaxed) >= 8) break;
+                tile.buildPending = true;
+                world.inFlight.fetch_add(1, std::memory_order_relaxed);
+                const int lod = tile.targetLod;
+                TerrainWorld* worldPtr = &world;  // outlives jobs: waitForAll on regenerate
+                scheduler.submitTask([worldPtr, t, lod] {
+                    TerrainWorld::BuildResult r;
+                    r.tile = t;
+                    r.lod = lod;
+                    worldPtr->buildTileGeometry(t % worldPtr->tilesPerAxis(), t / worldPtr->tilesPerAxis(),
+                                                lod, r.verts, r.inds, r.aabbMin, r.aabbMax);
+                    worldPtr->pushResult(std::move(r));
+                    worldPtr->inFlight.fetch_sub(1, std::memory_order_relaxed);
+                });
+            }
+        }
+
+        static void applyResults(entt::registry& reg, IRenderer* renderer, TerrainWorld& world) {
+            for (int applied = 0; applied < 2; applied++) {
+                TerrainWorld::BuildResult r;
+                if (!world.popResult(r)) return;
+                TerrainWorld::Tile& tile = world.tiles[r.tile];
+                tile.buildPending = false;
+                // Stale (rings moved on) or no slot left: drop; the enqueue
+                // scan resubmits while the mismatch persists.
+                if (tile.targetLod != r.lod || world.freeSlots[r.lod].empty()) continue;
+
+                const int slotIdx = world.freeSlots[r.lod].back();
+                world.freeSlots[r.lod].pop_back();
+                TerrainWorld::Slot& slot = world.finePools[r.lod][slotIdx];
+                if (!renderer->updateMeshGeometry(slot.mesh->renderMeshId, r.verts, r.inds)) {
+                    world.freeSlots[r.lod].push_back(slotIdx);
+                    continue;  // backend can't stream (native path): keep the base coat
+                }
+                slot.mesh->localAABBMin = r.aabbMin;
+                slot.mesh->localAABBMax = r.aabbMax;
+                reg.get<MeshRendererComponent>(slot.entity).visible = true;
+
+                // Swap out whatever the tile was showing before.
+                if (tile.currentLod < TerrainWorld::LOD_COUNT - 1 && tile.fineSlot >= 0) {
+                    TerrainWorld::Slot& old = world.finePools[tile.currentLod][tile.fineSlot];
+                    reg.get<MeshRendererComponent>(old.entity).visible = false;
+                    world.freeSlots[tile.currentLod].push_back(tile.fineSlot);
+                }
+                reg.get<MeshRendererComponent>(world.baseSlots[r.tile].entity).visible = false;
+                tile.currentLod = r.lod;
+                tile.fineSlot = slotIdx;
+            }
+        }
+
+        // Grass ring streaming: cells (world-anchored grassCellSize squares)
+        // whose centre falls inside the ring build on worker threads and land
+        // in fixed instance-pool slots; leaving cells free their slot. The
+        // enqueue scan runs every frame (cheap — a few hundred map lookups) so
+        // cells missed by the in-flight cap are picked up as jobs drain.
+        static void updateGrass(IRenderer* renderer, TerrainWorld& world,
+                                const StreamingTerrainComponent& tc, const glm::vec3& camPos) {
+            if (tc.grassDensity <= 0.0f || world.grassSlotCount == 0) return;
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            const float cs = world.config().grassCellSize;
+            const float radius = tc.grassRadius;
+            const glm::vec2 camXZ(camPos.x, camPos.z);
+            const glm::ivec2 camCell = world.grassCellOf(camPos.x, camPos.z);
+            auto cellCentre = [cs](int cx, int cz) { return glm::vec2((cx + 0.5f) * cs, (cz + 0.5f) * cs); };
+
+            // Evict cells that left the ring (small hysteresis so boundary
+            // jitter doesn't churn); their slots serve incoming cells.
+            if (camCell != world.lastGrassCell) {
+                world.lastGrassCell = camCell;
+                for (auto it = world.grassCells.begin(); it != world.grassCells.end();) {
+                    const int cx = static_cast<int>(static_cast<Uint32>(it->first & 0xFFFFFFFFll));
+                    const int cz = static_cast<int>(it->first >> 32);
+                    if (glm::distance(cellCentre(cx, cz), camXZ) > radius + cs) {
+                        if (it->second.slot >= 0) world.grassFreeSlots.push_back(it->second.slot);
+                        it = world.grassCells.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+
+            // Enqueue builds for cells inside the ring that aren't resident or
+            // pending yet (bounded in-flight; jobs only read the pure world).
+            TerrainWorld* worldPtr = &world;
+            const int span = static_cast<int>(radius / cs) + 1;
+            bool capped = false;
+            for (int dz = -span; dz <= span && !capped; dz++) {
+                for (int dx = -span; dx <= span; dx++) {
+                    const glm::ivec2 cell = camCell + glm::ivec2(dx, dz);
+                    if (glm::distance(cellCentre(cell.x, cell.y), camXZ) > radius) continue;
+                    const long long key = TerrainWorld::grassCellKey(cell);
+                    if (world.grassCells.count(key) || world.grassPending.count(key)) continue;
+                    if (world.grassInFlight.load(std::memory_order_relaxed) >= 4) {
+                        capped = true;
+                        break;
+                    }
+                    world.grassPending.insert(key);
+                    world.grassInFlight.fetch_add(1, std::memory_order_relaxed);
+                    scheduler.submitTask([worldPtr, cell, key] {
+                        TerrainWorld::GrassCellResult r;
+                        r.key = key;
+                        r.blades = worldPtr->buildGrassCell(cell.x, cell.y);
+                        worldPtr->pushGrassResult(std::move(r));
+                        worldPtr->grassInFlight.fetch_sub(1, std::memory_order_relaxed);
+                    });
+                }
+            }
+
+            // Apply finished cells (bounded per frame — one cell is up to a
+            // few-hundred-KB upload). A cell the camera outran is dropped; the
+            // scan above re-enqueues it if it comes back.
+            TerrainWorld::GrassCellResult r;
+            for (int applied = 0; applied < 2 && world.popGrassResult(r); applied++) {
+                world.grassPending.erase(r.key);
+                const int cx = static_cast<int>(static_cast<Uint32>(r.key & 0xFFFFFFFFll));
+                const int cz = static_cast<int>(r.key >> 32);
+                if (glm::distance(cellCentre(cx, cz), camXZ) > radius + cs) continue;  // stale
+                if (r.blades.empty()) {
+                    world.grassCells[r.key] = { -1, 0 };  // resident, nothing to draw
+                    continue;
+                }
+                if (world.grassFreeSlots.empty()) continue;  // pool busy; rescan resubmits
+                const int slot = world.grassFreeSlots.back();
+                world.grassFreeSlots.pop_back();
+                renderer->updateGrassCell(static_cast<Uint32>(slot), r.blades);
+                world.grassCells[r.key] = { slot,
+                    static_cast<Uint32>(std::min<size_t>(r.blades.size(), world.grassBladesPerSlot)) };
+            }
+
+            // Push the resident draw list + look/wind settings every frame.
+            std::vector<GrassCellDraw> draws;
+            draws.reserve(world.grassCells.size());
+            for (const auto& [key, st] : world.grassCells) {
+                if (st.slot >= 0 && st.bladeCount > 0)
+                    draws.push_back({ static_cast<Uint32>(st.slot), st.bladeCount });
+            }
+            GrassSettingsData gs;
+            gs.windDir = glm::normalize(glm::vec2(0.8f, 0.6f));
+            gs.windStrength = tc.grassWindStrength;
+            gs.windSpeed = tc.grassWindSpeed;
+            gs.rootColor = tc.grassRootColor;
+            gs.tipColor = tc.grassTipColor;
+            gs.fadeStart = tc.grassRadius * 0.66f;
+            gs.fadeEnd = tc.grassRadius;
+            renderer->setGrassDraws(draws, gs);
+        }
+
+        static void updateScatter(entt::registry& reg, TerrainWorld& world,
+                                  const StreamingTerrainComponent& tc, glm::ivec2 camTile) {
+            const int radius = tc.scatterRadiusTiles;
+            std::unordered_map<int, std::vector<entt::entity>> keep;
+            for (int tz = camTile.y - radius; tz <= camTile.y + radius; tz++) {
+                for (int tx = camTile.x - radius; tx <= camTile.x + radius; tx++) {
+                    if (tx < 0 || tz < 0 || tx >= world.tilesPerAxis() || tz >= world.tilesPerAxis()) continue;
+                    const int t = tz * world.tilesPerAxis() + tx;
+                    auto it = world.scatterEntities.find(t);
+                    if (it != world.scatterEntities.end()) {
+                        keep.emplace(t, std::move(it->second));
+                        world.scatterEntities.erase(it);
+                        continue;
+                    }
+                    std::vector<entt::entity> spawned;
+                    for (const auto& p : world.scatterPlacements(tx, tz)) {
+                        if (p.meshIndex < 0 || p.meshIndex >= static_cast<int>(world.scatterMeshes.size()))
+                            continue;
+                        auto e = reg.create();
+                        auto& tr = reg.emplace<TransformComponent>(e);
+                        tr.position = p.position;
+                        tr.rotation = glm::angleAxis(p.yawRadians, glm::vec3(0, 1, 0));
+                        tr.scale = p.scale;
+                        auto& mr = reg.emplace<MeshRendererComponent>(e);
+                        mr.meshes.push_back(world.scatterMeshes[p.meshIndex]);
+                        spawned.push_back(e);
+                    }
+                    keep.emplace(t, std::move(spawned));
+                }
+            }
+            for (auto& [tile, ents] : world.scatterEntities) {
+                for (auto e : ents) reg.destroy(e);
+            }
+            world.scatterEntities = std::move(keep);
         }
     };
 

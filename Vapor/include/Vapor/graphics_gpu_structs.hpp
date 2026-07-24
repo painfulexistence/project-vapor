@@ -48,7 +48,30 @@ struct alignas(16) MaterialData {
     // / PrePass.frag / ShadowDepth.frag): all are stride 112. A missing field
     // here silently shifts every materials[i>0] read.
     float transmission;
+    // Surface shader model the Main pass dispatches on: 0 = Standard PBR,
+    // 1 = Terrain (splat), 2 = Grass. Occupies the alignment tail after
+    // transmission, so the std430 stride stays 112 — shader twins that don't
+    // read it are unaffected.
+    //
+    // Terrain-material FIELD OVERLOADING: when shaderModel == 1 the Disney lobe
+    // fields carry the terrain height-field descriptor instead (the terrain
+    // branch never evaluates the Disney BRDF, and set1/push-constants/the struct
+    // tail are all full — this is the only spare channel). The renderer packs
+    // them at material upload and the terrain branch of RHIMain.frag /
+    // 3d_pbr_normal_mapped.metal reads them back to reconstruct per-pixel
+    // normals via heightAt():
+    //   subsurface   = noiseFrequency
+    //   specular     = heightScale
+    //   specularTint = noiseOctaves (as float)
+    //   anisotropic  = seed (raw 32-bit bits; read with floatBitsToUint/as_type)
+    float shaderModel;
 };
+// NOTE: the GPU upload stride is expected to be 112 (the shader twins in
+// 3d_common.metal / RHIMain.frag / PrePass.frag / ShadowDepth.frag assume it,
+// and a mismatch silently shifts every materials[i>0] read). The hard
+// static_assert is intentionally omitted while the material layout is still in
+// flux — re-enable it once it settles:
+//   static_assert(sizeof(MaterialData) == 112, "shader twins assume stride 112");
 
 struct alignas(16) DirectionalLight {
     glm::vec3 direction;
@@ -152,6 +175,27 @@ struct DrawCommand {
     Uint32 firstInstance; // = instance index, so the vertex shader can look up InstanceData
 };
 static_assert(sizeof(DrawCommand) == 20, "DrawCommand must match the GPU indirect-args layout");
+
+// One grass blade instance (Grass pass): world base position + per-blade
+// randomization, uploaded verbatim into the grass instance pool. Cell builders
+// (TerrainWorld::buildGrassCell) produce these on worker threads.
+struct alignas(16) GrassBladeGpu {
+    glm::vec4 positionAndHeight;  // xyz = world base position, w = blade height (m)
+    glm::vec4 params;             // x = sway phase (rad), y = facing angle (rad),
+                                  // z = tint jitter 0..1, w = half width (m)
+};
+static_assert(sizeof(GrassBladeGpu) == 32, "grass instance pool layout: 32 bytes per blade");
+
+// Per-frame grass uniforms (renderer-filled; the shader twins mirror this).
+struct alignas(16) GrassParamsGpu {
+    glm::mat4 viewProj;
+    glm::vec4 cameraPosTime;  // xyz = camera position, w = time (s)
+    glm::vec4 wind;           // xy = direction, z = strength (m at tip), w = speed
+    glm::vec4 rootColor;      // rgb = root color, w = fade start distance (m)
+    glm::vec4 tipColor;       // rgb = tip color, w = fade end distance (m)
+    glm::vec4 sun;            // xyz = direction TOWARD the sun, w = intensity
+    glm::vec4 sunColor;       // rgb = sun color, w = unused
+};
 
 struct alignas(16) Cluster {
     glm::vec4 min;

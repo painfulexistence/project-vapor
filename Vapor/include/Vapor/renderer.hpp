@@ -10,6 +10,7 @@
 #include "tessellation.hpp"
 #include <SDL3/SDL_video.h>
 #include <entt/entt.hpp>
+#include <chrono>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -81,6 +82,23 @@ public:
                         const std::vector<Uint32>& indices,
                         const Vapor::MeshletData* meshletData = nullptr,
                         bool meshletLodEnabled = true);
+
+    // In-place geometry rewrite for a registered mesh (streaming: a fixed
+    // mesh pool registered once, contents rewritten as the world moves).
+    // Counts must match registration; returns false otherwise.
+    bool updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
+                            const std::vector<Uint32>& indices) override;
+
+    // Pack the 4+4 terrain detail layers into the two 2D-array textures the
+    // Main pass's terrain branch samples (set2 b13/b14 on Vulkan; 18/19 on
+    // Metal-via-RHI), with full mip chains.
+    void setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& albedoLayers,
+                                const std::array<std::shared_ptr<Vapor::Image>, 4>& normalLayers) override;
+
+    // Terrain height-field descriptor (packed into terrain materials' spare
+    // fields at upload) so the Main pass can reconstruct per-pixel normals.
+    void setTerrainHeightField(float noiseFrequency, int noiseOctaves,
+                               Uint32 seed, float heightScale) override;
 
     // Register a material and return its ID
     MaterialId registerMaterial(const MaterialDataInput& materialData);
@@ -326,6 +344,11 @@ public:
     // button and sky-config changes (setSky) still force a rebake directly.
     void requestIBLUpdate() override { if (m_iblAutoRebake) iblNeedsUpdate = true; }
     void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) override;
+    // Grass ring: fixed instance pool, per-cell slot rewrites, per-frame draws.
+    bool configureGrassPool(Uint32 cellSlots, Uint32 bladesPerSlot) override;
+    void updateGrassCell(Uint32 slot, const std::vector<Vapor::GrassBladeGpu>& blades) override;
+    void setGrassDraws(const std::vector<Vapor::GrassCellDraw>& draws,
+                       const Vapor::GrassSettingsData& settings) override;
 
     // ========================================================================
     // Texture Creation (for sprites/batch rendering)
@@ -422,6 +445,9 @@ private:
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
+    // Streamed grass ring: instanced blade draws per resident cell, drawn
+    // after Main (writes depth; opaque, no blending).
+    void grassPass();
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
@@ -622,6 +648,22 @@ private:
     TextureId defaultWhiteTexture = INVALID_TEXTURE_ID;
     TextureId defaultNormalTexture = INVALID_TEXTURE_ID;
     TextureId defaultBlackTexture = INVALID_TEXTURE_ID;
+    // Terrain detail-layer arrays sampled by RHIMain.frag's terrain branch at
+    // set2 b13/b14 (Vulkan). defaultDetailArrayTexture (4-layer white) keeps
+    // those sampler2DArray descriptors valid on every Main-pass draw; the two
+    // staged arrays hold the real grass/rock/dirt/snow layers when a terrain
+    // surface is present (else invalid -> the default is bound).
+    TextureHandle defaultDetailArrayTexture;
+    TextureHandle terrainDetailAlbedoArray;
+    TextureHandle terrainDetailNormalArray;
+    // Terrain height-field descriptor (from TerrainWorld's noise config). Packed
+    // into terrain materials' unused Disney lobe fields at material upload so the
+    // Main pass's terrain branch can re-evaluate heightAt() for per-pixel normals.
+    bool   m_hasTerrainHeightField = false;
+    float  m_terrainNoiseFrequency = 0.0f;
+    int    m_terrainNoiseOctaves = 0;
+    Uint32 m_terrainSeed = 0u;
+    float  m_terrainHeightScale = 0.0f;
     // Neutral ORM (occlusion=1, roughness=1, metallic=0) — the default for
     // materials lacking a metallic/roughness/occlusion map. Using white here
     // (metallic .b = 1.0) rendered every such surface as fully metallic:
@@ -745,6 +787,21 @@ private:
     TextureHandle volumeTestTexture;     // owned procedural test grid
     bool volumeRenderEnabled = false;    // default OFF until real data lands
     VolumeRenderData volumeSettings;     // panel tunables (box/density/albedo/steps)
+    // ---- Grass ring (streamed instanced blades; see grassPass) -----------
+    // Fixed pool of cell slots in one instance buffer; TerrainSystem streams
+    // cells by rewriting slots in place, and each frame supplies the resident
+    // draws + wind/look settings.
+    BufferHandle grassInstanceBuffer;
+    BufferHandle grassParamsBuffer;
+    PipelineHandle grassPipeline;
+    ShaderHandle grassVS, grassFS;
+    Uint32 grassSlotCount = 0;
+    Uint32 grassBladesPerSlot = 0;
+    std::vector<Vapor::GrassCellDraw> grassDraws;
+    Vapor::GrassSettingsData grassSettings;
+    bool grassEnabled = true;
+    float grassTimeSeconds = 0.0f;
+    std::chrono::steady_clock::time_point grassLastTick {};
     // The registry the ECS draw() last rendered with. renderToTexture needs it
     // because the demo's meshes live on ECS entities, not the scene-node tree —
     // the scene-only collectDrawables(scene) finds nothing there. The registry
@@ -1285,9 +1342,9 @@ private:
     // meshlet path: the pipelines only exist on backends whose shaders loaded.
     // Implementation lives in src/tessellation.cpp.
     // ------------------------------------------------------------------------
-    Uint32 createTessellatedMesh(const Mesh& mesh, const TessellationDesc& desc = {});
-    void destroyTessellatedMesh(Uint32 id);
-    void setTessellatedMeshTransform(Uint32 id, const glm::mat4& model);
+    Uint32 createTessellatedMesh(const Mesh& mesh, const TessellationDesc& desc = {}) override;
+    void destroyTessellatedMesh(Uint32 id) override;
+    void setTessellatedMeshTransform(Uint32 id, const glm::mat4& model) override;
     // Split when a leaf's hypotenuse projects larger than this many pixels
     // (leaf grid segments are ~1/8 of it — 64 px => ~8 px triangles).
     float tessSplitPixels = 64.0f;
@@ -1304,14 +1361,27 @@ private:
         Uint32 maxLeaves = 0;
         float displacementScale = 0.0f;
         glm::mat4 model = glm::mat4(1.0f);
+        // Terrain heightfield displacement (see TessellationDesc).
+        bool terrainHeightfield = false;
+        float terrainFrequency = 0.0007f;
+        int terrainOctaves = 9;
+        Uint32 terrainSeed = 20260705u;
         BufferHandle cbtBuffer;       // CBT storage (counts + bitfield), GPU-resident
         BufferHandle rootBuffer;      // TessRootGpu[]
         BufferHandle argsBuffer;      // TessArgs (GPU-written indirect args)
         BufferHandle leafDataBuffer;  // TessLeafDataGpu[maxLeaves] (compute path)
+        // TessParams mirror for backends whose inline-constant path can't
+        // carry the 112-byte struct (Vulkan's 64-byte compute push range);
+        // refreshed once per frame, bound at b4 (compute) / b3 (vertex).
+        BufferHandle paramsBuffer;
     };
     std::vector<TessInstance> m_tessInstances;
     Uint32 m_nextTessMeshId = 1;
-    void createTessellationPipelines();  // called from the Metal init block
+    void createTessellationPipelines();        // called from the Metal init block
+    void createTessellationPipelinesVulkan();  // GLSL twins, from the Vulkan init block
+    // True when TessParams travel via TessInstance::paramsBuffer instead of
+    // inline bytes (set by the Vulkan pipeline init).
+    bool tessParamsViaBuffer = false;
     void ensureTessGridBuffers();
     bool tessMeshPathActive() const;
     TessParamsGpu tessFillParams(const TessInstance& t) const;

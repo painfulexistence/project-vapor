@@ -1,6 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 #include "Res/shaders/3d_common.metal"    // CameraData
+#include "Res/shaders/3d_terrain_noise.metal"  // terrain heightfield (used by 3d_tess_lib)
 #include "Res/shaders/3d_tess_lib.metal"  // CBT/LEB shared library
 
 // ============================================================================
@@ -101,6 +102,13 @@ kernel void tessClassify(
     float3 p2 = tessCornerFromWeights(tri.w2, tri.rootSlot, roots).pos;
     float3 w0 = (params.model * float4(p0, 1.0)).xyz;
     float3 w2 = (params.model * float4(p2, 1.0)).xyz;
+    // Terrain: measure the DISPLACED edge — with up to heightScale of relief,
+    // a flat-plane metric would think geometry right under the camera is
+    // hundreds of metres away and under-subdivide exactly where it matters.
+    if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
+        w0.y += tessTerrainHeight(p0, params);
+        w2.y += tessTerrainHeight(p2, params);
+    }
     float hypPx = tessProjectedPixels(w2, w0, cam, params.screenHeight);
 
     uint depth = tessDepthOf(node);
@@ -122,6 +130,10 @@ kernel void tessClassify(
         float3 pp2 = tessCornerFromWeights(pt.w2, pt.rootSlot, roots).pos;
         float3 pw0 = (params.model * float4(pp0, 1.0)).xyz;
         float3 pw2 = (params.model * float4(pp2, 1.0)).xyz;
+        if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
+            pw0.y += tessTerrainHeight(pp0, params);
+            pw2.y += tessTerrainHeight(pp2, params);
+        }
         float parentPx = tessProjectedPixels(pw2, pw0, cam, params.screenHeight);
         if (parentPx < params.splitPixels) {
             tessMergeConforming(cbtRO, cbtRW, node, params, roots);

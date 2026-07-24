@@ -724,6 +724,23 @@ void Renderer::shutdown() {
                 rhi->destroySampler(texture.sampler);
             }
         }
+        // Terrain detail-layer arrays (not in the textures registry).
+        if (defaultDetailArrayTexture.isValid()) rhi->destroyTexture(defaultDetailArrayTexture);
+        if (terrainDetailAlbedoArray.isValid()) rhi->destroyTexture(terrainDetailAlbedoArray);
+        if (terrainDetailNormalArray.isValid()) rhi->destroyTexture(terrainDetailNormalArray);
+        defaultDetailArrayTexture = {};
+        terrainDetailAlbedoArray = {};
+        terrainDetailNormalArray = {};
+
+        // Grass ring resources.
+        if (grassInstanceBuffer.isValid()) rhi->destroyBuffer(grassInstanceBuffer);
+        if (grassParamsBuffer.isValid()) rhi->destroyBuffer(grassParamsBuffer);
+        if (grassPipeline.isValid()) rhi->destroyPipeline(grassPipeline);
+        if (grassVS.isValid()) rhi->destroyShader(grassVS);
+        if (grassFS.isValid()) rhi->destroyShader(grassFS);
+        grassInstanceBuffer = {};
+        grassParamsBuffer = {};
+        grassPipeline = {};
 
         // Destroy shaders
         if (vertexShader.isValid()) {
@@ -881,6 +898,92 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     return id;
 }
 
+// In-place geometry rewrite for a registered mesh — the streaming hook (e.g.
+// terrain tiles): a fixed pool of meshes is registered once and their
+// contents are rewritten as the world streams, so nothing ever leaks. The
+// counts must match registration (same-size updateBuffer contract); topology
+// changes need a fresh registerMesh instead.
+bool Renderer::updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
+                                  const std::vector<Uint32>& indices) {
+    if (id >= meshes.size()) return false;
+    RenderMesh& mesh = meshes[id];
+    if (vertices.size() != mesh.vertexCount || indices.size() != mesh.indexCount) return false;
+
+    if (mesh.vertexBuffer.isValid() && !vertices.empty()) {
+        rhi->updateBuffer(mesh.vertexBuffer, vertices.data(), 0, vertices.size() * sizeof(Vapor::VertexData));
+    }
+    if (mesh.indexBuffer.isValid() && !indices.empty()) {
+        rhi->updateBuffer(mesh.indexBuffer, indices.data(), 0, indices.size() * sizeof(Uint32));
+    }
+
+    // Keep the merged MDI copy in step so the GPU-driven path sees the same
+    // world as the per-object path.
+    std::copy(vertices.begin(), vertices.end(), m_mergedVertices.begin() + mesh.vertexOffset);
+    std::copy(indices.begin(), indices.end(), m_mergedIndices.begin() + mesh.indexOffset);
+    m_mergedGeometryDirty = true;
+
+    // Refit the BLAS on RT backends so rays see the new surface.
+    if (id < meshBLAS.size() && meshBLAS[id].isValid()) {
+        rhi->buildAccelerationStructure(meshBLAS[id]);
+    }
+    return true;
+}
+
+// Pack the terrain detail layers into the two shared 2D-array textures the
+// Main pass's terrain branch samples with world-space tiling. Called once by
+// TerrainSystem at terrain init (and again on regenerate — the old arrays are
+// replaced). Layer order is the shader's weight order: 0 grass, 1 rock,
+// 2 dirt, 3 snow.
+void Renderer::setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& albedoLayers,
+                                      const std::array<std::shared_ptr<Vapor::Image>, 4>& normalLayers) {
+    const auto& first = albedoLayers[0];
+    if (!first || first->width == 0 || first->width != first->height) return;
+    const Uint32 res = first->width;
+    auto usable = [&](const std::shared_ptr<Vapor::Image>& img) {
+        return img && img->width == res && img->height == res && img->channelCount == 4 &&
+            img->byteArray.size() >= static_cast<size_t>(res) * res * 4;
+    };
+    for (int i = 0; i < 4; i++) {
+        if (!usable(albedoLayers[i]) || !usable(normalLayers[i])) return;
+    }
+
+    if (terrainDetailAlbedoArray.isValid()) rhi->destroyTexture(terrainDetailAlbedoArray);
+    if (terrainDetailNormalArray.isValid()) rhi->destroyTexture(terrainDetailNormalArray);
+
+    Uint32 mips = 1;
+    for (Uint32 r = res; r > 1; r >>= 1) mips++;
+
+    TextureDesc desc;
+    desc.width = res;
+    desc.height = res;
+    desc.arrayLayers = 4;
+    desc.mipLevels = mips;  // full chain: tiled detail viewed at grazing angles
+    desc.format = PixelFormat::RGBA8_UNORM;
+    desc.usage = TextureUsage::Sampled;  // includes the transfer bits the mip blit needs
+
+    auto upload = [&](const std::array<std::shared_ptr<Vapor::Image>, 4>& layers) {
+        TextureHandle tex = rhi->createTexture(desc);
+        for (Uint32 layer = 0; layer < 4; ++layer) {
+            rhi->updateTexture(tex, layers[layer]->byteArray.data(),
+                               static_cast<size_t>(res) * res * 4, 0, layer);
+        }
+        rhi->generateMipmaps(tex);
+        return tex;
+    };
+    terrainDetailAlbedoArray = upload(albedoLayers);
+    terrainDetailNormalArray = upload(normalLayers);
+    fmt::print("Renderer: terrain detail layers staged ({}x{} x4 albedo+normal, {} mips)\n", res, res, mips);
+}
+
+void Renderer::setTerrainHeightField(float noiseFrequency, int noiseOctaves,
+                                     Uint32 seed, float heightScale) {
+    m_terrainNoiseFrequency = noiseFrequency;
+    m_terrainNoiseOctaves = noiseOctaves;
+    m_terrainSeed = seed;
+    m_terrainHeightScale = heightScale;
+    m_hasTerrainHeightField = true;
+}
+
 MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     RenderMaterial material;
 
@@ -901,6 +1004,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     material.clearcoat = materialData.clearcoat;
     material.clearcoatGloss = materialData.clearcoatGloss;
     material.transmission = materialData.transmission;
+    material.shaderModel = materialData.shaderModel;
     material.alphaMode = materialData.alphaMode;
     material.alphaCutoff = materialData.alphaCutoff;
     material.doubleSided = materialData.doubleSided;
@@ -1262,6 +1366,14 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Tess",
         [](Renderer& r) { r.tessRenderPass(); });
 
+    // Streamed grass ring (TerrainSystem): instanced blades drawn per resident
+    // cell over the scene color/depth. Writes depth (opaque, distance fade
+    // shrinks blades geometrically), so the sky/fog passes after it
+    // treat grass as ordinary scene geometry. After Tess so blades depth-test
+    // against tessellated geometry like everything else.
+    renderGraph.addPass("Grass",
+        [](Renderer& r) { r.grassPass(); });
+
     // Sky/atmosphere fills the background (depth == far) before bloom, so the
     // bright sky and sun disk feed the bloom pyramid.
     renderGraph.addPass("SkyAtmosphere",
@@ -1523,6 +1635,21 @@ void Renderer::updateBuffers() {
             data.clearcoatGloss = mat.clearcoatGloss;
             data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
             data.transmission = mat.transmission;
+            data.shaderModel = static_cast<float>(mat.shaderModel);
+            // Terrain (shaderModel == 1) never uses the Disney lobes, so pack the
+            // height-field descriptor into them: RHIMain.frag's terrain branch
+            // reconstructs a per-pixel normal by re-evaluating heightAt(). Done
+            // here because set1 buffers, push constants, and the 112-byte struct
+            // tail are all full — the material struct is the only spare channel.
+            // The seed is a full 32-bit value (default 20260705u > 2^24), so it
+            // is carried as raw bits, not a lossy float cast; the shader reads it
+            // back with floatBitsToUint.
+            if (data.shaderModel == 1.0f && m_hasTerrainHeightField) {
+                data.subsurface   = m_terrainNoiseFrequency;
+                data.specular     = m_terrainHeightScale;
+                data.specularTint = static_cast<float>(m_terrainNoiseOctaves);
+                std::memcpy(&data.anisotropic, &m_terrainSeed, sizeof(float));
+            }
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
@@ -1835,6 +1962,18 @@ void Renderer::mainRenderPass() {
         if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
         if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
         if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+        // Terrain detail-layer arrays (set2 b13/b14): override the Metal-contract
+        // 2D defaults the shared block put at these slots — on Vulkan they are the
+        // sampler2DArray detail layers RHIMain.frag's terrain branch samples. Bind
+        // the staged arrays when a terrain surface exists, else the default white
+        // array so the descriptor stays valid AND type-correct for every draw
+        // (a Standard draw keeps them bound but never samples them). Bound here in
+        // the common section, so every geometry path (incl. Bindless MDI) inherits
+        // it.
+        rhi->setTexture(0, 13, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
+        rhi->setTexture(0, 14, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -1873,6 +2012,16 @@ void Renderer::mainRenderPass() {
         // MUST be bound (an unbound sample reads 0 -> whole scene black). Use the
         // computed contact RT when SSCS is on, else white (min() no-op).
         rhi->setTexture(0, 15, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
+        // Terrain detail-layer arrays at the Metal contract slots 18/19 (the MSL
+        // twin of Vulkan's set2 b13/b14). Default white array keeps the
+        // texture2d_array args valid when no terrain is staged; the shader
+        // samples them only in the shaderModel == 1 branch. (Sampler slots >= 16
+        // are skipped by the RHI-Metal workaround — the shader uses a constexpr
+        // sampler for these, so that's fine.)
+        rhi->setTexture(0, 18, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
+        rhi->setTexture(0, 19, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
         if (capabilities.raytracing) {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
@@ -4732,6 +4881,99 @@ void Renderer::volumeRaymarchPass() {
     std::swap(colorRT, tempColorRT);  // colorRT now holds the composited volume
 }
 
+// ── Grass ring ──────────────────────────────────────────────────────────────
+// Fixed instance pool: cellSlots x bladesPerSlot blades. TerrainSystem streams
+// cells by rewriting slots in place — the same never-allocate-while-streaming
+// contract as the terrain tile pools.
+bool Renderer::configureGrassPool(Uint32 cellSlots, Uint32 bladesPerSlot) {
+    if (!grassPipeline.isValid()) return false;  // backend has no grass pass
+    if (cellSlots == 0 || bladesPerSlot == 0) return false;
+    if (grassInstanceBuffer.isValid()) rhi->destroyBuffer(grassInstanceBuffer);
+    BufferDesc bd;
+    bd.size = static_cast<size_t>(cellSlots) * bladesPerSlot * sizeof(Vapor::GrassBladeGpu);
+    bd.usage = BufferUsage::Storage;
+    bd.memoryUsage = MemoryUsage::GPU;
+    grassInstanceBuffer = rhi->createBuffer(bd);
+    grassSlotCount = cellSlots;
+    grassBladesPerSlot = bladesPerSlot;
+    grassDraws.clear();
+    if (!grassParamsBuffer.isValid()) {
+        BufferDesc pd;
+        pd.size = sizeof(Vapor::GrassParamsGpu);
+        pd.usage = BufferUsage::Storage;
+        pd.memoryUsage = MemoryUsage::GPU;
+        grassParamsBuffer = rhi->createBuffer(pd);
+    }
+    fmt::print("Renderer: grass pool {} cells x {} blades ({} MB)\n", cellSlots, bladesPerSlot,
+               bd.size / (1024 * 1024));
+    return grassInstanceBuffer.isValid();
+}
+
+void Renderer::updateGrassCell(Uint32 slot, const std::vector<Vapor::GrassBladeGpu>& blades) {
+    if (!grassInstanceBuffer.isValid() || slot >= grassSlotCount || blades.empty()) return;
+    const size_t count = std::min<size_t>(blades.size(), grassBladesPerSlot);
+    rhi->updateBuffer(grassInstanceBuffer, blades.data(),
+                      static_cast<size_t>(slot) * grassBladesPerSlot * sizeof(Vapor::GrassBladeGpu),
+                      count * sizeof(Vapor::GrassBladeGpu));
+}
+
+void Renderer::setGrassDraws(const std::vector<Vapor::GrassCellDraw>& draws,
+                             const Vapor::GrassSettingsData& settings) {
+    grassDraws = draws;
+    grassSettings = settings;
+}
+
+// Streamed grass blades: one instanced draw per resident cell into the scene
+// color/depth (depth-tested against the raster scene, writes depth so the sky
+// and fog composite correctly). Distance fade shrinks blades to zero height —
+// no blending, no sorting. Runs right after the Main pass.
+void Renderer::grassPass() {
+    if (!grassEnabled || !grassPipeline.isValid() || !grassInstanceBuffer.isValid() ||
+        !grassParamsBuffer.isValid() || grassDraws.empty() || !colorRT.isValid() ||
+        !depthStencilRT.isValid()) {
+        return;
+    }
+
+    // Self-contained wind clock (the renderer has no global time source).
+    const auto now = std::chrono::steady_clock::now();
+    if (grassLastTick.time_since_epoch().count() != 0) {
+        grassTimeSeconds += std::chrono::duration<float>(now - grassLastTick).count();
+    }
+    grassLastTick = now;
+
+    glm::vec3 sunDir = atmosphereData.sunDirection;
+    sunDir = (glm::length(sunDir) > 1e-6f) ? glm::normalize(sunDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+    Vapor::GrassParamsGpu p {};
+    p.viewProj = currentCamera.proj * currentCamera.view;
+    p.cameraPosTime = glm::vec4(currentCamera.position, grassTimeSeconds);
+    p.wind = glm::vec4(grassSettings.windDir, grassSettings.windStrength, grassSettings.windSpeed);
+    p.rootColor = glm::vec4(grassSettings.rootColor, grassSettings.fadeStart);
+    p.tipColor = glm::vec4(grassSettings.tipColor, grassSettings.fadeEnd);
+    p.sun = glm::vec4(sunDir, atmosphereData.sunIntensity);
+    p.sunColor = glm::vec4(atmosphereData.sunColor, 0.0f);
+    rhi->updateBuffer(grassParamsBuffer, &p, 0, sizeof(Vapor::GrassParamsGpu));
+
+    RenderPassDesc rp;
+    rp.name = "Grass";
+    rp.colorAttachments.push_back(colorRT);
+    rp.clearColors.push_back(clearColor);
+    rp.loadColor.push_back(true);   // composite over the rendered scene
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = true;            // test/write against the scene depth
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(grassPipeline);
+    rhi->setVertexBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
+    rhi->setVertexBuffer(1, grassInstanceBuffer);
+    rhi->setFragmentBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
+    for (const auto& cell : grassDraws) {
+        if (cell.count == 0 || cell.slot >= grassSlotCount) continue;
+        // 15 vertices per blade (two tapered quads + tip); base instance selects
+        // the cell's slot range (gl_InstanceIndex / Metal instance_id include it).
+        rhi->draw(15, std::min(cell.count, grassBladesPerSlot), 0, cell.slot * grassBladesPerSlot);
+    }
+    rhi->endRenderPass();
+}
+
 // Volume Rendering API — the hook a future EmberGen import PR calls with
 // decoded voxel data. R8_UNORM slice-major grid -> sampled 3D texture.
 TextureHandle Renderer::createVolumeTexture(Uint32 width, Uint32 height, Uint32 depth,
@@ -5525,6 +5767,25 @@ void Renderer::createDefaultResources() {
 
         defaultBlackTexture = static_cast<TextureId>(textures.size());
         textures.push_back(tex);
+    }
+
+    // Default 4-layer white array texture for the terrain detail-layer slots
+    // (set2 b13/b14). Keeps those sampler2DArray descriptors valid and
+    // type-correct on every Main-pass draw; the terrain branch (shaderModel==1)
+    // only samples it when no real detail arrays are staged, and those override
+    // it when a terrain surface exists.
+    {
+        TextureDesc texDesc;
+        texDesc.width = 1;
+        texDesc.height = 1;
+        texDesc.arrayLayers = 4;
+        texDesc.format = PixelFormat::RGBA8_UNORM;
+        texDesc.usage = TextureUsage::Sampled;
+        defaultDetailArrayTexture = rhi->createTexture(texDesc);
+        const Uint32 whitePixel = 0xFFFFFFFF;
+        for (Uint32 layer = 0; layer < 4; ++layer) {
+            rhi->updateTexture(defaultDetailArrayTexture, &whitePixel, sizeof(Uint32), 0, layer);
+        }
     }
 
     // Create default ORM texture: occlusion=1, roughness=1, metallic=0. The
@@ -6399,6 +6660,45 @@ void Renderer::createRenderPipeline() {
             volumeRaymarchPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
 
+            // Grass ring: procedural blades pulled from the instance pool (no
+            // vertex buffer), depth tested + written, cull off (blades are
+            // two-sided). Color-only into colorRT.
+            {
+                std::string gVert = readFile("shaders/Grass.vert.spv");
+                std::string gFrag = readFile("shaders/Grass.frag.spv");
+                if (!gVert.empty() && !gFrag.empty()) {
+                    ShaderDesc vd;
+                    vd.stage = ShaderStage::Vertex;
+                    vd.code = gVert.data();
+                    vd.codeSize = gVert.size();
+                    vd.entryPoint = "main";
+                    grassVS = rhi->createShader(vd);
+                    ShaderDesc fd;
+                    fd.stage = ShaderStage::Fragment;
+                    fd.code = gFrag.data();
+                    fd.codeSize = gFrag.size();
+                    fd.entryPoint = "main";
+                    grassFS = rhi->createShader(fd);
+
+                    PipelineDesc d;
+                    d.vertexShader = grassVS;
+                    d.fragmentShader = grassFS;
+                    d.vertexLayout.stride = 0;
+                    d.vertexLayout.attributes = {};
+                    d.topology = PrimitiveTopology::TriangleList;
+                    d.blendMode = BlendMode::Opaque;
+                    d.depthTest = true;
+                    d.depthWrite = true;
+                    d.depthCompareOp = CompareOp::Less;
+                    d.cullMode = CullMode::None;
+                    d.sampleCount = 1;
+                    d.hasDepthAttachment = true;
+                    d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                    d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    grassPipeline = rhi->createPipeline(d);
+                }
+            }
+
             // Camera-motion velocity (motion vectors) from depth.
             velocityPipeline = makeFullscreenFragPipeline(
                 "shaders/Velocity.frag.spv", velocityShader, BlendMode::Opaque);
@@ -6471,6 +6771,11 @@ void Renderer::createRenderPipeline() {
             };
             // GPU-driven rendering: frustum-cull compute pass.
             gpuCullPipeline = makeCompute("shaders/GpuCull.comp.spv", gpuCullShader);
+
+            // Adaptive tessellation (CBT/LEB): the GLSL twins of the Metal
+            // compute chain + the instanced draw path (no mesh/task route on
+            // Vulkan yet — tessMeshPathActive() falls back on its own).
+            createTessellationPipelinesVulkan();
 
             particleForcePipeline     = makeCompute("shaders/ParticleForce.comp.spv", particleForceShader);
             particleIntegratePipeline = makeCompute("shaders/ParticleIntegrate.comp.spv", particleIntegrateShader);
@@ -6905,6 +7210,43 @@ void Renderer::createRenderPipeline() {
         }
         volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
+
+        // Grass ring (Metal twin of the Vulkan Grass pipeline): procedural
+        // blades from the instance pool, depth write on, cull off.
+        {
+            std::string grassCode = readFile("shaders/3d_grass.metal");
+            if (!grassCode.empty()) {
+                ShaderDesc vd;
+                vd.stage = ShaderStage::Vertex;
+                vd.code = grassCode.data();
+                vd.codeSize = grassCode.size();
+                vd.entryPoint = "grassVertex";
+                grassVS = rhi->createShader(vd);
+                ShaderDesc fd;
+                fd.stage = ShaderStage::Fragment;
+                fd.code = grassCode.data();
+                fd.codeSize = grassCode.size();
+                fd.entryPoint = "grassFragment";
+                grassFS = rhi->createShader(fd);
+
+                PipelineDesc d;
+                d.vertexShader = grassVS;
+                d.fragmentShader = grassFS;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = true;
+                d.depthWrite = true;
+                d.depthCompareOp = CompareOp::Less;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = true;
+                d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                grassPipeline = rhi->createPipeline(d);
+            }
+        }
         // Volumetric clouds (off by default): quarter-res raymarch ->
         // temporal resolve -> upscale composite, all from the native file.
         cloudRaymarchPipeline = makeMetalPass("shaders/3d_volumetric_clouds.metal", "cloudVertex", "cloudFragmentLowRes",
@@ -7327,6 +7669,7 @@ void Renderer::stage(std::shared_ptr<RenderScene> scene) {
                 matData.clearcoat = mesh->material->clearcoat;
                 matData.clearcoatGloss = mesh->material->clearcoatGloss;
                 matData.transmission = mesh->material->transmission;
+                matData.shaderModel = static_cast<Uint32>(mesh->material->materialShader);
                 matData.alphaMode = mesh->material->alphaMode;
                 matData.alphaCutoff = mesh->material->alphaCutoff;
                 matData.doubleSided = mesh->material->doubleSided;
@@ -8196,6 +8539,15 @@ void Renderer::drawGraphicsImGui() {
             volumeSettings = VolumeRenderData{};
             volumeRenderEnabled = wasEnabled;
         }
+        ImGui::TreePop();
+    }
+
+    if (ImGui::TreeNode("Terrain")) {
+        ImGui::Text("Detail layers: %s", terrainDetailAlbedoArray.isValid() ? "staged" : "none");
+        ImGui::Checkbox("Grass", &grassEnabled);
+        Uint32 grassBlades = 0;
+        for (const auto& cell : grassDraws) grassBlades += cell.count;
+        ImGui::Text("Grass cells %zu, blades %u", grassDraws.size(), grassBlades);
         ImGui::TreePop();
     }
 
@@ -9143,6 +9495,14 @@ void Renderer::renderToTexture(
         rhi->setTexture(0, 12, pssmShadowArrayTexture, defaultSampler);
         rhi->setTexture(0, 13, whiteTex, defaultSampler);
         rhi->setTexture(0, 14, blackTex, defaultSampler);
+        // On Vulkan, set2 b13/b14 are RHIMain.frag's sampler2DArray terrain
+        // detail layers, not the Metal-contract 2D point-shadow/gibs slots — bind
+        // the default white array so this RTT main-pipeline draw's descriptor is
+        // valid (RTT never renders terrain surfaces, so the default suffices).
+        if (backend == GraphicsBackend::Vulkan) {
+            rhi->setTexture(0, 13, defaultDetailArrayTexture, defaultSampler);
+            rhi->setTexture(0, 14, defaultDetailArrayTexture, defaultSampler);
+        }
 
         // Skip the tile-culled point-light loop (bit0): the cluster buffer is
         // built for the MAIN camera's screen tiles, meaningless in this view.

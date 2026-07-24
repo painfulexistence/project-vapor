@@ -37,15 +37,16 @@ struct TessParams {
     uint maxLeaves;           // TessLeafData capacity (draw clamp + split guard)
     float splitPixels;        // split when the leaf hypotenuse projects larger
     float screenHeight;       // pixels
-    float displacementScale;  // 0 = flat; procedural displacement amplitude
-    uint flags;               // bit0 = freeze (classify becomes a no-op)
+    float displacementScale;  // 0 = flat; displacement amplitude (terrain: heightScale)
+    uint flags;               // bit0 = freeze, bit1 = terrain heightfield displacement
     uint gridIndexCount;      // CPU grid topology size, for the draw args
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    float terrainFrequency;   // TESS_FLAG_TERRAIN: OpenSimplex2 FBm frequency
+    uint terrainSeed;         // ... noise seed
+    uint terrainOctaves;      // ... octave count
 };
 
 constant uint TESS_FLAG_FREEZE = 1u;
+constant uint TESS_FLAG_TERRAIN = 2u;
 
 // GPU-written indirect args + counters, one per tessellated mesh (64 B).
 // Field offsets are load-bearing (dispatchIndirect/drawIndexedIndirect/
@@ -226,12 +227,71 @@ inline float tessProjectedPixels(float3 wa, float3 wb, device const CameraData& 
 }
 
 // Deterministic procedural displacement (edge-consistent: a function of the
-// object-space position only). Placeholder until heightmap sampling is wired.
+// object-space position only). The generic placeholder until heightmap
+// sampling is wired; terrain instances use the heightfield path below.
 inline float tessDisplaceAmount(float3 p, float scale) {
     if (scale == 0.0) return 0.0;
     float h = sin(p.x * 3.1) * cos(p.z * 2.7) +
               0.35 * sin(p.x * 9.3 + p.z * 7.1) * cos(p.y * 4.3);
     return h * scale;
+}
+
+// ---- terrain heightfield displacement (TESS_FLAG_TERRAIN) ------------------
+// The streamed-terrain height source (FastNoiseLite OpenSimplex2 FBm — the
+// SAME field TerrainWorld::heightAt and the Main pass's terrain branch
+// evaluate), driving true displaced tessellation: TerrainSystem submits a
+// flat world-spanning plane with an IDENTITY model (object == world, which
+// keeps displacement a function of the undisplaced position only —
+// crack-free by construction) and the CBT refines it adaptively.
+// Requires 3d_terrain_noise.metal (trhHeightAt) to be included first, the
+// same top-level-include contract as 3d_common.metal above.
+
+// Height (metres, = world y) of the terrain field under object-space p.
+inline float tessTerrainHeight(float3 p, constant TessParams& params) {
+    return trhHeightAt(p.xz, params.terrainFrequency, int(params.terrainOctaves),
+                       params.terrainSeed, params.displacementScale);
+}
+
+// buildPaletteLUT's bands (terrain_world.cpp), transcribed: sand/grass/dirt/
+// snow by normalized height, blended to rock by slope. This is the palette
+// fallback look — the full detail-layer splat stays in the Main pass; wiring
+// it into the tess fragment is the remaining integration step.
+inline float3 tessTerrainPalette(float h01, float slope01) {
+    const float3 sand = float3(0.76, 0.70, 0.50), grass = float3(0.22, 0.42, 0.16);
+    const float3 dirt = float3(0.42, 0.32, 0.20), snow = float3(0.92, 0.94, 0.97);
+    const float3 rock = float3(0.44, 0.43, 0.41);
+    float3 c;
+    if (h01 < 0.12) c = sand;
+    else if (h01 < 0.20) c = mix(sand, grass, (h01 - 0.12) / 0.08);
+    else if (h01 < 0.50) c = grass;
+    else if (h01 < 0.62) c = mix(grass, dirt, (h01 - 0.50) / 0.12);
+    else if (h01 < 0.70) c = mix(dirt, snow, (h01 - 0.62) / 0.08);
+    else c = snow;
+    return mix(c, rock, smoothstep(0.35, 0.75, slope01));
+}
+
+// Displaced terrain vertex: position lifted onto the heightfield, a
+// central-difference normal, and the palette color. d = 1 m matches the
+// LOD0 heightmap texel spacing the original demo derived normals from.
+struct TessTerrainVertex {
+    float3 pos;
+    float3 nrm;
+    float3 color;
+};
+inline TessTerrainVertex tessTerrainDisplace(float3 pos, constant TessParams& params) {
+    const float d = 1.0;
+    float h  = tessTerrainHeight(pos, params);
+    float hl = tessTerrainHeight(pos - float3(d, 0.0, 0.0), params);
+    float hr = tessTerrainHeight(pos + float3(d, 0.0, 0.0), params);
+    float hb = tessTerrainHeight(pos - float3(0.0, 0.0, d), params);
+    float ht = tessTerrainHeight(pos + float3(0.0, 0.0, d), params);
+    TessTerrainVertex v;
+    v.pos = float3(pos.x, pos.y + h, pos.z);
+    v.nrm = normalize(float3(hl - hr, 2.0 * d, hb - ht));
+    // Same slope01 the tile mesh bakes into its UVs (buildTileGeometry).
+    float slope01 = clamp(sqrt((hr - hl) * (hr - hl) + (ht - hb) * (ht - hb)) / (4.0 * d), 0.0, 1.0);
+    v.color = tessTerrainPalette(h / max(params.displacementScale, 1e-3), slope01);
+    return v;
 }
 
 inline float3 tessHashColor(uint x) {

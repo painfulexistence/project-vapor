@@ -719,10 +719,16 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     surf.roughness  = tex.roughness.sample(s, in.uv).g * material.roughnessFactor;
     surf.metallic   = tex.metallic.sample(s, in.uv).b * material.metallicFactor;
     surf.emission   = srgbToLinear(tex.emissive.sample(s, in.uv).rgb * material.emissiveFactor.rgb) * material.emissiveStrength;
-    surf.subsurface = material.subsurface;
-    surf.specular   = material.specular;
-    surf.specular_tint = material.specularTint;
-    surf.anisotropic = material.anisotropic;
+    // A terrain material (shaderModel == 1) overloads the Disney lobe fields to
+    // carry its height-field descriptor (see renderer.cpp). This meshlet path
+    // has no terrain branch, but guard the lobes anyway so a terrain material
+    // routed here shades as a neutral dielectric instead of reading specular =
+    // heightScale / anisotropic = seed bits.
+    bool isTerrain = (material.shaderModel == 1.0);
+    surf.subsurface = isTerrain ? 0.0 : material.subsurface;
+    surf.specular   = isTerrain ? 0.5 : material.specular;
+    surf.specular_tint = isTerrain ? 0.0 : material.specularTint;
+    surf.anisotropic = isTerrain ? 0.0 : material.anisotropic;
     surf.sheen      = material.sheen;
     surf.sheen_tint = material.sheenTint;
     surf.clearcoat  = material.clearcoat;

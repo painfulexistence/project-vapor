@@ -148,6 +148,10 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<FlyCameraComponent>("flyCamera");
         r.registerComponent<FollowCameraComponent>("followCamera");
         r.registerComponent<WindFieldComponent>("windField");
+        // Procedural world: a data-only config whose Hidden<> state the owning
+        // TerrainSystem creates on first sight — exactly the shape the PFR
+        // applier authors.
+        r.registerComponent<StreamingTerrainComponent>("streamingTerrain");
         r.registerComponent<ParticleEmitterComponent>("particleEmitter");
         r.registerComponent<ParticleAttractorComponent>("particleAttractor");
         r.registerComponent<ParticleRendererComponent>("particleRenderer");
