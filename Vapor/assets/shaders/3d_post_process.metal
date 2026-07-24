@@ -54,6 +54,10 @@ struct PostProcessParams {
     float enableFilmGrain;
     float filmGrainStrength;
     float filmGrainAnimated;
+
+    // TV signal glitch
+    float enableGlitch;
+    float glitchIntensity;
 };
 
 vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
@@ -131,6 +135,24 @@ static inline float vhsDropout(float2 uv, float t) {
     return band * speckle;
 }
 
+// TV signal glitch: bursty blocky horizontal displacement + RGB tearing.
+// Returns (horizontal uv shift, extra RGB channel split). Runs before sampling
+// so it stacks with the VHS jitter and the CRT barrel. Scales with intensity.
+static inline float2 tvGlitch(float y, float t, float intensity) {
+    // Storm envelope — glitches arrive in occasional bursts, quiet between.
+    float storm = smoothstep(0.55, 0.9, vhsSmoothNoise(t * 1.3, 21.0));
+    float tick  = floor(t * 12.0);
+    // Coarse blocks that jump left/right (only a sparse subset is active).
+    float blk    = floor(y * 20.0);
+    float active = step(0.80, hash21(float2(blk, tick))) * storm;
+    float coarse = (hash21(float2(blk, tick + 7.0)) - 0.5) * 0.12 * active;
+    // Fine scanline-scale tearing during storms.
+    float fine   = (hash21(float2(floor(y * 220.0), tick)) - 0.5) * 0.02 * storm;
+    float shift  = (coarse + fine) * intensity;
+    float split  = (active + storm * 0.3) * 0.015 * intensity;
+    return float2(shift, split);
+}
+
 // 3x3 Sobel gradient magnitude of the screen texture's luminance.
 static inline float sobelMagnitude(texture2d<float, access::sample> tex, sampler s, float2 uv) {
     float2 ts = 1.0 / float2(tex.get_width(), tex.get_height());
@@ -174,7 +196,12 @@ fragment float4 fragmentMain(
         uv.x += vhsLineJitter(uv.y, t);
         vhsScan = 0.88 + 0.12 * sin(uv.y * 720.0);
         float drop = vhsDropout(uv, t);
-        float hiss = hash21(float2(uv.x * 640.0, floor(uv.y * 480.0) + floor(t * 30.0))) - 0.5;
+        // Fine tape "snow": ~2px cells horizontally (real VHS luma noise streaks
+        // along the scanline), per-scanline vertically, reseeded each frame —
+        // finer and more authentic than a coarse square-cell hash.
+        float2 px = uv * float2(texScreen.get_width(), texScreen.get_height());
+        float hiss = hash21(float2(floor(px.x * 0.5), floor(px.y)) + floor(t * 60.0)) - 0.5;
+        // Head-switching noise stays coarse — that band really is blocky on tape.
         float headSwitch = smoothstep(0.05, 0.0, uv.y) *
                            (hash21(float2(uv.x * 200.0, floor(t * 30.0))) - 0.2);
         vhsAdd = float3(drop * 0.5 + hiss * 0.10 + headSwitch * 0.6);
@@ -182,6 +209,17 @@ fragment float4 fragmentMain(
         float2 vd = uv - 0.5;
         vhsVig = 1.0 - dot(vd, vd) * 0.5;
         vhsChroma = 0.004;
+    }
+
+    // ========================================================================
+    // TV signal glitch: blocky horizontal displacement + RGB tearing. Warps uv
+    // here (after VHS, before CRT) so it stacks with both.
+    // ========================================================================
+    float glitchSplit = 0.0;
+    if (params.enableGlitch > 0.5) {
+        float2 gl = tvGlitch(uv.y, params.time, params.glitchIntensity);
+        uv.x += gl.x;
+        glitchSplit = gl.y;
     }
 
     // ========================================================================
@@ -212,6 +250,8 @@ fragment float4 fragmentMain(
     if (params.enableCRT > 0.5) { rOff += float2(0.001, 0.0); bOff += float2(-0.001, 0.0); }
     // VHS chroma bleed: a purely horizontal R/B smear (low chroma bandwidth).
     if (params.enableVHS > 0.5) { rOff.x += vhsChroma; bOff.x -= vhsChroma; }
+    // TV-glitch RGB tearing: stacks on top of the CA/CRT/VHS channel offsets.
+    if (params.enableGlitch > 0.5) { rOff.x += glitchSplit; bOff.x -= glitchSplit; }
 
     // Sample RGB channels with offset
     float2 uvR = uv + rOff;

@@ -729,6 +729,10 @@ private:
         float enableFilmGrain = 0.0f;
         float filmGrainStrength = 0.05f;
         float filmGrainAnimated = 0.0f;   // 0 = static, 1 = flicker
+        // TV signal glitch (composes with VHS + CRT): bursty blocky horizontal
+        // displacement + RGB tearing.
+        float enableGlitch = 0.0f;
+        float glitchIntensity = 1.0f;
     };
     PostProcessParams postProcessParams;
     BufferHandle postProcessParamsBuffer;  // Vulkan PostProcess.frag set1 b0

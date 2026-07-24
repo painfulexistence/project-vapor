@@ -7646,7 +7646,8 @@ void Renderer::drawPostProcessImGui() {
     flagBox("CRT", p.enableCRT);           ImGui::SameLine();
     flagBox("Sobel", p.enableSobel);       ImGui::SameLine();
     flagBox("Posterize", p.enablePosterize); ImGui::SameLine();
-    flagBox("Film Grain", p.enableFilmGrain);
+    flagBox("Film Grain", p.enableFilmGrain); ImGui::SameLine();
+    flagBox("Glitch", p.enableGlitch);
     ImGui::Separator();
 
     // Detailed per-effect controls.
@@ -7699,9 +7700,14 @@ void Renderer::drawPostProcessImGui() {
         ImGui::EndDisabled();
         ImGui::TreePop();
     }
-    if (ImGui::TreeNode("Stylized / Retro (Atmospheric)##pp")) {
+    if (ImGui::TreeNode("Stylized / Retro##pp")) {
         flagBox("VHS (jitter + dropout + tape noise)", p.enableVHS);
         flagBox("CRT (barrel + scanlines)", p.enableCRT);
+        bool glitch = flagBox("TV Glitch (block tear + RGB split)", p.enableGlitch);
+        ImGui::BeginDisabled(!glitch);
+        ImGui::DragFloat("Glitch intensity", &p.glitchIntensity, 0.02f, 0.0f, 3.0f);
+        ImGui::EndDisabled();
+        ImGui::TextDisabled("VHS / CRT / Glitch stack — enable any combination.");
         flagBox("Sobel edges", p.enableSobel);
         bool poster = flagBox("Posterize", p.enablePosterize);
         ImGui::BeginDisabled(!poster);
