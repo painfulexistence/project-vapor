@@ -4,8 +4,11 @@
 //
 // Draws one volume's world-space AABB as 36 shader-generated cube vertices
 // (no vertex buffer); only covered pixels run the fragment DDA, which is what
-// keeps many small volumes affordable. Culling is off in the pipeline so the
-// box still covers its footprint when the camera is inside it.
+// keeps many small volumes affordable. The pipeline culls FRONT faces, so only
+// the box's far (back) faces rasterize — one fragment per covered pixel, and
+// the footprint is still covered when the camera sits inside the box (the near
+// faces it would otherwise see are the culled ones). The cube winding below is
+// CCW-from-outside for exactly this reason.
 //
 // Binding convention (see rhi_vulkan.cpp): set 0 = vertex-stage buffers.
 // The params buffer is the same 256-byte-strided MicroVoxelRenderData slice

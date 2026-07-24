@@ -5054,7 +5054,20 @@ void Renderer::microVoxelPass() {
     rhi->setFragmentBuffer(1, voxelPageTableBuffer);
     rhi->setFragmentBuffer(2, voxelBrickPoolBuffer);
     rhi->setFragmentBuffer(3, voxelPaletteBuffer);
+    // Frustum-cull the primary boxes. data[] above stays fully populated for
+    // every volume — the GI trace bounces off-screen volumes' light into the
+    // frame — but an off-screen volume rasterizes no box here. A volume the
+    // camera sits inside always intersects the frustum, so digging or flying
+    // through one never culls it. No near-to-far sort: the fragment writes
+    // gl_FragDepth, so early-Z is off and draw order can't reject an overlapped
+    // fragment before its DDA runs — sorting would cost time for no shading win.
+    // (The pipeline culls front faces, so each covered pixel marches once.)
+    const Frustum frustum = extractFrustum(viewProj);
     for (Uint32 i = 0; i < written; i++) {
+        const VoxelVolumeGpu& gpu = voxelVolumes[i];
+        const glm::vec3 aabbMin = gpu.origin;
+        const glm::vec3 aabbMax = gpu.origin + gpu.world->extent();
+        if (!frustum.isBoxVisible(aabbMin, aabbMax)) continue;
         const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
         rhi->setVertexBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
         rhi->setFragmentBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
@@ -6884,8 +6897,13 @@ void Renderer::createRenderPipeline() {
                 "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
 
             // MicroVoxel primary: box-rasterized voxel DDA. Not the fullscreen
-            // lambda — it draws AABB cubes (cull off, camera may sit inside)
-            // and writes gl_FragDepth, so depth test AND write are on.
+            // lambda — it draws AABB cubes and writes gl_FragDepth, so depth
+            // test AND write are on. Front faces are culled so each covered
+            // pixel runs the DDA exactly once (not twice, front + back): the
+            // cube's outward faces are wound CCW-from-outside (front, given the
+            // negative-height viewport), so culling front keeps only the far
+            // (back) faces — which cover the footprint whether the camera is
+            // outside the box or sitting inside it.
             {
                 std::string mvVertCode = readFile("shaders/MicroVoxel.vert.spv");
                 std::string mvFragCode = readFile("shaders/MicroVoxel.frag.spv");
@@ -6913,7 +6931,7 @@ void Renderer::createRenderPipeline() {
                     d.depthTest = true;
                     d.depthWrite = true;
                     d.depthCompareOp = CompareOp::Less;
-                    d.cullMode = CullMode::None;
+                    d.cullMode = CullMode::Front;  // draw back faces only: 1 DDA per pixel, camera-inside safe
                     d.sampleCount = 1;
                     d.hasDepthAttachment = true;
                     d.depthAttachmentFormat = PixelFormat::Depth32Float;
