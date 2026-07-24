@@ -435,7 +435,12 @@ struct alignas(16) MicroVoxelRenderData {
     // extent). The renderer also pre-rotates sunDirection into this frame, so
     // every lighting term stays consistent without touching the helpers.
     glm::vec4 rotationQuat = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-    glm::vec4 _pad[2] = {};
+    // Tight solid bounds in the volume's LOCAL grid frame (meters): the box the
+    // vertex shader rasterizes and the fragment's slab test both use this
+    // instead of the full [0, extent], so a ray skips the empty margin (mostly
+    // the sky above terrain). Defaults span the full grid (a 256^3 @ 5 cm here).
+    glm::vec4 boundsMin = glm::vec4(0.0f);
+    glm::vec4 boundsMax = glm::vec4(12.8f, 12.8f, 12.8f, 0.0f);
 };
 static_assert(sizeof(MicroVoxelRenderData) == 256,
               "MicroVoxelRenderData must stay at the 256-byte per-volume stride the shaders assume");

@@ -127,6 +127,14 @@ public:
     const glm::ivec3& dim() const { return gridDim; }
     glm::ivec3 brickGrid() const { return gridDim / BRICK_DIM; }
     glm::vec3 extent() const { return glm::vec3(gridDim) * voxelSize; }
+    // Tight solid bounds in voxel coordinates (inclusive), unioned as bricks
+    // are generated. The renderer shrinks each volume's rasterized box and the
+    // shader's slab test to this range, so a ray never marches the empty margin
+    // (mostly the sky above terrain). Conservative: carves never shrink it (a
+    // dug hole leaves the bound where it was, which stays correct). Falls back
+    // to the full grid while the world is still empty. Thread-safe against
+    // streaming generation.
+    void occupiedVoxelBounds(glm::ivec3& outMin, glm::ivec3& outMax) const;
     float voxelSizeMeters() const { return voxelSize; }
     Uint32 capacity() const { return brickCapacity; }
     Uint64 solidVoxels() const { return solidCount.load(std::memory_order_relaxed); }
@@ -192,6 +200,8 @@ private:
     std::vector<FeatureSphere> features;      // crystals + glowstone, in voxels
     std::atomic<Uint64> solidCount { 0 };
     std::atomic<Uint64> droppedCount { 0 };   // bricks lost to pool exhaustion
+    glm::ivec3 occMin { 0 };                   // tight solid bounds (voxels, inclusive);
+    glm::ivec3 occMax { -1 };                  // occMax < occMin => empty. Guarded by poolMutex.
 
     mutable std::mutex poolMutex;  // guards freeSlots, bricks growth, dirty state
     std::vector<Uint32> dirtyBrickSlots;

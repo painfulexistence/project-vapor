@@ -5026,6 +5026,14 @@ void Renderer::microVoxelPass() {
         // touching its helpers. Identity rotation leaves both unchanged.
         d.rotationQuat = glm::vec4(gpu.rotation.x, gpu.rotation.y, gpu.rotation.z, gpu.rotation.w);
         d.sunDirection = glm::vec4(glm::conjugate(gpu.rotation) * sunDir, microVoxelSettings.sunDirection.w);
+        // Tight solid bounds (local grid frame, meters): the box the vertex
+        // shader draws and the fragment slab both clip to this, so a ray skips
+        // the empty margin. +1 voxel on max to cover that voxel's far face.
+        glm::ivec3 obMin, obMax;
+        gpu.world->occupiedVoxelBounds(obMin, obMax);
+        const float vs = gpu.world->voxelSizeMeters();
+        d.boundsMin = glm::vec4(glm::vec3(obMin) * vs, 0.0f);
+        d.boundsMax = glm::vec4(glm::vec3(obMax + 1) * vs, 0.0f);
         d.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
         d.params.w = voxelGIActiveThisFrame ? microVoxelGIStrength : 0.0f;
         // Shared-buffer ranges: the slice index doubles as the palette slot.

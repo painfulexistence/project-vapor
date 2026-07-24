@@ -45,6 +45,8 @@ layout(std430, set = 1, binding = 0) readonly buffer ParamsBuf {
     vec4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
     vec4 extra0;           // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
     vec4 rotationQuat;     // volume orientation (x,y,z,w); identity = axis-aligned
+    vec4 boundsMin;        // tight solid bounds, LOCAL grid frame (meters)
+    vec4 boundsMax;
 };
 
 // Active rotation v' = q v q* for a unit quaternion q = (x,y,z,w). The DDA
@@ -161,12 +163,16 @@ bool traverseBrick(vec3 ro, vec3 rd, vec3 invD, uint slot, ivec3 bcell, float tI
 }
 
 // Full traversal in LOCAL space (volume min corner at the origin, meters).
+// The slab test clips to the tight solid bounds (boundsMin/boundsMax) rather
+// than the full grid, so the ray skips the empty margin before entering the
+// occupied region; the brick DDA below still indexes the full grid.
 bool raycast(vec3 ro, vec3 rd, float maxDist, out Hit hit) {
     float voxelSize = volumeOrigin.w;
-    vec3 bmax = gridDim.xyz * voxelSize;
+    vec3 bmin = boundsMin.xyz;
+    vec3 bmax = boundsMax.xyz;
     vec3 invD = 1.0 / rd;  // IEEE inf on axis-parallel components works with min/max
 
-    vec3 t0 = (vec3(0.0) - ro) * invD;
+    vec3 t0 = (bmin - ro) * invD;
     vec3 t1 = (bmax - ro) * invD;
     vec3 tsmall = min(t0, t1);
     vec3 tbig = max(t0, t1);

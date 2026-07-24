@@ -1,6 +1,7 @@
 #include "voxel_world.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 
 namespace Vapor {
@@ -169,6 +170,8 @@ void VoxelWorld::prepareGeneration(Uint32 seedIn) {
     dirtyBrickSlots.clear();
     solidCount.store(0, std::memory_order_relaxed);
     droppedCount.store(0, std::memory_order_relaxed);
+    occMin = glm::ivec3(INT_MAX);
+    occMax = glm::ivec3(INT_MIN);
     pageTableDirty = true;
     paletteDirty = true;
 
@@ -290,6 +293,9 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     const int bx0 = x0 / BRICK_DIM, bx1 = (x0 + xw) / BRICK_DIM;
     const int bz0 = z0 / BRICK_DIM, bz1 = (z0 + zw) / BRICK_DIM;
     const int by1 = ny / BRICK_DIM;
+    // Chunk-local tight bounds (brick granularity), merged into the shared
+    // occMin/occMax under the mutex once the chunk finishes.
+    glm::ivec3 cMin(INT_MAX), cMax(INT_MIN);
     Brick staged;
     for (int bz = bz0; bz < bz1; bz++) {
         for (int by = 0; by < by1; by++) {
@@ -316,6 +322,9 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
                     }
                 }
                 if (solid == 0) continue;  // page entry already PAGE_EMPTY
+                // This brick has content: union its voxel range into the bounds.
+                cMin = glm::min(cMin, glm::ivec3(bx, by, bz) * BRICK_DIM);
+                cMax = glm::max(cMax, glm::ivec3(bx, by, bz) * BRICK_DIM + (BRICK_DIM - 1));
                 const size_t page = pageIndex({ bx, by, bz });
                 if (uniform && solid == BRICK_VOXELS) {
                     pageTable[page] = PAGE_UNIFORM_BIT | uniformMat;
@@ -339,6 +348,10 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     {
         std::lock_guard<std::mutex> lock(poolMutex);
         pageTableDirty = true;
+        if (cMax.x >= cMin.x) {  // this chunk had solids: grow the shared bounds
+            occMin = glm::min(occMin, cMin);
+            occMax = glm::max(occMax, cMax);
+        }
     }
 }
 
@@ -364,6 +377,17 @@ Uint8 VoxelWorld::voxelAt(const glm::ivec3& cell) const {
 Uint32 VoxelWorld::residentBricks() const {
     std::lock_guard<std::mutex> lock(poolMutex);
     return static_cast<Uint32>(bricks.size() - freeSlots.size());
+}
+
+void VoxelWorld::occupiedVoxelBounds(glm::ivec3& outMin, glm::ivec3& outMax) const {
+    std::lock_guard<std::mutex> lock(poolMutex);
+    if (occMax.x < occMin.x) {  // still empty: fall back to the full grid
+        outMin = glm::ivec3(0);
+        outMax = gridDim - 1;
+        return;
+    }
+    outMin = glm::clamp(occMin, glm::ivec3(0), gridDim - 1);
+    outMax = glm::clamp(occMax, glm::ivec3(0), gridDim - 1);
 }
 
 Uint32 VoxelWorld::allocSlotLocked() {

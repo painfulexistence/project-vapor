@@ -32,7 +32,8 @@ struct MicroVoxelData {
     float4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
     float4 extra0;           // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
     float4 rotationQuat;     // volume orientation (x,y,z,w); identity = axis-aligned
-    float4 _pad[2];
+    float4 boundsMin;        // tight solid bounds, LOCAL grid frame (meters)
+    float4 boundsMax;
 };
 
 // Active rotation v' = q v q* for a unit quaternion q = (x,y,z,w).
@@ -73,11 +74,12 @@ constant float3 mvCubeVerts[36] = {
 vertex MicroVoxelVertexOut microVoxelVertex(uint vertexID [[vertex_id]],
                                             constant MicroVoxelData& u [[buffer(0)]]) {
     float3 extent = u.gridDim.xyz * u.volumeOrigin.w;
-    // Rotate the AABB about the volume pivot (min corner + half the x/z
-    // extent); identity gives volumeOrigin + vert*extent, the axis-aligned box.
+    // Rasterize the TIGHT box (boundsMin..boundsMax, local frame), rotated about
+    // the volume pivot; full bounds + identity give volumeOrigin + vert*extent.
+    float3 lp = mix(u.boundsMin.xyz, u.boundsMax.xyz, mvCubeVerts[vertexID]);
     float3 cXZ = float3(extent.x * 0.5, 0.0, extent.z * 0.5);
     float3 pivot = u.volumeOrigin.xyz + cXZ;
-    float3 wp = pivot + mvQuatRotate(u.rotationQuat, mvCubeVerts[vertexID] * extent - cXZ);
+    float3 wp = pivot + mvQuatRotate(u.rotationQuat, lp - cXZ);
     MicroVoxelVertexOut out;
     out.worldPos = wp;
     out.position = u.viewProj * float4(wp, 1.0);
@@ -179,10 +181,13 @@ static bool mvRaycast(constant MicroVoxelData& u, device const uint* pageTable,
                       device const uint* brickPool, float3 ro, float3 rd, float maxDist,
                       thread MvHit& hit) {
     float voxelSize = u.volumeOrigin.w;
-    float3 bmax = u.gridDim.xyz * voxelSize;
+    // Clip to the tight solid bounds (skips the empty margin); brick DDA below
+    // still indexes the full grid.
+    float3 bmin = u.boundsMin.xyz;
+    float3 bmax = u.boundsMax.xyz;
     float3 invD = 1.0 / rd;
 
-    float3 t0 = (float3(0.0) - ro) * invD;
+    float3 t0 = (bmin - ro) * invD;
     float3 t1 = (bmax - ro) * invD;
     float3 tsmall = min(t0, t1);
     float3 tbig = max(t0, t1);
