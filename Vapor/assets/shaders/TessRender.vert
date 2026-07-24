@@ -61,7 +61,7 @@ layout(std430, binding = 3) readonly buffer ParamsBuf {
 layout(location = 0) out vec3 vWorldNormal;
 layout(location = 1) out vec3 vWorldPosition;
 layout(location = 2) out vec2 vUv;
-layout(location = 3) out vec3 vTerrainColor;
+layout(location = 3) out float vHeight01;   // terrain: normalized height (splat weights)
 layout(location = 4) flat out float vTerrainMix;
 layout(location = 5) flat out uint vDepth;
 
@@ -145,22 +145,6 @@ float tessTerrainHeight(vec3 p) {
                       params.terrainSeed, params.displacementScale);
 }
 
-// buildPaletteLUT's bands (terrain_world.cpp), transcribed — same fallback
-// look as the MSL twin in 3d_tess_lib.metal.
-vec3 tessTerrainPalette(float h01, float slope01) {
-    const vec3 sand = vec3(0.76, 0.70, 0.50), grassC = vec3(0.22, 0.42, 0.16);
-    const vec3 dirt = vec3(0.42, 0.32, 0.20), snow = vec3(0.92, 0.94, 0.97);
-    const vec3 rock = vec3(0.44, 0.43, 0.41);
-    vec3 c;
-    if (h01 < 0.12) c = sand;
-    else if (h01 < 0.20) c = mix(sand, grassC, (h01 - 0.12) / 0.08);
-    else if (h01 < 0.50) c = grassC;
-    else if (h01 < 0.62) c = mix(grassC, dirt, (h01 - 0.50) / 0.12);
-    else if (h01 < 0.70) c = mix(dirt, snow, (h01 - 0.62) / 0.08);
-    else c = snow;
-    return mix(c, rock, smoothstep(0.35, 0.75, slope01));
-}
-
 // Generic procedural displacement placeholder (non-terrain instances).
 float tessDisplaceAmount(vec3 p, float scale) {
     if (scale == 0.0) return 0.0;
@@ -179,7 +163,7 @@ void main() {
         vWorldNormal = vec3(0, 1, 0);
         vWorldPosition = vec3(0);
         vUv = vec2(0);
-        vTerrainColor = vec3(0);
+        vHeight01 = 0.0;
         vTerrainMix = 0.0;
         vDepth = 0u;
         return;
@@ -197,11 +181,13 @@ void main() {
     // Displacement is a function of the undisplaced object-space position
     // only, so leaves sharing an edge displace its vertices identically.
     nrm = normalize(nrm);
-    vTerrainColor = vec3(0);
+    vHeight01 = 0.0;
     vTerrainMix = 0.0;
     if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
         // Same math as tessTerrainDisplace in 3d_tess_lib.metal: d = 1 m
-        // matches the LOD0 heightmap texel spacing of the original demo.
+        // matches the LOD0 heightmap texel spacing of the original demo. The
+        // heightfield normal drives the fragment splat (slope from it); the
+        // detail-layer texturing itself is per-fragment in TessRender.frag.
         const float d = 1.0;
         float h  = tessTerrainHeight(pos);
         float hl = tessTerrainHeight(pos - vec3(d, 0.0, 0.0));
@@ -210,8 +196,7 @@ void main() {
         float ht = tessTerrainHeight(pos + vec3(0.0, 0.0, d));
         pos = vec3(pos.x, pos.y + h, pos.z);
         nrm = normalize(vec3(hl - hr, 2.0 * d, hb - ht));
-        float slope01 = clamp(sqrt((hr - hl) * (hr - hl) + (ht - hb) * (ht - hb)) / (4.0 * d), 0.0, 1.0);
-        vTerrainColor = tessTerrainPalette(h / max(params.displacementScale, 1e-3), slope01);
+        vHeight01 = clamp(h / max(params.displacementScale, 1e-3), 0.0, 1.0);
         vTerrainMix = 1.0;
     } else {
         pos += nrm * tessDisplaceAmount(pos, params.displacementScale);

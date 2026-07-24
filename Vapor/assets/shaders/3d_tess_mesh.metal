@@ -80,7 +80,7 @@ struct TessMeshVertexOut {
     float3 worldNormal;
     float3 worldPosition;
     float2 uv;
-    float3 terrainColor;       // TESS_FLAG_TERRAIN: palette color from height/slope
+    float height01;            // TESS_FLAG_TERRAIN: normalized height (splat weights)
     float terrainMix [[flat]]; // 1 = terrain shading, 0 = LoD debug hash
     uint depth [[flat]];  // same for all verts of a leaf; flat = provoking vertex
     uint node [[flat]];
@@ -122,14 +122,14 @@ using TessMeshT = metal::mesh<TessMeshVertexOut, TessMeshPrimOut, 45, 64,
         float3 nrm = normalize(w.x * c0.nrm + w.y * c1.nrm + w.z * c2.nrm);
         float2 uv = w.x * c0.uv + w.y * c1.uv + w.z * c2.uv;
         // Terrain instances lift the vertex onto the heightfield (normal +
-        // palette color derived from it); others keep the placeholder.
-        float3 terrainColor = float3(0);
+        // normalized height for the fragment splat); others keep the placeholder.
+        float height01 = 0.0;
         float terrainMix = 0.0;
         if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
             TessTerrainVertex tv = tessTerrainDisplace(pos, params);
             pos = tv.pos;
             nrm = tv.nrm;
-            terrainColor = tv.color;
+            height01 = tv.height01;
             terrainMix = 1.0;
         } else {
             pos += nrm * tessDisplaceAmount(pos, params.displacementScale);
@@ -141,7 +141,7 @@ using TessMeshT = metal::mesh<TessMeshVertexOut, TessMeshPrimOut, 45, 64,
         v.worldPosition = world.xyz;
         v.worldNormal = normalize((params.model * float4(nrm, 0.0)).xyz);
         v.uv = uv;
-        v.terrainColor = terrainColor;
+        v.height01 = height01;
         v.terrainMix = terrainMix;
         v.depth = tessDepthOf(node);
         v.node = node;
@@ -161,13 +161,23 @@ using TessMeshT = metal::mesh<TessMeshVertexOut, TessMeshPrimOut, 45, 64,
     }
 }
 
-fragment float4 tessMeshFragmentMain(TessMeshVertexOut in [[stage_in]]) {
+fragment float4 tessMeshFragmentMain(
+    TessMeshVertexOut in [[stage_in]],
+    texture2d_array<float, access::sample> detailAlbedo [[texture(0)]],
+    texture2d_array<float, access::sample> detailNormal [[texture(1)]]
+) {
     // Same shading as the compute path (tessFragmentMain) so the two routes
-    // are visually interchangeable: LoD debug hash, or the interpolated
-    // terrain palette color for TESS_FLAG_TERRAIN instances.
-    float3 base = mix(tessHashColor(in.depth * 2654435761u), in.terrainColor, in.terrainMix);
+    // are visually interchangeable: LoD debug hash, or the world-space
+    // detail-layer splat for TESS_FLAG_TERRAIN instances.
+    float3 N = normalize(in.worldNormal);
+    float3 base;
+    if (in.terrainMix > 0.5) {
+        base = tessTerrainSplat(in.worldPosition, in.height01, N, detailAlbedo, detailNormal);
+    } else {
+        base = tessHashColor(in.depth * 2654435761u);
+    }
     float3 lightDir = normalize(float3(0.4, 1.0, 0.3));
-    float ndl = max(dot(normalize(in.worldNormal), lightDir), 0.0);
+    float ndl = max(dot(N, lightDir), 0.0);
     float3 color = base * (0.25 + 0.75 * ndl);
     return float4(color, 1.0);
 }

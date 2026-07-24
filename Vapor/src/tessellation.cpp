@@ -520,6 +520,23 @@ void Renderer::tessRenderPass() {
     rp.loadColor.push_back(true);
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;
+    // Terrain detail-layer arrays for the fragment splat — the same arrays the
+    // Main pass's terrain branch samples; default white array when no terrain
+    // is staged (non-terrain instances never sample them). The binding slot
+    // differs by backend: the GLSL frag declares set0 b4/b5, the MSL frags
+    // declare texture(0)/texture(1) (RHI_Metal maps `binding` straight to the
+    // Metal fragment texture index).
+    const TextureHandle detailA = terrainDetailAlbedoArray.isValid()
+        ? terrainDetailAlbedoArray : defaultDetailArrayTexture;
+    const TextureHandle detailN = terrainDetailNormalArray.isValid()
+        ? terrainDetailNormalArray : defaultDetailArrayTexture;
+    const Uint32 detailSlotA = (backend == GraphicsBackend::Vulkan) ? 4u : 0u;
+    const Uint32 detailSlotN = (backend == GraphicsBackend::Vulkan) ? 5u : 1u;
+    const auto bindDetail = [&] {
+        if (detailA.isValid()) rhi->setTexture(0, detailSlotA, detailA, defaultSampler);
+        if (detailN.isValid()) rhi->setTexture(0, detailSlotN, detailN, defaultSampler);
+    };
+
     rhi->beginRenderPass(rp);
     for (const TessInstance& t : m_tessInstances) {
         const TessParamsGpu p = tessFillParams(t);
@@ -531,6 +548,7 @@ void Renderer::tessRenderPass() {
             rhi->setVertexBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setVertexBuffer(2, t.rootBuffer);
             rhi->setVertexBytes(&p, sizeof(p), 3);
+            bindDetail();  // mesh path is Metal-only (texture 0/1)
             rhi->drawMeshTasksIndirect(t.argsBuffer, kTessArgsMeshTasksOffset);
         } else {
             // One grid instance per leaf; instanceCount is GPU-written.
@@ -540,6 +558,7 @@ void Renderer::tessRenderPass() {
             rhi->setVertexBuffer(2, t.leafDataBuffer);
             if (tessParamsViaBuffer) rhi->setVertexBuffer(3, t.paramsBuffer);
             else rhi->setVertexBytes(&p, sizeof(p), 3);
+            bindDetail();
             rhi->bindIndexBuffer(tessGridIndexBuffer);
             rhi->drawIndexedIndirect(t.argsBuffer, kTessArgsDrawOffset, 1,
                                      sizeof(Vapor::DrawCommand));

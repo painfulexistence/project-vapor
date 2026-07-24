@@ -24,7 +24,7 @@ struct TessVertexOut {
     float3 worldNormal;
     float3 worldPosition;
     float2 uv;
-    float3 terrainColor;       // TESS_FLAG_TERRAIN: palette color from height/slope
+    float height01;            // TESS_FLAG_TERRAIN: normalized height (splat weights)
     float terrainMix [[flat]]; // 1 = terrain shading, 0 = LoD debug hash
     uint depth [[flat]];
     uint node [[flat]];
@@ -48,7 +48,7 @@ vertex TessVertexOut tessVertexMain(
         out.worldNormal = float3(0, 1, 0);
         out.worldPosition = float3(0);
         out.uv = float2(0);
-        out.terrainColor = float3(0);
+        out.height01 = 0.0;
         out.terrainMix = 0.0;
         out.depth = 0u;
         out.node = 0u;
@@ -69,13 +69,13 @@ vertex TessVertexOut tessVertexMain(
     // Terrain instances lift the vertex onto the heightfield and derive the
     // normal + palette color from it; others keep the sin/cos placeholder.
     nrm = normalize(nrm);
-    out.terrainColor = float3(0);
+    out.height01 = 0.0;
     out.terrainMix = 0.0;
     if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
         TessTerrainVertex tv = tessTerrainDisplace(pos, params);
         pos = tv.pos;
         nrm = tv.nrm;
-        out.terrainColor = tv.color;
+        out.height01 = tv.height01;
         out.terrainMix = 1.0;
     } else {
         pos += nrm * tessDisplaceAmount(pos, params.displacementScale);
@@ -93,14 +93,25 @@ vertex TessVertexOut tessVertexMain(
     return out;
 }
 
-fragment float4 tessFragmentMain(TessVertexOut in [[stage_in]]) {
-    // Debug shading, matching the meshlet path's conventions: hash color per
-    // subdivision depth (the LoD visualization), simple lambert + ambient.
-    // Terrain instances swap the hash for the interpolated palette color
-    // (heightfield normal computed per vertex in tessTerrainDisplace).
-    float3 base = mix(tessHashColor(in.depth * 2654435761u), in.terrainColor, in.terrainMix);
+fragment float4 tessFragmentMain(
+    TessVertexOut in [[stage_in]],
+    // Terrain detail-layer arrays (grass/rock/dirt/snow); default white array
+    // when no terrain is staged. Non-terrain instances never sample them.
+    texture2d_array<float, access::sample> detailAlbedo [[texture(0)]],
+    texture2d_array<float, access::sample> detailNormal [[texture(1)]]
+) {
+    // Non-terrain: LoD debug hash per subdivision depth. Terrain: the real
+    // world-space detail-layer splat (weights + detail albedo/normal), the
+    // same look as RHIMain.frag's shadeTerrain.
+    float3 N = normalize(in.worldNormal);
+    float3 base;
+    if (in.terrainMix > 0.5) {
+        base = tessTerrainSplat(in.worldPosition, in.height01, N, detailAlbedo, detailNormal);
+    } else {
+        base = tessHashColor(in.depth * 2654435761u);
+    }
     float3 lightDir = normalize(float3(0.4, 1.0, 0.3));
-    float ndl = max(dot(normalize(in.worldNormal), lightDir), 0.0);
+    float ndl = max(dot(N, lightDir), 0.0);
     float3 color = base * (0.25 + 0.75 * ndl);
     return float4(color, 1.0);
 }

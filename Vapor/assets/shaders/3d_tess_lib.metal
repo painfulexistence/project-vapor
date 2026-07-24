@@ -252,31 +252,14 @@ inline float tessTerrainHeight(float3 p, constant TessParams& params) {
                        params.terrainSeed, params.displacementScale);
 }
 
-// buildPaletteLUT's bands (terrain_world.cpp), transcribed: sand/grass/dirt/
-// snow by normalized height, blended to rock by slope. This is the palette
-// fallback look — the full detail-layer splat stays in the Main pass; wiring
-// it into the tess fragment is the remaining integration step.
-inline float3 tessTerrainPalette(float h01, float slope01) {
-    const float3 sand = float3(0.76, 0.70, 0.50), grass = float3(0.22, 0.42, 0.16);
-    const float3 dirt = float3(0.42, 0.32, 0.20), snow = float3(0.92, 0.94, 0.97);
-    const float3 rock = float3(0.44, 0.43, 0.41);
-    float3 c;
-    if (h01 < 0.12) c = sand;
-    else if (h01 < 0.20) c = mix(sand, grass, (h01 - 0.12) / 0.08);
-    else if (h01 < 0.50) c = grass;
-    else if (h01 < 0.62) c = mix(grass, dirt, (h01 - 0.50) / 0.12);
-    else if (h01 < 0.70) c = mix(dirt, snow, (h01 - 0.62) / 0.08);
-    else c = snow;
-    return mix(c, rock, smoothstep(0.35, 0.75, slope01));
-}
-
 // Displaced terrain vertex: position lifted onto the heightfield, a
-// central-difference normal, and the palette color. d = 1 m matches the
-// LOD0 heightmap texel spacing the original demo derived normals from.
+// central-difference normal, and normalized height. d = 1 m matches the LOD0
+// heightmap texel spacing the original demo derived normals from. The
+// detail-layer texturing itself is per-fragment (tessTerrainSplat below).
 struct TessTerrainVertex {
     float3 pos;
     float3 nrm;
-    float3 color;
+    float height01;
 };
 inline TessTerrainVertex tessTerrainDisplace(float3 pos, constant TessParams& params) {
     const float d = 1.0;
@@ -288,10 +271,76 @@ inline TessTerrainVertex tessTerrainDisplace(float3 pos, constant TessParams& pa
     TessTerrainVertex v;
     v.pos = float3(pos.x, pos.y + h, pos.z);
     v.nrm = normalize(float3(hl - hr, 2.0 * d, hb - ht));
-    // Same slope01 the tile mesh bakes into its UVs (buildTileGeometry).
-    float slope01 = clamp(sqrt((hr - hl) * (hr - hl) + (ht - hb) * (ht - hb)) / (4.0 * d), 0.0, 1.0);
-    v.color = tessTerrainPalette(h / max(params.displacementScale, 1e-3), slope01);
+    v.height01 = clamp(h / max(params.displacementScale, 1e-3), 0.0, 1.0);
     return v;
+}
+
+// ── Terrain splat (MSL twin of RHIMain.frag's shadeTerrain) ─────────────────
+// Per-layer world-space frequency (repeats/metre): grass 4 m, rock ~21 m,
+// dirt 8 m, snow ~13 m. Weights recomputed per fragment from height/slope +
+// world-space value-noise FBm breakup (defaultSplat rules), 4 detail layers
+// tiled in world space, tangent-space detail normals perturbing the surface
+// normal — identical to the streamed-tile Main-pass look.
+constant float4 kTessLayerFreq = float4(0.25, 0.046875, 0.125, 0.078125);
+constant uint kTessSplatSeed = 7u;
+
+inline uint tessSplatHash2(int x, int y, uint seed) {
+    uint h = uint(x) * 374761393u + uint(y) * 668265263u + seed * 2654435761u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
+inline float tessSplatHash01(int x, int y, uint seed) {
+    return float(tessSplatHash2(x, y, seed) >> 8) * (1.0 / 16777216.0);
+}
+inline float tessSplatSmooth(float t) { return t * t * (3.0 - 2.0 * t); }
+static float tessSplatFBm(float2 p, float wavelength, int octaves, uint seed) {
+    float sum = 0.0, amp = 0.5, freq = 1.0 / wavelength;
+    for (int k = 0; k < octaves; ++k) {
+        float u = p.x * freq, v = p.y * freq;
+        int xi = int(floor(u)), yi = int(floor(v));
+        float fx = tessSplatSmooth(u - float(xi)), fy = tessSplatSmooth(v - float(yi));
+        uint s = seed + uint(k) * 131u;
+        float a = tessSplatHash01(xi, yi, s),     b = tessSplatHash01(xi + 1, yi, s);
+        float c = tessSplatHash01(xi, yi + 1, s), d = tessSplatHash01(xi + 1, yi + 1, s);
+        sum += amp * mix(mix(a, b, fx), mix(c, d, fx), fy);
+        amp *= 0.5; freq *= 2.0;
+    }
+    return sum;
+}
+inline float4 tessSplatWeights(float height01, float slope, float2 worldXZ) {
+    float b1 = tessSplatFBm(worldXZ, 180.0, 3, kTessSplatSeed);
+    float b2 = tessSplatFBm(worldXZ, 45.0, 3, kTessSplatSeed + 101u);
+    float rock = smoothstep(0.55, 1.05, slope + 0.25 * (b1 - 0.5));
+    float snowline = 0.62 + 0.08 * (b2 - 0.5);
+    float snow = smoothstep(snowline, snowline + 0.16, height01) * (1.0 - 0.85 * rock);
+    float dirt = 0.55 * smoothstep(0.5, 0.75, b2) * smoothstep(0.18, 0.45, slope + 0.2 * (b1 - 0.5));
+    dirt += 0.6 * smoothstep(0.10, 0.04, height01);
+    dirt = clamp(dirt, 0.0, 1.0) * (1.0 - rock) * (1.0 - snow);
+    float grass = max(1.0 - rock - snow - dirt, 0.0);
+    float4 w = float4(grass, rock, dirt, snow);
+    return w / max(w.x + w.y + w.z + w.w, 1e-4);
+}
+// Detail-layer albedo (linear) + a perturbed world normal from the surface
+// normal N and the fragment's world XZ / height. detailAlbedo/detailNormal are
+// the two 2D arrays the Main pass samples; sampler repeats + trilinear.
+inline float3 tessTerrainSplat(float3 worldXZY, float height01, thread float3& N,
+                               texture2d_array<float, access::sample> detailAlbedo,
+                               texture2d_array<float, access::sample> detailNormal) {
+    constexpr sampler ts(address::repeat, filter::linear, mip_filter::linear);
+    float slope = length(N.xz) / max(N.y, 1e-3);
+    float4 w = tessSplatWeights(height01, slope, worldXZY.xz);
+    float3 c = float3(0.0);
+    float3 dn = float3(0.0);
+    for (int i = 0; i < 4; ++i) {
+        float2 uv = worldXZY.xz * kTessLayerFreq[i];
+        c  += w[i] * pow(detailAlbedo.sample(ts, uv, i).rgb, float3(2.2));
+        dn += w[i] * (detailNormal.sample(ts, uv, i).xyz * 2.0 - 1.0);
+    }
+    dn = normalize(dn + float3(0.0, 0.0, 1e-4));
+    float3 T = normalize(float3(1.0, 0.0, 0.0) - N * N.x);
+    float3 B = cross(N, T);
+    N = normalize(T * dn.x + B * dn.y + N * dn.z);
+    return c;
 }
 
 inline float3 tessHashColor(uint x) {
