@@ -2381,7 +2381,12 @@ public:
     void execute() override {
         auto& r = *renderer;
 
-        // GPU-compatible post-process params struct (must match shader)
+        // GPU-compatible post-process params struct (must match 3d_post_process.metal).
+        // The shared shader gained per-effect enable flags + ported stylized
+        // effects (VHS/CRT/Sobel/Posterize); the trailing fields reproduce the
+        // native path's prior always-on behavior: existing effects enabled (1),
+        // stylized off (0). The RHI renderer drives these from its ImGui panel;
+        // the native path keeps them fixed.
         struct GPUPostProcessParams {
             float chromaticAberrationStrength;
             float chromaticAberrationFalloff;
@@ -2394,6 +2399,22 @@ public:
             float temperature;
             float tint;
             float exposure;
+            float enableChromaticAberration;
+            float enableVignette;
+            float enableColorGrading;
+            float enableToneMapping;
+            float enableVHS;
+            float enableCRT;
+            float enableSobel;
+            float enablePosterize;
+            float posterizeLevels;
+            float time;
+            float enableFilmGrain;
+            float filmGrainStrength;
+            float filmGrainAnimated;
+            float enableGlitch;
+            float glitchIntensity;
+            float enableEdges;
         } gpuParams = { r.postProcessParams.chromaticAberrationStrength,
                         r.postProcessParams.chromaticAberrationFalloff,
                         r.postProcessParams.vignetteStrength,
@@ -2404,7 +2425,13 @@ public:
                         r.postProcessParams.brightness,
                         r.postProcessParams.temperature,
                         r.postProcessParams.tint,
-                        r.postProcessParams.exposure };
+                        r.postProcessParams.exposure,
+                        1.0f, 1.0f, 1.0f, 1.0f,   // CA / vignette / grading / tonemap on
+                        0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
+                        5.0f, 0.0f,               // posterizeLevels, time
+                        0.0f, 0.05f, 0.0f,        // film grain: off, strength, static
+                        0.0f, 1.0f,               // glitch: off, intensity
+                        0.0f };                   // edges off
 
         // Create render pass descriptor
         auto postPassDesc = NS::TransferPtr(MTL::RenderPassDescriptor::renderPassDescriptor());
@@ -6951,6 +6978,9 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
         MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
+        // Trailing fields match 3d_post_process.metal's extended layout: enable
+        // flags all on (this helper relies on zeroed CA/vignette params + unit
+        // grading for a tonemap-only result), stylized effects off.
         struct GPUPostProcessParams {
             float chromaticAberrationStrength;
             float chromaticAberrationFalloff;
@@ -6963,6 +6993,22 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
             float temperature;
             float tint;
             float exposure;
+            float enableChromaticAberration;
+            float enableVignette;
+            float enableColorGrading;
+            float enableToneMapping;
+            float enableVHS;
+            float enableCRT;
+            float enableSobel;
+            float enablePosterize;
+            float posterizeLevels;
+            float time;
+            float enableFilmGrain;
+            float filmGrainStrength;
+            float filmGrainAnimated;
+            float enableGlitch;
+            float glitchIntensity;
+            float enableEdges;
         } params = {
             0.0f, // chromaticAberrationStrength
             0.0f, // chromaticAberrationFalloff
@@ -6974,7 +7020,13 @@ void Renderer_Metal::applyToneMapping(RenderTextureHandle target, float exposure
             1.0f, // brightness
             0.0f, // temperature
             0.0f, // tint
-            exposure // exposure
+            exposure, // exposure
+            1.0f, 1.0f, 1.0f, 1.0f,   // CA / vignette / grading / tonemap on
+            0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
+            5.0f, 0.0f,               // posterizeLevels, time
+            0.0f, 0.05f, 0.0f,        // film grain: off, strength, static
+            0.0f, 1.0f,               // glitch: off, intensity
+            0.0f                      // edges off
         };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);
@@ -7028,6 +7080,9 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
         MTL::Viewport viewport = { 0, 0, (double)rtData.width, (double)rtData.height, 0, 1 };
         encoder->setViewport(viewport);
 
+        // Trailing fields match 3d_post_process.metal's extended layout: enable
+        // flags all on (vignette does its work via the strength/radius params),
+        // stylized effects off.
         struct GPUPostProcessParams {
             float chromaticAberrationStrength;
             float chromaticAberrationFalloff;
@@ -7040,6 +7095,22 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
             float temperature;
             float tint;
             float exposure;
+            float enableChromaticAberration;
+            float enableVignette;
+            float enableColorGrading;
+            float enableToneMapping;
+            float enableVHS;
+            float enableCRT;
+            float enableSobel;
+            float enablePosterize;
+            float posterizeLevels;
+            float time;
+            float enableFilmGrain;
+            float filmGrainStrength;
+            float filmGrainAnimated;
+            float enableGlitch;
+            float glitchIntensity;
+            float enableEdges;
         } params = {
             0.0f, // chromaticAberrationStrength
             0.0f, // chromaticAberrationFalloff
@@ -7051,7 +7122,13 @@ void Renderer_Metal::applyVignette(RenderTextureHandle target, float strength, f
             1.0f, // brightness
             0.0f, // temperature
             0.0f, // tint
-            1.0f // exposure
+            1.0f, // exposure
+            1.0f, 1.0f, 1.0f, 1.0f,   // CA / vignette / grading / tonemap on
+            0.0f, 0.0f, 0.0f, 0.0f,   // VHS / CRT / Sobel / Posterize off
+            5.0f, 0.0f,               // posterizeLevels, time
+            0.0f, 0.05f, 0.0f,        // film grain: off, strength, static
+            0.0f, 1.0f,               // glitch: off, intensity
+            0.0f                      // edges off
         };
 
         encoder->setFragmentTexture(rtData.tempTexture.get(), 0);

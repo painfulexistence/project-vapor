@@ -11,6 +11,10 @@
 #
 # vapor_copy_game_assets(TARGET ASSETS_DIR)
 #   Copy a game's own assets to TARGET's output directory under Res/.
+#
+# vapor_flatten_metal_shaders(TARGET)
+#   Flatten local #include in the .metal published to TARGET's Res/, and
+#   compile-check the engine's Metal shaders at build time. APPLE-only.
 
 function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
     find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
@@ -198,6 +202,17 @@ function(vapor_flatten_metal_shaders TARGET)
     if(NOT VAPOR_VALIDATE_METAL)
         return()
     endif()
+
+    # Validation inputs are the ENGINE's shader sources (VAPOR_ASSETS_DIR) —
+    # identical for every caller, unlike the flatten above, which writes into
+    # each target's own Res/. So build the validation graph ONCE and have every
+    # caller depend on it: keying it per-target would recompile the same ~60
+    # shaders once per target, for the same answer, and re-run all of them for
+    # every target whenever a shared include changes.
+    if(TARGET validate_metal_shaders)
+        add_dependencies(${TARGET} validate_metal_shaders)
+        return()
+    endif()
     find_package(Git QUIET)
     set(_have_tracking FALSE)
     set(_tracked_names "")
@@ -217,7 +232,9 @@ function(vapor_flatten_metal_shaders TARGET)
             endforeach()
         endif()
     endif()
-    set(_scratch "${CMAKE_CURRENT_BINARY_DIR}/metal_validate")
+    # Engine-wide scratch (not CMAKE_CURRENT_BINARY_DIR, which inside a function
+    # is the CALLER's dir) so the single validation target has one stable home.
+    set(_scratch "${vapor_BINARY_DIR}/metal_validate")
     set(_common "${VAPOR_ASSETS_DIR}/shaders/3d_common.metal")
     # Shared include-only headers that many shaders pull in: list them in DEPENDS
     # so editing one re-validates every shader that inlines it (they carry no
@@ -259,8 +276,8 @@ function(vapor_flatten_metal_shaders TARGET)
         list(APPEND _air_outputs "${_scratch}/${_name}.air")
     endforeach()
     if(_air_outputs)
-        add_custom_target(validate_metal_${_hash} ALL DEPENDS ${_air_outputs})
-        add_dependencies(${TARGET} validate_metal_${_hash})
+        add_custom_target(validate_metal_shaders ALL DEPENDS ${_air_outputs})
+        add_dependencies(${TARGET} validate_metal_shaders)
     endif()
 endfunction()
 
