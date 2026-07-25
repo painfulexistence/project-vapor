@@ -4,8 +4,13 @@
 // emit the implementation → duplicate symbols at link).
 #include "rhi_metal.hpp"
 #include "stats_log.hpp"
+#include "Vapor/file_system.hpp"
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <fmt/core.h>
 #include <stdexcept>
 #include <algorithm>
@@ -568,13 +573,80 @@ void RHI_Metal::destroyTexture(TextureHandle handle) {
 // Resource Creation - Shader
 // ============================================================================
 
+// Expand quoted #include directives through the engine FileSystem before the
+// source reaches the Metal runtime compiler. The compiler resolves quoted
+// includes relative to the process working directory, so the shader body came
+// from the FileSystem search paths (ResHR > ResPatch > Res > ResDLC) while its
+// includes silently came from <cwd>/Res — two different resolution schemes.
+// That skew is invisible until it bites: a hot-reload/stale copy of an
+// included file (3d_common.metal holds inverse(), lighting structs, …) keeps
+// winning over the freshly staged one with no error anywhere. Resolving here
+// makes includes follow the exact same search-path priority as the shader
+// itself, and logs each resolution once so a stale file is diagnosable.
+static std::string expandShaderIncludes(const std::string& source, int depth = 0) {
+    if (depth > 8) return source;  // include cycle guard
+    std::string out;
+    out.reserve(source.size());
+    size_t pos = 0;
+    while (pos < source.size()) {
+        size_t lineEnd = source.find('\n', pos);
+        if (lineEnd == std::string::npos) lineEnd = source.size();
+        std::string_view line(source.data() + pos, lineEnd - pos);
+
+        size_t s = line.find_first_not_of(" \t");
+        bool handled = false;
+        // "#pragma once" makes no sense once the file is inlined into the main
+        // source (clang warns); the flat include graph needs no guard anyway.
+        if (depth > 0 && s != std::string_view::npos &&
+            line.substr(s).rfind("#pragma once", 0) == 0) {
+            handled = true;
+        } else if (s != std::string_view::npos && line.substr(s).rfind("#include", 0) == 0) {
+            size_t q1 = line.find('"', s);
+            size_t q2 = (q1 == std::string_view::npos) ? std::string_view::npos
+                                                       : line.find('"', q1 + 1);
+            if (q2 != std::string_view::npos) {  // quoted include only; <...> stays
+                std::string incPath(line.substr(q1 + 1, q2 - q1 - 1));
+                // Shader sources spell includes as "Res/shaders/x.metal", but
+                // FileSystem search paths already end in the Res root — strip it.
+                std::string rel = incPath.rfind("Res/", 0) == 0 ? incPath.substr(4) : incPath;
+                if (auto resolved = FileSystem::instance().resolvePath(rel)) {
+                    static std::unordered_map<std::string, std::string> logged;
+                    auto [it, first] = logged.try_emplace(incPath, *resolved);
+                    if (first) fmt::print("[shader] include {} -> {}\n", incPath, *resolved);
+                    std::ifstream f(*resolved, std::ios::binary);
+                    if (f) {
+                        std::string inc((std::istreambuf_iterator<char>(f)),
+                                        std::istreambuf_iterator<char>());
+                        out += expandShaderIncludes(inc, depth + 1);
+                        out += '\n';
+                        handled = true;
+                    }
+                }
+                if (!handled) {
+                    // Leave the line for the Metal compiler's cwd-relative
+                    // fallback, but make the skew visible.
+                    fmt::print("[shader] WARNING: include not found in search paths, "
+                               "falling back to compiler cwd resolution: {}\n", incPath);
+                }
+            }
+        }
+        if (!handled) {
+            out.append(line);
+            out += '\n';
+        }
+        pos = lineEnd + 1;
+    }
+    return out;
+}
+
 ShaderHandle RHI_Metal::createShader(const ShaderDesc& desc) {
     NS::SharedPtr<MTL::Library> library;
     NS::SharedPtr<MTL::Function> function;
 
     if (desc.code && desc.codeSize > 0) {
-        // Create library from source code
-        std::string source(static_cast<const char*>(desc.code), desc.codeSize);
+        // Create library from source code (includes resolved via FileSystem)
+        std::string source = expandShaderIncludes(
+            std::string(static_cast<const char*>(desc.code), desc.codeSize));
         NS::Error* error = nullptr;
         auto sourceString = NS::String::string(source.c_str(), NS::UTF8StringEncoding);
         library = NS::TransferPtr(device->newLibrary(sourceString, nullptr, &error));
