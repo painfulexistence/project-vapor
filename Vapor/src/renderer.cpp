@@ -7671,12 +7671,22 @@ void Renderer::createRenderPipeline() {
 }
 
 TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& image) {
-    if (!image || image->uri.empty()) {
+    // Uploadable iff the image carries decoded pixels. Embedded glTF images
+    // (from a .glb / data-URI) have byteArray but NO uri, so the old
+    // uri-empty guard rejected every embedded texture and handed back the
+    // default — the "glTF textures don't load" bug. External images are
+    // resolved into byteArray before this runs, so byteArray is the right test.
+    if (!image || image->byteArray.empty()) {
         return defaultWhiteTexture;
     }
 
+    // Cache by uri for shared external textures; embedded images (no uri) key
+    // on the Image pointer so each distinct one is uploaded once.
+    const std::string cacheKey =
+        image->uri.empty() ? ("ptr:" + std::to_string(reinterpret_cast<uintptr_t>(image.get()))) : image->uri;
+
     // Check cache
-    auto it = textureCache.find(image->uri);
+    auto it = textureCache.find(cacheKey);
     if (it != textureCache.end()) {
         return it->second;
     }
@@ -7713,7 +7723,7 @@ TextureId Renderer::getOrCreateTexture(const std::shared_ptr<Vapor::Image>& imag
 
     TextureId id = static_cast<TextureId>(textures.size());
     textures.push_back(tex);
-    textureCache[image->uri] = id;
+    textureCache[cacheKey] = id;
 
     return id;
 }
