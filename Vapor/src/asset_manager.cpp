@@ -195,6 +195,30 @@ auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprin
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     std::string err, warn;
+
+    // Force every decoded image to 4-channel RGBA8. tinygltf's default loader
+    // keeps the source's native channel count (3 for RGB JPEGs — most baseColor
+    // maps), but registerMaterial uploads image->byteArray straight into an
+    // RGBA8_UNORM texture, so a 3-channel buffer misaligns and the texture reads
+    // as garbage. Decoding to req_comp=4 keeps byteArray == width*height*4. No
+    // vertical flip: unlike Atmospheric's GL path, this RHI (and loadImage) use
+    // the top-left texel origin that matches glTF's UVs. (Mirrors Atmospheric's
+    // ImportGLTFPrefab image loader.)
+    loader.SetImageLoader(
+        [](tinygltf::Image* img, const int, std::string*, std::string*, int, int,
+           const unsigned char* bytes, int size, void*) -> bool {
+            int w = 0, h = 0, c = 0;
+            unsigned char* data = stbi_load_from_memory(bytes, size, &w, &h, &c, 4);
+            if (!data) return false;
+            img->width = w;
+            img->height = h;
+            img->component = 4;
+            img->image.assign(data, data + static_cast<size_t>(w) * h * 4);
+            stbi_image_free(data);
+            return true;
+        },
+        nullptr);
+
     bool result = filePath.extension() == ".glb" ? loader.LoadBinaryFromFile(&model, &err, &warn, filePath.string())
                                                  : loader.LoadASCIIFromFile(&model, &err, &warn, filePath.string());
     if (!warn.empty()) fmt::print("GLTF Warning: {}\n", warn);
