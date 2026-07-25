@@ -12,8 +12,9 @@
 // slot: picking destroys the current model's entity subtree and instantiates the
 // new one — no accumulation. A failed import just leaves the slot empty.
 //
-// Models: drop .gltf/.glb files (or model sub-folders) under Res/models.
+// Models (fetch the Khronos samples with scripts/downloadGLTFSamples.sh):
 //   - models/cube.gltf — tiny committed sample.
+//   - DamagedHelmet / DragonAttenuation / BoomBox — downloaded, not committed.
 //
 // Controls: WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit; click a
 // model in the picker. (--vulkan / --metal pick the backend.)
@@ -216,7 +217,7 @@ auto main(int argc, char* args[]) -> int {
         selectedIndex = idx;
     };
     if (models.empty())
-        fmt::print("No models found under Res/models — drop a .gltf/.glb there.\n");
+        fmt::print("No models found under Res/models — run scripts/downloadGLTFSamples.sh.\n");
 
     // ---- Environment -------------------------------------------------------
     {
