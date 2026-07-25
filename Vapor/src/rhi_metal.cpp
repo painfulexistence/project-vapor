@@ -11,6 +11,7 @@
 #include <string_view>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <fmt/core.h>
 #include <stdexcept>
 #include <algorithm>
@@ -583,7 +584,14 @@ void RHI_Metal::destroyTexture(TextureHandle handle) {
 // winning over the freshly staged one with no error anywhere. Resolving here
 // makes includes follow the exact same search-path priority as the shader
 // itself, and logs each resolution once so a stale file is diagnosable.
-static std::string expandShaderIncludes(const std::string& source, int depth = 0) {
+// `seen` holds the resolved paths already inlined into THIS translation unit,
+// giving the includes #pragma once semantics (which is stripped below, and which
+// the build-time flatten_metal_includes.py provides via its own `already` set).
+// Without it a diamond include — two headers both pulling in a third — would
+// inline the third twice and fail to compile on redefinition.
+static std::string expandShaderIncludes(const std::string& source,
+                                        std::unordered_set<std::string>& seen,
+                                        int depth) {
     if (depth > 8) return source;  // include cycle guard
     std::string out;
     out.reserve(source.size());
@@ -613,13 +621,18 @@ static std::string expandShaderIncludes(const std::string& source, int depth = 0
                     static std::unordered_map<std::string, std::string> logged;
                     auto [it, first] = logged.try_emplace(incPath, *resolved);
                     if (first) fmt::print("[shader] include {} -> {}\n", incPath, *resolved);
-                    std::ifstream f(*resolved, std::ios::binary);
-                    if (f) {
-                        std::string inc((std::istreambuf_iterator<char>(f)),
-                                        std::istreambuf_iterator<char>());
-                        out += expandShaderIncludes(inc, depth + 1);
-                        out += '\n';
+                    if (!seen.insert(*resolved).second) {
+                        out += "// [expanded] #include \"" + incPath + "\" (already inlined)\n";
                         handled = true;
+                    } else {
+                        std::ifstream f(*resolved, std::ios::binary);
+                        if (f) {
+                            std::string inc((std::istreambuf_iterator<char>(f)),
+                                            std::istreambuf_iterator<char>());
+                            out += expandShaderIncludes(inc, seen, depth + 1);
+                            out += '\n';
+                            handled = true;
+                        }
                     }
                 }
                 if (!handled) {
@@ -637,6 +650,11 @@ static std::string expandShaderIncludes(const std::string& source, int depth = 0
         pos = lineEnd + 1;
     }
     return out;
+}
+
+static std::string expandShaderIncludes(const std::string& source) {
+    std::unordered_set<std::string> seen;  // per-translation-unit include-once
+    return expandShaderIncludes(source, seen, 0);
 }
 
 ShaderHandle RHI_Metal::createShader(const ShaderDesc& desc) {
