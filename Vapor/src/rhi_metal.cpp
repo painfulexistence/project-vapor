@@ -2255,7 +2255,7 @@ void RHI_Metal::buildAccelerationStructure(AccelStructHandle handle) {
         const Uint32 slot = resource.nextSlot;
         resource.nextSlot = (resource.nextSlot + 1) % AccelStructResource::kTlasSlots;
 
-        size_t bytes = descriptors.size() * sizeof(MTL::AccelerationStructureInstanceDescriptor);
+        size_t bytes = descriptors.size() * sizeof(MTL::AccelerationStructureUserIDInstanceDescriptor);
         auto& instBuf = resource.instanceSlots[slot];
         if (!instBuf || instBuf->length() < bytes) {
             instBuf = NS::TransferPtr(device->newBuffer(bytes, MTL::ResourceStorageModeShared));
