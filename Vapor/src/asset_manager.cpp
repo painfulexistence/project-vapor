@@ -196,6 +196,30 @@ auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprin
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     std::string err, warn;
+
+    // Force every decoded image to 4-channel RGBA8. tinygltf's default loader
+    // keeps the source's native channel count (3 for RGB JPEGs — most baseColor
+    // maps), but registerMaterial uploads image->byteArray straight into an
+    // RGBA8_UNORM texture, so a 3-channel buffer misaligns and the texture reads
+    // as garbage. Decoding to req_comp=4 keeps byteArray == width*height*4. No
+    // vertical flip: unlike Atmospheric's GL path, this RHI (and loadImage) use
+    // the top-left texel origin that matches glTF's UVs. (Mirrors Atmospheric's
+    // ImportGLTFPrefab image loader.)
+    loader.SetImageLoader(
+        [](tinygltf::Image* img, const int, std::string*, std::string*, int, int,
+           const unsigned char* bytes, int size, void*) -> bool {
+            int w = 0, h = 0, c = 0;
+            unsigned char* data = stbi_load_from_memory(bytes, size, &w, &h, &c, 4);
+            if (!data) return false;
+            img->width = w;
+            img->height = h;
+            img->component = 4;
+            img->image.assign(data, data + static_cast<size_t>(w) * h * 4);
+            stbi_image_free(data);
+            return true;
+        },
+        nullptr);
+
     bool result = filePath.extension() == ".glb" ? loader.LoadBinaryFromFile(&model, &err, &warn, filePath.string())
                                                  : loader.LoadASCIIFromFile(&model, &err, &warn, filePath.string());
     if (!warn.empty()) fmt::print("GLTF Warning: {}\n", warn);
@@ -540,6 +564,19 @@ auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprin
 
             auto mesh = std::make_shared<Mesh>();
             mesh->vertices.resize(vCount);
+            // NORMAL/TANGENT/TEXCOORD_0 are all optional in glTF and VertexData
+            // has no member initializers, so an absent attribute reached the
+            // shaders as a zero vector — a degenerate basis. normalize(vec3(0))
+            // is NaN, which poisons the whole TBN and shades the surface black;
+            // RHIMain.frag guards for a degenerate tangent but the Metal PBR
+            // shader did not, which is why only Metal went black. Seed a valid
+            // basis (same defaults as Atmospheric's prefab_gltf), then
+            // overwrite with the real attributes below.
+            for (auto& v : mesh->vertices) {
+                v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+                v.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                v.uv = glm::vec2(0.0f);
+            }
             for (size_t i = 0; i < vCount; i++)
                 mesh->vertices[i].position = readVec3(posAcc, i);
             if (hasNormal) {
@@ -629,6 +666,31 @@ auto AssetManager::loadGLTF(const std::string& filename) -> Vapor::SceneBlueprin
             default:
                 mesh->primitiveMode = PrimitiveMode::TRIANGLES;
                 break;
+            }
+
+            // Mesh::initialize() runs MikkTSpace for meshes built through it,
+            // but loadGLTF fills vertices/indices directly and so bypassed it
+            // entirely. Models that ship NORMAL + UV without TANGENT (the
+            // Khronos samples, DamagedHelmet included) therefore reached the
+            // normal-mapping shaders with no tangent frame at all. Generate the
+            // missing attributes here instead.
+            if (mesh->primitiveMode == PrimitiveMode::TRIANGLES) {
+                if (!hasNormal) {
+                    mesh->calculateNormals();
+                    mesh->hasNormal = true;
+                }
+                // MikkTSpace derives the tangent frame from normals + UVs;
+                // without UVs there is nothing to derive it from, so the seeded
+                // basis stands (and normal mapping is meaningless anyway).
+                if (!hasTangent && hasUV0) {
+                    try {
+                        mesh->calculateTangents();
+                        mesh->hasTangent = true;
+                    } catch (const std::exception& e) {
+                        fmt::print("Tangent generation failed for mesh {}: {} — keeping default basis\n",
+                                   meshIdx, e.what());
+                    }
+                }
             }
 
             primitives.push_back(static_cast<int>(bp.meshes.size()));

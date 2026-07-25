@@ -1,0 +1,71 @@
+#version 450
+// MicroVoxel GI à-trous denoise (SVGF-lite), one iteration per dispatch with
+// increasing step size (1, 2, 4, ...), ping-ponging two half-res targets.
+// GLSL twin of the kernel in 3d_microvoxel_gi.metal.
+//
+// 5x5 B3-spline kernel, edge-stopped by face normal (voxel G-buffer), by the
+// camera distance carried in the GI alpha channel, and by luminance. Display
+// only: the temporal history keeps the RAW accumulation, so the filter never
+// feeds back into itself (no progressive over-blur).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Push constants: step size + output size for this iteration.
+layout(push_constant) uniform AtrousPush {
+    ivec4 stepAndSize;  // x = stepSize, y = giWidth, z = giHeight
+    vec4 sigmas;        // x = depth, y = normal, z = luma
+};
+
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D atrousOut;
+
+layout(set = 2, binding = 1) uniform sampler2D giIn;          // half-res, camDist in alpha
+layout(set = 2, binding = 2) uniform sampler2D normalMatTex;  // full-res voxel G-buffer
+
+vec3 decodeNormal(int idx) {
+    const vec3 normals[6] = vec3[](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0),
+                                   vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+    return normals[clamp(idx, 0, 5)];
+}
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+void main() {
+    ivec2 giSize = stepAndSize.yz;
+    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+    if (pix.x >= giSize.x || pix.y >= giSize.y) return;
+
+    vec2 texel = 1.0 / vec2(giSize);
+    vec2 uv = (vec2(pix) + 0.5) * texel;
+    vec4 center = textureLod(giIn, uv, 0.0);
+    // Miss pixels pass through untouched (and taps skip them below).
+    if (center.a <= 0.0) {
+        imageStore(atrousOut, pix, center);
+        return;
+    }
+    vec3 n0 = decodeNormal(int(textureLod(normalMatTex, uv, 0.0).r * 255.0 + 0.5));
+    float l0 = luma(center.rgb);
+    float stepSize = float(stepAndSize.x);
+
+    const float kernel[5] = float[](1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0);
+    vec3 sum = vec3(0.0);
+    float wSum = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            vec2 tuv = uv + vec2(dx, dy) * stepSize * texel;
+            if (any(lessThan(tuv, vec2(0.0))) || any(greaterThan(tuv, vec2(1.0)))) continue;
+            vec4 tap = textureLod(giIn, tuv, 0.0);
+            if (tap.a <= 0.0) continue;  // miss pixel
+
+            vec3 nt = decodeNormal(int(textureLod(normalMatTex, tuv, 0.0).r * 255.0 + 0.5));
+            float wN = pow(max(dot(n0, nt), 0.0), sigmas.y);
+            float wZ = exp(-abs(center.a - tap.a) / (sigmas.x * stepSize + 1e-3));
+            float wL = exp(-abs(l0 - luma(tap.rgb)) / (sigmas.z + 1e-3));
+            float w = kernel[dx + 2] * kernel[dy + 2] * wN * wZ * wL;
+            sum += tap.rgb * w;
+            wSum += w;
+        }
+    }
+    vec3 filtered = (wSum > 1e-5) ? sum / wSum : center.rgb;
+    // Preserve camDist in alpha for the next iteration's depth weight.
+    imageStore(atrousOut, pix, vec4(filtered, center.a));
+}
