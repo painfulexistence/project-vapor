@@ -1,23 +1,20 @@
 // ============================================================================
-// USDViewer — fly-camera viewer for USD scenes through the SceneBlueprint
-// import line (AssetManager::loadModel -> instantiate).
+// GLTFViewer — fly-camera viewer for glTF/GLB models through the SceneBlueprint
+// import line (AssetManager::loadModel -> instantiate). The sibling of
+// USDViewer; loadModel() dispatches by extension, so both share one path.
 //
-// The Vapor port of Atmospheric's Examples/USDViewer. USD is a first-class
-// import format here (TinyUSDZ behind VAPOR_USE_TINYUSDZ, ON by default):
-// a model file decodes into a SceneBlueprint (node hierarchy = entities,
+// A model file decodes into a SceneBlueprint (node hierarchy = entities,
 // meshes/materials/images = payload) and instantiate() turns it into entt
 // entities that draw as GPU instances.
 //
-// An ImGui model picker lists the .usd/.usda/.usdc/.usdz files under Res/models
-// (via FileSystem::list) and swaps to the one you click. The model lives in one
+// An ImGui model picker lists the .gltf/.glb files under Res/models (via
+// FileSystem::list) and swaps to the one you click. The model lives in one
 // slot: picking destroys the current model's entity subtree and instantiates the
 // new one — no accumulation. A failed import just leaves the slot empty.
 //
-// Models (fetch the big ones with scripts/downloadUSDSamples.sh):
-//   - models/cube.usda — tiny committed sample.
-//   - models/kitchen/Kitchen_set.usd — Pixar's Kitchen_set. Authored in
-//     centimetres but omits the metersPerUnit metadatum, so the importer applies
-//     no unit scale — its root entity is scaled to metres on load.
+// Models (fetch the Khronos samples with scripts/downloadGLTFSamples.sh):
+//   - models/cube.gltf — tiny committed sample.
+//   - DamagedHelmet / DragonAttenuation / BoomBox — downloaded, not committed.
 //
 // Controls: WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit; click a
 // model in the picker. (--vulkan / --metal pick the backend.)
@@ -49,7 +46,7 @@
 
 namespace {
 
-// ECS fly-camera driver — same demo-local system as Examples/MicroVoxel
+// ECS fly-camera driver — same demo-local system as Examples/USDViewer
 // (game systems live in the app layer; the engine provides the components).
 // perspectiveZO because the RHI's clip depth is [0,1] on both backends.
 struct FlyCameraSystem {
@@ -101,7 +98,7 @@ entt::entity importModel(entt::registry& registry, RenderScene& scene, const std
                          const std::string& name) {
     Vapor::SceneBlueprint bp = AssetManager::loadModel(path);
     if (!bp.ok) {
-        fmt::print(stderr, "USDViewer: failed to import '{}' (is VAPOR_USE_TINYUSDZ on?)\n", path);
+        fmt::print(stderr, "GLTFViewer: failed to import '{}'\n", path);
         return entt::null;
     }
     size_t verts = 0;
@@ -152,16 +149,16 @@ auto main(int argc, char* args[]) -> int {
     const char* winTitle;
 #if defined(__APPLE__)
     if (wantVulkan) {
-        winTitle = "USDViewer (Vulkan)";
+        winTitle = "GLTFViewer (Vulkan)";
         winFlags |= SDL_WINDOW_VULKAN;
         gfxBackend = GraphicsBackend::Vulkan;
     } else {
-        winTitle = "USDViewer (Metal)";
+        winTitle = "GLTFViewer (Metal)";
         winFlags |= SDL_WINDOW_METAL;
         gfxBackend = GraphicsBackend::Metal;
     }
 #else
-    winTitle = "USDViewer (Vulkan)";
+    winTitle = "GLTFViewer (Vulkan)";
     winFlags |= SDL_WINDOW_VULKAN;
     gfxBackend = GraphicsBackend::Vulkan;
 #endif
@@ -188,18 +185,16 @@ auto main(int argc, char* args[]) -> int {
         return 1;
     }
 
-    auto scene = std::make_shared<RenderScene>("usdviewer");
+    auto scene = std::make_shared<RenderScene>("gltfviewer");
     renderer->stage(scene);
 
     entt::registry registry;
 
-    // ---- USD content -------------------------------------------------------
+    // ---- Model content -----------------------------------------------------
     // The model lives in one swappable slot driven by the ImGui picker below.
     // maxDepth=1 lists top-level models plus a sub-folder's entry file
-    // (kitchen/Kitchen_set.usd) without flooding the list with Kitchen_set's
-    // hundreds of referenced prop .usd files.
-    const std::vector<std::string> models =
-        FileSystem::instance().list("models", "usd;usda;usdc;usdz", 1);
+    // (e.g. Sponza/Sponza.gltf) without descending into a model folder's parts.
+    const std::vector<std::string> models = FileSystem::instance().list("models", "gltf;glb", 1);
     entt::entity modelRoot = entt::null;
     int currentIndex = -1;   // model currently on screen
     int selectedIndex = -1;  // set by the picker; applied before the next frame
@@ -214,14 +209,6 @@ auto main(int argc, char* args[]) -> int {
             modelRoot = entt::null;
         }
         modelRoot = importModel(registry, *scene, models[idx], models[idx]);
-        if (modelRoot != entt::null && models[idx].find("Kitchen_set") != std::string::npos) {
-            // Kitchen_set is centimetres with no metersPerUnit metadatum, so the
-            // importer applies no unit scale; bring it to metres.
-            if (auto* t = registry.try_get<Vapor::TransformComponent>(modelRoot)) {
-                t->scale = glm::vec3(0.01f);
-                t->isDirty = true;
-            }
-        }
         // importModel appended the new geometry to the staging lists; upload it.
         renderer->stage(scene);
         scene->stagedMeshes.clear();
@@ -230,7 +217,7 @@ auto main(int argc, char* args[]) -> int {
         selectedIndex = idx;
     };
     if (models.empty())
-        fmt::print("No models found under Res/models — run scripts/downloadUSDSamples.sh.\n");
+        fmt::print("No models found under Res/models — run scripts/downloadGLTFSamples.sh.\n");
 
     // ---- Environment -------------------------------------------------------
     {
@@ -288,7 +275,7 @@ auto main(int argc, char* args[]) -> int {
         ImGui::End();
     });
 
-    fmt::print("USDViewer loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
+    fmt::print("GLTFViewer loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
 
     auto& inputManager = engineCore->getInputManager();
     bool quit = false;
