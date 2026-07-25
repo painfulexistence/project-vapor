@@ -207,7 +207,7 @@ auto main(int argc, char* args[]) -> int {
 
     bool groundClamp = true;
     fmt::print("WASD move, R/F up/down, arrows look, X sprint (x50), Z slow, "
-               "I wireframe, G ground-clamp, T teleport +2km, Esc quit.\n");
+               "I wireframe, V tessellation, G ground-clamp, T teleport +2km, Esc quit.\n");
 
     auto& inputManager = engineCore->getInputManager();
     // Demo control scheme (overrides the engine defaults for THIS app's input
@@ -258,6 +258,16 @@ auto main(int argc, char* args[]) -> int {
                         wireframe = !wireframe;
                         renderer->setWireframe(wireframe);
                         fmt::print("Wireframe: {}\n", wireframe ? "on" : "off");
+                    }
+                    if (e.key.scancode == SDL_SCANCODE_V) {
+                        // Toggle CBT displaced tessellation vs the streamed
+                        // tile-mesh path (regenerate rebuilds the terrain). Off
+                        // by default so the demo boots on the proven tile path;
+                        // flip it on to inspect tessellation (pair with I).
+                        auto& tc = registry.get<Vapor::StreamingTerrainComponent>(terrainEntity);
+                        tc.cbtTessellation = !tc.cbtTessellation;
+                        tc.regenerate = true;
+                        fmt::print("CBT tessellation: {}\n", tc.cbtTessellation ? "on" : "off");
                     }
                     if (e.key.scancode == SDL_SCANCODE_T) {
                         // Teleport 2 km along the view direction, kept inside

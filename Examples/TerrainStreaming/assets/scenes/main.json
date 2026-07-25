@@ -11,8 +11,8 @@
           "noiseFrequency": 0.0007,
           "noiseOctaves": 9,
           "seed": 20260705,
-          "cacheDir": "cache/terrain",
-          "cbtTessellation": true
+          "cacheDir": ".cache/terrain",
+          "cbtTessellation": false
         }
       }
     },
