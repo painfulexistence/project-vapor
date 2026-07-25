@@ -1,16 +1,17 @@
 // ============================================================================
 // MicroVoxel — raymarched micro-voxel diorama demo.
 //
-// The Vapor port of Atmospheric's Examples/MicroVoxel: three independent
-// 5 cm-voxel volumes (procedural terrain + caves + ore + floating crystals +
-// emissive glowstone), raymarched with a two-level DDA over sparse
-// page-table/brick-pool storage — no triangles. The volumes depth-composite
-// with each other through the MicroVoxel pass's depth writes, an angled warm
-// sun gives raking shadows, and holding E digs spheres out of the terrain
-// (per-brick uploads, no remeshing — the point of the raymarch model).
-//
-// The middle diorama runs 2.5 cm voxels (8x the density of the original) to
-// show off per-volume detail scaling. Pass --big for a single
+// The Vapor port of Atmospheric's Examples/MicroVoxel: one big 256^3 @ 5 cm
+// terrain (procedural crust + caves + ore + floating crystals + emissive
+// glowstone) surrounded by ~15 small prop volumes — crates, boulders, and
+// crystal clusters, 16-48 voxels per edge, most of them rotated — all
+// raymarched with a two-level DDA over sparse page-table/brick-pool storage,
+// no triangles. Every volume depth-composites with the others through the
+// MicroVoxel pass's depth writes, an angled warm sun gives raking shadows, and
+// holding E digs spheres out of whichever volume is under the crosshair
+// (per-brick uploads, no remeshing — the point of the raymarch model). The
+// rotated props exercise the OBB raymarch; the small ones, per-object grid
+// right-sizing and tight bounds. Pass --big for a single
 // 1024 x 256 x 1024 world (51 m across at 5 cm) instead of the dioramas —
 // generation streams in chunk-by-chunk on the task scheduler while you fly.
 //
@@ -358,12 +359,13 @@ auto main(int argc, char* args[]) -> int {
         return 1;
     }
 
-    // Declarative scene: the dioramas (voxelVolume components), sun, sky and
-    // fly camera are all authored in the scene JSON — main.json is the three
-    // side-by-side dioramas (the 512^3 @ 2.5 cm centre between two 5 cm ones),
-    // big.json the single 51.2 x 12.8 x 51.2 m streaming world. The registry
-    // is populated by instantiate(); VoxelVolumeSystem generates the worlds on
-    // first sight, exactly as with code-spawned components.
+    // Declarative scene: the volumes (voxelVolume components), sun, sky and fly
+    // camera are all authored in the scene JSON — main.json is one 256^3 @ 5 cm
+    // terrain surrounded by 15 small prop volumes (crates / boulders / crystal
+    // clusters, 16-48 voxels/edge, most rotated), and big.json the single
+    // 51.2 x 12.8 x 51.2 m streaming world. The registry is populated by
+    // instantiate(); VoxelVolumeSystem generates the worlds on first sight,
+    // exactly as with code-spawned components.
     auto scene = std::make_shared<RenderScene>("microvoxel");
     entt::registry registry;
     {

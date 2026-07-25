@@ -831,7 +831,12 @@ private:
     BufferHandle voxelPageTableBuffer;  // concatenated per-volume page tables
     BufferHandle voxelBrickPoolBuffer;  // concatenated per-volume slot ranges
     BufferHandle voxelPaletteBuffer;    // MAX_VOXEL_VOLUMES x 256 materials
-    static constexpr Uint32 MAX_VOXEL_VOLUMES = 8;
+    // One big terrain plus many small prop volumes (the demo's layout, and the
+    // headroom the physics/fracture work needs). All derived sizes — the data,
+    // palette, and per-frame slice buffers, and the GI's dynamic volume array —
+    // scale from this, and the page/brick pools are sized to the cumulative
+    // per-volume need, so this is the only knob.
+    static constexpr Uint32 MAX_VOXEL_VOLUMES = 16;
     std::vector<VoxelVolumeGpu> voxelVolumes;          // renderer-owned GPU mirrors
     std::vector<Vapor::VoxelVolumeDraw> pendingVoxelVolumes;  // last ECS push
     PipelineHandle microVoxelPipeline;

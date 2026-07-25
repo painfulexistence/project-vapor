@@ -85,11 +85,112 @@ static float MvGradFbm01(glm::vec3 p, int octaves, Uint32 seed) {
 }
 
 // ============================================================================
+// Small-object generators (crate / boulder / crystal cluster). Each fills a
+// dense scratch grid for the WHOLE volume in one pass; objects are <= 64 voxels
+// per edge, so they always land in a single generation chunk. Materials reuse
+// the shared default palette. Ported from the Atmospheric object volumes.
+// ============================================================================
 
-void VoxelWorld::configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn) {
+static inline Uint8& mvScratchAt(std::vector<Uint8>& s, const glm::ivec3& dim, int x, int y, int z) {
+    return s[(static_cast<size_t>(z) * dim.x * dim.y) + (static_cast<size_t>(y) * dim.x) + x];
+}
+
+// A hollow wooden crate: thick walls (nice to dig open), alternating plank
+// stripes, darker frame beams along the edges. Fills the grid minus a 1-voxel
+// margin so the object spans its box.
+static void mvFillCrate(std::vector<Uint8>& s, const glm::ivec3& dim, Uint32 /*seed*/) {
+    const int N = std::min(std::min(dim.x, dim.y), dim.z);
+    const int lox = 1, loy = 1, loz = 1;
+    const int hix = dim.x - 2, hiy = dim.y - 2, hiz = dim.z - 2;
+    const int wall = std::max(2, N / 12);
+    for (int z = loz; z <= hiz; z++) {
+        for (int y = loy; y <= hiy; y++) {
+            for (int x = lox; x <= hix; x++) {
+                const bool sx = (x - lox < wall) || (hix - x < wall);
+                const bool sy = (y - loy < wall) || (hiy - y < wall);
+                const bool sz = (z - loz < wall) || (hiz - z < wall);
+                if (!(sx || sy || sz)) continue;  // hollow interior
+                const int shells = (sx ? 1 : 0) + (sy ? 1 : 0) + (sz ? 1 : 0);
+                Uint8 mat = (shells >= 2) ? VoxelWorld::MatDirt                          // edge/corner beams
+                          : (((y / 3) % 2 == 0) ? VoxelWorld::MatSand : VoxelWorld::MatDirt);  // plank stripes
+                mvScratchAt(s, dim, x, y, z) = mat;
+            }
+        }
+    }
+}
+
+// An fbm-perturbed ellipsoid of stone with occasional ore speckles.
+static void mvFillBoulder(std::vector<Uint8>& s, const glm::ivec3& dim, Uint32 seed) {
+    const glm::vec3 c(0.5f * dim.x, 0.42f * dim.y, 0.5f * dim.z);
+    const glm::vec3 r(0.44f * dim.x, 0.42f * dim.y, 0.44f * dim.z);
+    const float inv = 6.0f / static_cast<float>(std::max(1, std::min(std::min(dim.x, dim.y), dim.z)));
+    for (int z = 0; z < dim.z; z++) {
+        for (int y = 0; y < dim.y; y++) {
+            for (int x = 0; x < dim.x; x++) {
+                const glm::vec3 p = (glm::vec3(x, y, z) + 0.5f - c) / r;
+                float d = glm::length(p) + 0.28f * (MvFbm3(glm::vec3(x, y, z) * inv, 3, seed + 5u) - 0.5f);
+                if (d > 1.0f) continue;
+                Uint8 mat = VoxelWorld::MatStone;
+                if (MvHashNoise(x, y, z, seed + 13u) > 0.99f) mat = VoxelWorld::MatOre;
+                mvScratchAt(s, dim, x, y, z) = mat;
+            }
+        }
+    }
+}
+
+// A stone mound sprouting a few emissive crystal spikes.
+static void mvFillCrystalCluster(std::vector<Uint8>& s, const glm::ivec3& dim, Uint32 seed) {
+    const int N = std::min(std::min(dim.x, dim.y), dim.z);
+    auto put = [&](int x, int y, int z, Uint8 mat) {
+        if (x < 0 || y < 0 || z < 0 || x >= dim.x || y >= dim.y || z >= dim.z) return;
+        mvScratchAt(s, dim, x, y, z) = mat;
+    };
+    // Stone base: squashed hemisphere on the grid floor.
+    const glm::vec3 bc(0.5f * dim.x, 0.0f, 0.5f * dim.z);
+    const glm::vec3 br(0.42f * dim.x, 0.30f * dim.y, 0.42f * dim.z);
+    const float inv = 5.0f / static_cast<float>(std::max(1, N));
+    for (int z = 0; z < dim.z; z++) {
+        for (int y = 0; y < dim.y; y++) {
+            for (int x = 0; x < dim.x; x++) {
+                const glm::vec3 p = (glm::vec3(x, y, z) + 0.5f - bc) / br;
+                float d = glm::length(p) + 0.2f * (MvFbm3(glm::vec3(x, y, z) * inv, 2, seed + 3u) - 0.5f);
+                if (d <= 1.0f) put(x, y, z, VoxelWorld::MatStone);
+            }
+        }
+    }
+    // Crystal spikes: tapered cones leaning outward from the mound.
+    const int spikes = 3 + static_cast<int>(MvHashNoise(0, 9, 0, seed) * 2.99f);
+    for (int sp = 0; sp < spikes; sp++) {
+        const float ang = 2.0f * 3.1415927f * MvHashNoise(sp, 1, 0, seed + 41u);
+        const float lean = 0.35f * MvHashNoise(sp, 2, 0, seed + 41u);
+        const glm::vec3 dir = glm::normalize(glm::vec3(std::cos(ang) * lean, 1.0f, std::sin(ang) * lean));
+        const glm::vec3 base((0.35f + 0.3f * MvHashNoise(sp, 3, 0, seed + 41u)) * dim.x, 0.10f * dim.y,
+                             (0.35f + 0.3f * MvHashNoise(sp, 4, 0, seed + 41u)) * dim.z);
+        const float len = (0.45f + 0.35f * MvHashNoise(sp, 5, 0, seed + 41u)) * N;
+        const float r0 = (0.08f + 0.06f * MvHashNoise(sp, 6, 0, seed + 41u)) * N;
+        const int steps = static_cast<int>(len);
+        for (int i = 0; i <= steps; i++) {
+            const float t = static_cast<float>(i) / static_cast<float>(std::max(steps, 1));
+            const glm::vec3 pc = base + dir * (t * len);
+            const float rad = r0 * (1.0f - t);
+            const int ri = static_cast<int>(rad) + 1;
+            for (int dz = -ri; dz <= ri; dz++)
+                for (int dy = -ri; dy <= ri; dy++)
+                    for (int dx = -ri; dx <= ri; dx++)
+                        if (glm::length(glm::vec3(dx, dy, dz)) <= rad)
+                            put(static_cast<int>(pc.x) + dx, static_cast<int>(pc.y) + dy,
+                                static_cast<int>(pc.z) + dz, VoxelWorld::MatCrystal);
+        }
+    }
+}
+
+// ============================================================================
+
+void VoxelWorld::configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn, VoxelKind kindIn) {
     gridDim = glm::max((gridDimIn / BRICK_DIM) * BRICK_DIM, glm::ivec3(BRICK_DIM));
     voxelSize = voxelSizeIn;
     brickCapacity = std::max(brickCapacityIn, 1u);
+    kind = kindIn;
 }
 
 void VoxelWorld::setDefaultPalette() {
@@ -175,9 +276,11 @@ void VoxelWorld::prepareGeneration(Uint32 seedIn) {
     pageTableDirty = true;
     paletteDirty = true;
 
-    // Feature placements, scaled so the density per footprint area matches the
-    // original 256^2 diorama (which placed 4 crystals and 6 glowstone orbs).
+    // Feature placements (terrain only — object kinds carry their own shape),
+    // scaled so the density per footprint area matches the original 256^2
+    // diorama (which placed 4 crystals and 6 glowstone orbs).
     features.clear();
+    if (kind != VoxelKind::Terrain) return;
     const float footprintScale = static_cast<float>(gridDim.x) * static_cast<float>(gridDim.z) / (256.0f * 256.0f);
     const int crystalCount = std::max(4, static_cast<int>(4.0f * footprintScale));
     const int glowCount = std::max(6, static_cast<int>(6.0f * footprintScale));
@@ -214,6 +317,22 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     const int zw = std::min(GEN_CHUNK_DIM, gridDim.z - z0);
     const int ny = gridDim.y;
 
+    // Dense scratch for this column block; index = x + y*xw + z*xw*ny.
+    std::vector<Uint8> scratch(static_cast<size_t>(xw) * ny * zw, 0);
+    auto at = [&](int x, int y, int z) -> Uint8& {
+        return scratch[static_cast<size_t>(z) * xw * ny + static_cast<size_t>(y) * xw + x];
+    };
+
+    if (kind != VoxelKind::Terrain) {
+        // Small prop: the whole object (<= 64 voxels/edge) lands in this single
+        // chunk (columnChunkCount() is 1x1), so fill the full grid here.
+        switch (kind) {
+        case VoxelKind::Crate: mvFillCrate(scratch, gridDim, seed); break;
+        case VoxelKind::Boulder: mvFillBoulder(scratch, gridDim, seed); break;
+        case VoxelKind::CrystalCluster: mvFillCrystalCluster(scratch, gridDim, seed); break;
+        default: break;
+        }
+    } else {
     const float snowLine = (0.10f + 0.75f * 0.34f) * static_cast<float>(ny);
     const float sandLine = (0.10f + 0.12f * 0.34f) * static_cast<float>(ny);
     // Water fills valleys up to just under the sand line, so beaches ring it.
@@ -222,12 +341,6 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     std::vector<float> heights(static_cast<size_t>(xw) * zw);
     for (int z = 0; z < zw; z++)
         for (int x = 0; x < xw; x++) heights[static_cast<size_t>(z) * xw + x] = terrainHeight(x0 + x, z0 + z);
-
-    // Dense scratch for this column block only; index = x + y*xw + z*xw*ny.
-    std::vector<Uint8> scratch(static_cast<size_t>(xw) * ny * zw, 0);
-    auto at = [&](int x, int y, int z) -> Uint8& {
-        return scratch[static_cast<size_t>(z) * xw * ny + static_cast<size_t>(y) * xw + x];
-    };
 
     // Column fill: terrain crust/biomes, caves, ore — global coordinates feed
     // the noise so chunk boundaries are seamless.
@@ -286,6 +399,7 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
             }
         }
     }
+    }  // end terrain-vs-object fill
 
     // Pack the scratch into pool bricks. Fully-empty bricks stay PAGE_EMPTY,
     // single-material bricks collapse to a uniform page entry (no pool cost).

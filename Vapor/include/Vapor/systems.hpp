@@ -530,7 +530,7 @@ namespace Vapor {
             vv.regenerate = false;
             vv._generatedSeed.value = vv.seed;
             auto world = std::make_shared<VoxelWorld>();
-            world->configure(vv.gridDim, vv.voxelSize, vv.brickCapacity);
+            world->configure(vv.gridDim, vv.voxelSize, vv.brickCapacity, vv.kind);
             world->prepareGeneration(vv.seed);
             vv.world.value = world;
             // One job per column chunk; chunks are disjoint, so any number may

@@ -257,6 +257,10 @@ namespace Vapor {
         float voxelSize = 0.05f;                         // meters per voxel (5 cm)
         Uint32 seed = 1337u;
         Uint32 brickCapacity = 262144u;                  // pool budget (x 576 bytes)
+        // Generator: 0 = terrain (streaming heightfield), 1 = crate, 2 = boulder,
+        // 3 = crystal cluster. Object kinds are small props (<= 64 voxels/edge)
+        // for the big-terrain-plus-many-props layout. Authored as an int in JSON.
+        VoxelKind kind = VoxelKind::Terrain;
         bool regenerate = false;   // set true (e.g. from the inspector) to rebuild
         Hidden<std::shared_ptr<VoxelWorld>> world = {};  // owned; created by the system
         Hidden<Uint32> _generatedSeed = {0u};            // seed the world was built with

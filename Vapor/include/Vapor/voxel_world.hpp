@@ -9,6 +9,18 @@
 
 namespace Vapor {
 
+// What a VoxelWorld generates. Terrain is the streaming heightfield diorama;
+// the object kinds are small self-contained props (crate / boulder / crystal
+// cluster) meant for grids of ~16-48 voxels per edge, so a scene can mix one
+// big terrain with many cheap per-object volumes (the layout the physics work
+// builds on). All kinds share the one default palette.
+enum class VoxelKind : Uint8 {
+    Terrain = 0,
+    Crate = 1,
+    Boulder = 2,
+    CrystalCluster = 3,
+};
+
 // ============================================================================
 // VoxelWorld — CPU source of truth for a raymarched micro-voxel volume.
 //
@@ -93,7 +105,9 @@ public:
 
     // gridDim components are rounded down to multiples of BRICK_DIM.
     // brickCapacity bounds pool memory (brickCapacity * 576 bytes CPU + GPU).
-    void configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn);
+    // kind selects the generator (terrain heightfield vs a small prop shape).
+    void configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn,
+                   VoxelKind kindIn = VoxelKind::Terrain);
 
     // ---- Generation ------------------------------------------------------
     // prepareGeneration resets all storage, builds the default palette and the
@@ -191,6 +205,7 @@ private:
     float voxelSize = 0.05f;
     Uint32 brickCapacity = 262144;
     Uint32 seed = 1337u;
+    VoxelKind kind = VoxelKind::Terrain;
 
     std::vector<Uint32> pageTable;
     std::vector<Brick> bricks;
