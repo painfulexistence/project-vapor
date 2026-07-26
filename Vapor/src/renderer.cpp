@@ -9619,7 +9619,12 @@ void Renderer::drawGraphicsImGui() {
                 dirty |= ImGui::DragFloat("Patch Size (m)", &waterSimParams.patchSize, 0.1f, 2.0f, 200.0f);
                 dirty |= ImGui::DragFloat("Wind Speed (m/s)", &waterSimParams.windSpeedMps, 0.05f, 0.05f, 30.0f);
                 dirty |= ImGui::SliderAngle("Wind Direction", &waterSimParams.windDirRad);
-                dirty |= ImGui::DragFloat("Amplitude", &waterSimParams.amplitude, 0.01f, 0.0f, 20.0f);
+                // Phillips A: useful range is ~1e-4..1e-2 and RMS height goes
+                // as its square root, so drag logarithmically — a linear 0.01
+                // step would jump straight past every usable value.
+                dirty |= ImGui::DragFloat("Amplitude (Phillips A)", &waterSimParams.amplitude,
+                                          0.00002f, 1e-6f, 0.05f, "%.5f",
+                                          ImGuiSliderFlags_Logarithmic);
                 dirty |= ImGui::DragFloat("Depth (m)", &waterSimParams.depthMeters, 0.05f, 0.05f, 100.0f);
                 dirty |= ImGui::DragFloat("Small-Wave Cutoff (m)", &waterSimParams.smallWaveCutoff, 0.001f, 0.0f, 1.0f, "%.3f");
                 dirty |= ImGui::DragFloat("Directional Spread", &waterSimParams.directionalSpread, 0.1f, 0.0f, 64.0f);

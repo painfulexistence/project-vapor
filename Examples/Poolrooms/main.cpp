@@ -130,19 +130,19 @@ std::array<std::shared_ptr<Vapor::Material>, size_t(MaterialSlot::Count)> makeMa
 
     // Glazed white ceramic — deck slightly warm, walls cooler, pool tinted.
     make(MaterialSlot::DeckTile, white, 1.0f, 0.0f,
-         toEngineImage(tileAlbedo({ 0.93f, 0.91f, 0.87f }, glm::vec3(0.86f), 11u), "pr_deck_a"),
+         toEngineImage(tileAlbedo({ 0.78f, 0.76f, 0.73f }, glm::vec3(0.86f), 11u), "pr_deck_a"),
          toEngineImage(tileNormal(0.35f, 0.10f, 12u), "pr_deck_n"),
          toEngineImage(tileRoughness(0.10f, 0.32f, 13u), "pr_deck_r"));
     make(MaterialSlot::WallTile, white, 1.0f, 0.0f,
-         toEngineImage(tileAlbedo({ 0.92f, 0.93f, 0.92f }, glm::vec3(0.88f), 21u), "pr_wall_a"),
+         toEngineImage(tileAlbedo({ 0.77f, 0.78f, 0.77f }, glm::vec3(0.88f), 21u), "pr_wall_a"),
          toEngineImage(tileNormal(0.30f, 0.08f, 22u), "pr_wall_n"),
          toEngineImage(tileRoughness(0.08f, 0.28f, 23u), "pr_wall_r"));
     make(MaterialSlot::PoolWallTile, white, 1.0f, 0.0f,
-         toEngineImage(tileAlbedo({ 0.86f, 0.93f, 0.95f }, glm::vec3(0.85f), 31u), "pr_pwall_a"),
+         toEngineImage(tileAlbedo({ 0.72f, 0.78f, 0.80f }, glm::vec3(0.85f), 31u), "pr_pwall_a"),
          toEngineImage(tileNormal(0.30f, 0.08f, 32u), "pr_pwall_n"),
          toEngineImage(tileRoughness(0.07f, 0.26f, 33u), "pr_pwall_r"));
     make(MaterialSlot::PoolFloorTile, white, 1.0f, 0.0f,
-         toEngineImage(tileAlbedo({ 0.84f, 0.92f, 0.94f }, glm::vec3(0.84f), 41u), "pr_pfloor_a"),
+         toEngineImage(tileAlbedo({ 0.70f, 0.77f, 0.79f }, glm::vec3(0.84f), 41u), "pr_pfloor_a"),
          toEngineImage(tileNormal(0.30f, 0.08f, 42u), "pr_pfloor_n"),
          toEngineImage(tileRoughness(0.07f, 0.26f, 43u), "pr_pfloor_r"));
     // Waterline mosaic: deep pool blue.
@@ -157,12 +157,12 @@ std::array<std::shared_ptr<Vapor::Material>, size_t(MaterialSlot::Count)> makeMa
          toEngineImage(noisyAlbedo(glm::vec3(0.85f), 0.10f, 8, 63u), "pr_grout_r"));
     // Coping: warm cast stone, a touch rougher than the tiles.
     make(MaterialSlot::Coping, white, 1.0f, 0.0f,
-         toEngineImage(noisyAlbedo({ 0.88f, 0.85f, 0.79f }, 0.08f, 6, 71u), "pr_coping_a"),
+         toEngineImage(noisyAlbedo({ 0.80f, 0.77f, 0.72f }, 0.08f, 6, 71u), "pr_coping_a"),
          toEngineImage(noisyNormal(0.5f, 10, 72u), "pr_coping_n"),
          toEngineImage(noisyAlbedo(glm::vec3(0.45f), 0.15f, 6, 73u), "pr_coping_r"));
     // Ceiling plaster.
     make(MaterialSlot::CeilingPlaster, white, 1.0f, 0.0f,
-         toEngineImage(noisyAlbedo({ 0.90f, 0.90f, 0.88f }, 0.05f, 5, 81u), "pr_plaster_a"),
+         toEngineImage(noisyAlbedo({ 0.78f, 0.78f, 0.76f }, 0.05f, 5, 81u), "pr_plaster_a"),
          toEngineImage(noisyNormal(0.25f, 8, 82u), "pr_plaster_n"),
          toEngineImage(noisyAlbedo(glm::vec3(0.85f), 0.08f, 5, 83u), "pr_plaster_r"));
     // Corridor: dark, matte, swallow the light.
@@ -183,7 +183,7 @@ std::array<std::shared_ptr<Vapor::Material>, size_t(MaterialSlot::Count)> makeMa
          toEngineImage(noisyNormal(0.05f, 8, 112u), "pr_lamp_n"),
          toEngineImage(noisyAlbedo(glm::vec3(0.6f), 0.05f, 4, 113u), "pr_lamp_r"));
     mats[size_t(MaterialSlot::LampGlow)]->emissiveFactor = glm::vec3(1.0f, 0.82f, 0.55f);
-    mats[size_t(MaterialSlot::LampGlow)]->emissiveStrength = 14.0f;
+    mats[size_t(MaterialSlot::LampGlow)]->emissiveStrength = 3.5f;
     mats[size_t(MaterialSlot::LampGlow)]->emissiveMap =
         toEngineImage(pooltex::noisyAlbedo(glm::vec3(1.0f, 0.92f, 0.78f), 0.04f, 4, 114u), "pr_lamp_e");
     // Slide shells: glossy colored plastic (hue from the base color factor;
@@ -451,7 +451,7 @@ auto main(int argc, char* args[]) -> int {
             lt.position = pos + normal * 0.16f;
             auto& pl = registry.emplace<Vapor::PointLightComponent>(lampE);
             pl.color = glm::vec3(1.0f, 0.76f, 0.5f);
-            pl.intensity = 4.5f;
+            pl.intensity = 2.2f;
             pl.radius = 7.0f;
         }
     }
@@ -505,7 +505,10 @@ auto main(int argc, char* args[]) -> int {
             sp.patchSize = 16.0f;
             sp.windSpeedMps = 1.7f;
             sp.windDirRad = 0.9f;
-            sp.amplitude = 0.65f;
+            // Phillips constant, NOT a wave height — the field variance sums
+            // ~65k lattice modes, so RMS height ~= 71 * sqrt(amplitude) here.
+            // 1.9e-4 => 1.5 cm RMS, ~4.5 cm crests: an indoor pool's ripple.
+            sp.amplitude = 0.00019f;
             sp.choppiness = 1.05f;
             sp.depthMeters = 2.0f;
             sp.smallWaveCutoff = 0.012f;
@@ -553,7 +556,8 @@ auto main(int argc, char* args[]) -> int {
             sp.patchSize = 16.0f;
             sp.windSpeedMps = 2.3f;
             sp.windDirRad = 0.6f;
-            sp.amplitude = 2.4f;
+            // 6.7e-4 => 4.5 cm RMS, ~13 cm crests — a slow flooded swell.
+            sp.amplitude = 0.00067f;
             sp.choppiness = 1.3f;
             sp.depthMeters = 1.2f;
             sp.smallWaveCutoff = 0.22f;

@@ -85,7 +85,12 @@ struct alignas(16) WaterSimParams {
     float patchSize = 16.0f;        // world meters covered by one tiling patch
     float windSpeedMps = 2.2f;      // drives the spectrum peak
     float windDirRad = 0.7f;        // wind heading (radians, XZ plane)
-    float amplitude = 1.0f;         // overall spectrum scale
+    // Phillips constant A, NOT a wave height. The field variance sums every
+    // lattice mode, so RMS height = sqrt(A) * f(patch, wind, cutoff, ...) with
+    // f in the tens — expect useful values around 1e-4..1e-2, and note that a
+    // seemingly innocent 1.0 yields metre-scale surf. Halving the wave height
+    // means quartering this. See Examples/Poolrooms for calibrated numbers.
+    float amplitude = 2.0e-4f;      // spectrum scale (Phillips A)
     float choppiness = 0.9f;        // horizontal displacement scale (0 = heave only)
     float depthMeters = 2.0f;       // finite-depth dispersion tanh(k*d)
     float smallWaveCutoff = 0.010f; // suppress wavelengths below this (m)
