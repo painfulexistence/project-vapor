@@ -900,8 +900,24 @@ namespace Vapor {
                 const int slot = world.grassFreeSlots.back();
                 world.grassFreeSlots.pop_back();
                 renderer->updateGrassCell(static_cast<Uint32>(slot), r.blades);
+                // Cell world AABB for the renderer's GPU cull: blade bases,
+                // padded by tip height (positionAndHeight.w) plus a metre of
+                // sway/width slack so a swaying tip never pops at the frustum
+                // edge.
+                glm::vec3 mn(std::numeric_limits<float>::max());
+                glm::vec3 mx(std::numeric_limits<float>::lowest());
+                float maxBladeH = 0.0f;
+                for (const auto& b : r.blades) {
+                    const glm::vec3 p(b.positionAndHeight);
+                    mn = glm::min(mn, p);
+                    mx = glm::max(mx, p);
+                    maxBladeH = std::max(maxBladeH, b.positionAndHeight.w);
+                }
+                mn -= glm::vec3(1.0f, 0.0f, 1.0f);
+                mx += glm::vec3(1.0f, maxBladeH + 1.0f, 1.0f);
                 world.grassCells[r.key] = { slot,
-                    static_cast<Uint32>(std::min<size_t>(r.blades.size(), world.grassBladesPerSlot)) };
+                    static_cast<Uint32>(std::min<size_t>(r.blades.size(), world.grassBladesPerSlot)),
+                    mn, mx };
             }
 
             // Push the resident draw list + look/wind settings every frame.
@@ -909,7 +925,8 @@ namespace Vapor {
             draws.reserve(world.grassCells.size());
             for (const auto& [key, st] : world.grassCells) {
                 if (st.slot >= 0 && st.bladeCount > 0)
-                    draws.push_back({ static_cast<Uint32>(st.slot), st.bladeCount });
+                    draws.push_back({ static_cast<Uint32>(st.slot), st.bladeCount,
+                                      st.aabbMin, st.aabbMax });
             }
             GrassSettingsData gs;
             gs.windDir = glm::normalize(glm::vec2(0.8f, 0.6f));

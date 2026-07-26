@@ -214,6 +214,10 @@ public:
     struct GrassCellState {
         int slot = -1;
         Uint32 bladeCount = 0;
+        // World AABB of the cell's blades (set when the build lands) — the
+        // per-cell bound the renderer's GPU grass cull tests.
+        glm::vec3 aabbMin { 0.0f };
+        glm::vec3 aabbMax { 0.0f };
     };
     std::unordered_map<long long, GrassCellState> grassCells;  // resident cells
     std::unordered_set<long long> grassPending;                // builds in flight

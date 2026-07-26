@@ -822,6 +822,17 @@ private:
     bool grassEnabled = true;
     float grassTimeSeconds = 0.0f;
     std::chrono::steady_clock::time_point grassLastTick {};
+    // Grass GPU cull: the GrassCull kernel frustum-tests each resident cell's
+    // AABB and writes one non-indexed indirect command per cell (instanceCount
+    // 0 = culled = GPU no-op), then the pass draws every cell in ONE indirect
+    // submission — the CPU loop previously drew all resident cells, including
+    // the half of the ring behind the camera. Kernel missing or toggle off =
+    // the CPU per-cell loop (unculled), unchanged.
+    ComputePipelineHandle grassCullPipeline;
+    ShaderHandle grassCullShader;
+    BufferHandle grassCullInfoBuffer;  // GrassCullInfoGpu[slotCount]
+    BufferHandle grassArgsBuffer;      // 4-uint indirect draw args per cell
+    bool grassGpuCull = true;
     // MicroVoxel raymarch (sparse-brick voxel volumes, MicroVoxel.frag /
     // 3d_microvoxel.metal). Volumes arrive per frame from VoxelVolumeSystem
     // via setVoxelVolumes(). All volumes share three GPU buffers (page

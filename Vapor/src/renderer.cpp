@@ -761,6 +761,8 @@ void Renderer::shutdown() {
         // Grass ring resources.
         if (grassInstanceBuffer.isValid()) rhi->destroyBuffer(grassInstanceBuffer);
         if (grassParamsBuffer.isValid()) rhi->destroyBuffer(grassParamsBuffer);
+        if (grassCullInfoBuffer.isValid()) rhi->destroyBuffer(grassCullInfoBuffer);
+        if (grassArgsBuffer.isValid()) rhi->destroyBuffer(grassArgsBuffer);
         if (grassPipeline.isValid()) rhi->destroyPipeline(grassPipeline);
         if (grassVS.isValid()) rhi->destroyShader(grassVS);
         if (grassFS.isValid()) rhi->destroyShader(grassFS);
@@ -5017,6 +5019,19 @@ bool Renderer::configureGrassPool(Uint32 cellSlots, Uint32 bladesPerSlot) {
         pd.memoryUsage = MemoryUsage::GPU;
         grassParamsBuffer = rhi->createBuffer(pd);
     }
+    // GPU-cull working buffers, sized for the pool (at most one draw per slot).
+    if (grassCullInfoBuffer.isValid()) rhi->destroyBuffer(grassCullInfoBuffer);
+    if (grassArgsBuffer.isValid()) rhi->destroyBuffer(grassArgsBuffer);
+    BufferDesc cid;
+    cid.size = static_cast<size_t>(cellSlots) * sizeof(Vapor::GrassCullInfoGpu);
+    cid.usage = BufferUsage::Storage;
+    cid.memoryUsage = MemoryUsage::GPU;
+    grassCullInfoBuffer = rhi->createBuffer(cid);
+    BufferDesc ad;
+    ad.size = static_cast<size_t>(cellSlots) * sizeof(Uint32) * 4;  // non-indexed args
+    ad.usage = BufferUsage::Indirect;
+    ad.memoryUsage = MemoryUsage::GPU;
+    grassArgsBuffer = rhi->createBuffer(ad);
     fmt::print("Renderer: grass pool {} cells x {} blades ({} MB)\n", cellSlots, bladesPerSlot,
                bd.size / (1024 * 1024));
     return grassInstanceBuffer.isValid();
@@ -5066,6 +5081,37 @@ void Renderer::grassPass() {
     p.sunColor = glm::vec4(atmosphereData.sunColor, 0.0f);
     rhi->updateBuffer(grassParamsBuffer, &p, 0, sizeof(Vapor::GrassParamsGpu));
 
+    // GPU per-cell frustum cull, run BEFORE the render pass opens: pack each
+    // resident cell's AABB + slot range, one dispatch tests them against the
+    // camera frustum (the same planes the main GPU cull uses) and writes one
+    // non-indexed indirect command per cell — culled cells get instanceCount 0.
+    const Uint32 cellCount = static_cast<Uint32>(grassDraws.size());
+    const bool gpuCull = grassGpuCull && grassCullPipeline.isValid() &&
+                         grassCullInfoBuffer.isValid() && grassArgsBuffer.isValid() &&
+                         cellCount > 0 && cellCount <= grassSlotCount;
+    if (gpuCull) {
+        std::vector<Vapor::GrassCullInfoGpu> info(cellCount);
+        for (Uint32 i = 0; i < cellCount; ++i) {
+            const auto& cell = grassDraws[i];
+            info[i].aabbMin = cell.aabbMin;
+            info[i].firstInstance = cell.slot * grassBladesPerSlot;
+            info[i].aabbMax = cell.aabbMax;
+            info[i].count = std::min(cell.count, grassBladesPerSlot);
+        }
+        rhi->updateBuffer(grassCullInfoBuffer, info.data(), 0,
+                          info.size() * sizeof(Vapor::GrassCullInfoGpu));
+        rhi->beginComputePass("GrassCull");
+        rhi->bindComputePipeline(grassCullPipeline);
+        rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
+        rhi->setComputeBuffer(1, grassCullInfoBuffer);
+        rhi->setComputeBuffer(2, grassArgsBuffer);
+        struct { Uint32 count; Uint32 pad[3]; } pc = { cellCount, {} };
+        rhi->setComputeBytes(&pc, sizeof(pc), 4);
+        rhi->dispatch((cellCount + 63) / 64, 1, 1);
+        rhi->endComputePass();
+        rhi->computeBarrier();  // cull writes -> indirect command reads
+    }
+
     RenderPassDesc rp;
     rp.name = "Grass";
     rp.colorAttachments.push_back(colorRT);
@@ -5078,11 +5124,25 @@ void Renderer::grassPass() {
     rhi->setVertexBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
     rhi->setVertexBuffer(1, grassInstanceBuffer);
     rhi->setFragmentBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
-    for (const auto& cell : grassDraws) {
-        if (cell.count == 0 || cell.slot >= grassSlotCount) continue;
-        // 15 vertices per blade (two tapered quads + tip); base instance selects
-        // the cell's slot range (gl_InstanceIndex / Metal instance_id include it).
-        rhi->draw(15, std::min(cell.count, grassBladesPerSlot), 0, cell.slot * grassBladesPerSlot);
+    if (gpuCull) {
+        // One submission for every resident cell; the cull wrote the args
+        // (15 verts/blade, instanceCount = blade count or 0, baseInstance =
+        // the cell's slot range). Vulkan without multiDrawIndirect loops —
+        // still GPU-culled, just N submissions (Metal's RHI loops internally).
+        const Uint32 stride = sizeof(Uint32) * 4;
+        if (backend == GraphicsBackend::Metal || capabilities.multiDrawIndirect) {
+            rhi->drawIndirect(grassArgsBuffer, 0, cellCount, stride);
+        } else {
+            for (Uint32 i = 0; i < cellCount; ++i)
+                rhi->drawIndirect(grassArgsBuffer, static_cast<size_t>(i) * stride, 1, stride);
+        }
+    } else {
+        for (const auto& cell : grassDraws) {
+            if (cell.count == 0 || cell.slot >= grassSlotCount) continue;
+            // 15 vertices per blade (two tapered quads + tip); base instance selects
+            // the cell's slot range (gl_InstanceIndex / Metal instance_id include it).
+            rhi->draw(15, std::min(cell.count, grassBladesPerSlot), 0, cell.slot * grassBladesPerSlot);
+        }
     }
     rhi->endRenderPass();
 }
@@ -7209,6 +7269,21 @@ void Renderer::createRenderPipeline() {
                     d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                     grassPipeline = rhi->createPipeline(d);
                 }
+
+                // Grass GPU cull: per-cell frustum test -> indirect draw args.
+                std::string gcCode = readFile("shaders/GrassCull.comp.spv");
+                if (!gcCode.empty()) {
+                    ShaderDesc cdsc;
+                    cdsc.stage = ShaderStage::Compute;
+                    cdsc.code = gcCode.data();
+                    cdsc.codeSize = gcCode.size();
+                    cdsc.entryPoint = "main";
+                    grassCullShader = rhi->createShader(cdsc);
+                    ComputePipelineDesc cpd;
+                    cpd.computeShader = grassCullShader;
+                    cpd.threadGroupSizeX = 64;  // matches local_size_x
+                    grassCullPipeline = rhi->createComputePipeline(cpd);
+                }
             }
 
             // MicroVoxel primary: box-rasterized voxel DDA. Not the fullscreen
@@ -7823,6 +7898,18 @@ void Renderer::createRenderPipeline() {
                 d.depthAttachmentFormat = PixelFormat::Depth32Float;
                 d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
                 grassPipeline = rhi->createPipeline(d);
+
+                // Grass GPU cull kernel (same source file).
+                ShaderDesc cdsc;
+                cdsc.stage = ShaderStage::Compute;
+                cdsc.code = grassCode.data();
+                cdsc.codeSize = grassCode.size();
+                cdsc.entryPoint = "grassCullKernel";
+                grassCullShader = rhi->createShader(cdsc);
+                ComputePipelineDesc cpd;
+                cpd.computeShader = grassCullShader;
+                cpd.threadGroupSizeX = 64;
+                grassCullPipeline = rhi->createComputePipeline(cpd);
             }
         }
         // MicroVoxel primary: box-rasterized voxel DDA. Not makeMetalPass —
@@ -9197,6 +9284,10 @@ void Renderer::drawGraphicsImGui() {
     if (ImGui::TreeNode("Terrain")) {
         ImGui::Text("Detail layers: %s", terrainDetailAlbedoArray.isValid() ? "staged" : "none");
         ImGui::Checkbox("Grass", &grassEnabled);
+        if (grassCullPipeline.isValid()) {
+            ImGui::SameLine();
+            ImGui::Checkbox("GPU cull", &grassGpuCull);
+        }
         Uint32 grassBlades = 0;
         for (const auto& cell : grassDraws) grassBlades += cell.count;
         ImGui::Text("Grass cells %zu, blades %u", grassDraws.size(), grassBlades);
