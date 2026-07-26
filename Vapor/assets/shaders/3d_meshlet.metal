@@ -734,13 +734,22 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     surf.clearcoat  = material.clearcoat;
     surf.clearcoat_gloss = material.clearcoatGloss;
 
-    // TBN normal mapping (same construction as the PBR fragment).
+    // TBN normal mapping (same construction as the PBR fragment, degenerate
+    // tangent guard included — the two modes must shade identically).
     float3 N = normalize(in.worldNormal);
-    float3 T = normalize(in.worldTangent.xyz);
-    T = normalize(T - dot(T, N) * N);
-    float3 B = normalize(cross(N, T) * in.worldTangent.w);
-    float3x3 TBN = float3x3(T, B, N);
-    float3 norm = normalize(TBN * normalize(tex.normal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    float3 T = in.worldTangent.xyz;
+    float3 B = float3(0.0);
+    float3 norm = N;
+    if (dot(T, T) > 1e-8) {
+        T = normalize(T - dot(T, N) * N);
+        B = normalize(cross(N, T) * in.worldTangent.w);
+        float3x3 TBN = float3x3(T, B, N);
+        norm = normalize(TBN * normalize(tex.normal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    } else {
+        float3 up = abs(N.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+        T = normalize(cross(up, N));
+        B = cross(N, T);
+    }
     float3 viewDir = normalize(camera.position - in.worldPosition);
     constexpr sampler screenSampler(address::clamp_to_edge, filter::linear);
     float2 screenUV = in.position.xy / float2(tile.screenW, tile.screenH);

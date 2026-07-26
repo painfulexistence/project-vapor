@@ -351,12 +351,27 @@ fragment float4 fragmentMain(
     surf.clearcoat = material.clearcoat;
     surf.clearcoat_gloss = material.clearcoatGloss;
 
+    // Normal mapping, with RHIMain.frag's fallback to the geometric normal when
+    // the tangent is degenerate. Without the guard, normalize(float3(0)) is NaN
+    // and poisons the entire TBN — every lit term goes NaN and the surface
+    // renders black. Vulkan had this guard and Metal did not, which is why a
+    // model with no TANGENT (e.g. DamagedHelmet) was black only on Metal.
     float3 N = normalize(float3(in.worldNormal));
-    float3 T = normalize(float3(in.worldTangent));
-    T = normalize(T - dot(T, N) * N);
-    float3 B = normalize(cross(N, T) * in.worldTangent.w);
-    float3x3 TBN = float3x3(T, B, N);
-    float3 norm = normalize(TBN * normalize(matNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    float3 T = float3(in.worldTangent);
+    float3 B = float3(0.0);
+    float3 norm = N;
+    if (dot(T, T) > 1e-8) {
+        T = normalize(T - dot(T, N) * N);
+        B = normalize(cross(N, T) * in.worldTangent.w);
+        float3x3 TBN = float3x3(T, B, N);
+        norm = normalize(TBN * normalize(matNormal.sample(s, in.uv).rgb * 2.0 - 1.0));
+    } else {
+        // Arbitrary orthonormal basis for the anisotropic BRDF term, which still
+        // consumes T/B. Anisotropy defaults to 0, so the exact axis is moot.
+        float3 up = abs(N.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+        T = normalize(cross(up, N));
+        B = cross(N, T);
+    }
 
     // Terrain: replace albedo + normal with the world-space detail-layer splat
     // (mirrors RHIMain.frag's shaderModel == 1 branch). in.uv.x carries the

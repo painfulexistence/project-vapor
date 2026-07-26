@@ -23,6 +23,19 @@ public:
     // Like resolvePath but throws std::runtime_error if not found.
     [[nodiscard]] std::string resolvePathOrThrow(const std::string& relativePath) const;
 
+    // Enumerate files under a relative directory across ALL search paths,
+    // returned as sorted, de-duplicated relative paths (e.g.
+    // "models/Sponza/Sponza.gltf") ready to hand straight back to resolvePath /
+    // AssetManager::loadModel. `extensions` filters by a ';'-separated,
+    // case-insensitive list of extensions WITHOUT dots (e.g. "usd;usda"); ""
+    // lists every file. `maxDepth` bounds recursion: 0 = the directory itself
+    // (flat); 1 also includes files one sub-directory down (a model folder's
+    // entry file) without descending into that folder's own sub-trees; N
+    // descends N levels; a negative value is unlimited. Shallow keeps a picker
+    // from being flooded by a self-contained asset package's referenced parts.
+    [[nodiscard]] std::vector<std::string>
+        list(const std::string& relativeDir, const std::string& extensions = "", int maxDepth = 0) const;
+
 private:
     struct SearchEntry {
         std::string absolutePath;

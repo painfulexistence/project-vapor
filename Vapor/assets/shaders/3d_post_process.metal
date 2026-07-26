@@ -13,7 +13,9 @@ struct RasterizerData {
     float2 uv;
 };
 
-// Post-processing parameters (must match C++ struct)
+// Post-processing parameters (must match Vapor::Renderer::PostProcessParams —
+// same field order, all floats). Appended fields are the per-effect enable
+// flags (1=on, 0=off) and the stylized-effect params.
 struct PostProcessParams {
     // Chromatic Aberration
     float chromaticAberrationStrength;
@@ -33,6 +35,32 @@ struct PostProcessParams {
 
     // Tone Mapping
     float exposure;
+
+    // Per-effect enable flags
+    float enableChromaticAberration;
+    float enableVignette;
+    float enableColorGrading;
+    float enableToneMapping;
+
+    // Stylized effects (ported from Atmospheric), default off
+    float enableVHS;
+    float enableCRT;
+    float enableSobel;
+    float enablePosterize;
+    float posterizeLevels;
+    float time;
+
+    // Film grain (independent of VHS)
+    float enableFilmGrain;
+    float filmGrainStrength;
+    float filmGrainAnimated;
+
+    // TV signal glitch
+    float enableGlitch;
+    float glitchIntensity;
+
+    // Edge view (gradient magnitude replaces the image)
+    float enableEdges;
 };
 
 vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {
@@ -77,6 +105,83 @@ float3 adjustContrast(float3 color, float contrast) {
     return (color - 0.5) * contrast + 0.5;
 }
 
+// ─── Stylized-effect helpers ────────────────────────────────────────────────
+
+// Hash noise in [0,1). Classic sin-hash: sin() bounds the value before the
+// large multiply, so it stays well-conditioned for big pixel-coordinate inputs
+// (film grain) unlike a fract(p*k) hash, which bands at high resolution.
+static inline float hash21(float2 p) {
+    return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Smooth 1D value noise built from the hash (used by the VHS emulation).
+static inline float vhsSmoothNoise(float x, float seed) {
+    float i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(hash21(float2(i, seed)), hash21(float2(i + 1.0, seed)), f);
+}
+
+// Per-scanline horizontal jitter: two sway frequencies plus a random per-band
+// drift, giving the unstable-head wobble.
+static inline float vhsLineJitter(float y, float t) {
+    return sin(y * 11.0  - t * 2.3) * 0.0035
+         + sin(y * 140.0 + t * 7.0) * 0.0012
+         + (vhsSmoothNoise(y * 9.0 + t * 0.8, 17.0) - 0.5) * 0.02;
+}
+
+// Tape dropout: brief BRIGHT HORIZONTAL streaks where the head loses contact.
+// A rare subset of scanlines lights up with a moving bright dash along x — real
+// VHS dropout runs along the scanline, not as a grid of square blocks.
+static inline float vhsDropout(float2 uv, float t) {
+    float ly   = floor(uv.y * 240.0);
+    float lit  = step(0.978, hash21(float2(ly, floor(t * 10.0))));
+    float dash = smoothstep(0.5, 0.95, vhsSmoothNoise(uv.x * 40.0 - t * 6.0, ly));
+    return lit * dash;
+}
+
+// TV signal glitch: bursty blocky horizontal displacement + RGB tearing.
+// Returns (horizontal uv shift, extra RGB channel split). Runs before sampling
+// so it stacks with the VHS jitter and the CRT barrel. Scales with intensity.
+static inline float2 tvGlitch(float y, float t, float intensity) {
+    // Storm envelope — glitches arrive in occasional bursts, quiet between.
+    float storm = smoothstep(0.55, 0.9, vhsSmoothNoise(t * 1.3, 21.0));
+    float tick  = floor(t * 12.0);
+    // Coarse blocks that jump left/right (only a sparse subset is active).
+    float blk    = floor(y * 20.0);
+    float hit    = step(0.80, hash21(float2(blk, tick))) * storm;
+    float coarse = (hash21(float2(blk, tick + 7.0)) - 0.5) * 0.12 * hit;
+    // Fine scanline-scale tearing during storms.
+    float fine   = (hash21(float2(floor(y * 220.0), tick)) - 0.5) * 0.02 * storm;
+    float shift  = (coarse + fine) * intensity;
+    float split  = (hit + storm * 0.3) * 0.015 * intensity;
+    return float2(shift, split);
+}
+
+// 3x3 Sobel gradient magnitude of the screen texture's luminance.
+static inline float sobelMagnitude(texture2d<float, access::sample> tex, sampler s, float2 uv) {
+    float2 ts = 1.0 / float2(tex.get_width(), tex.get_height());
+    float tl = length(tex.sample(s, uv + float2(-ts.x,  ts.y)).rgb);
+    float tp = length(tex.sample(s, uv + float2( 0.0,   ts.y)).rgb);
+    float tr = length(tex.sample(s, uv + float2( ts.x,  ts.y)).rgb);
+    float l  = length(tex.sample(s, uv + float2(-ts.x,  0.0 )).rgb);
+    float r  = length(tex.sample(s, uv + float2( ts.x,  0.0 )).rgb);
+    float bl = length(tex.sample(s, uv + float2(-ts.x, -ts.y)).rgb);
+    float bt = length(tex.sample(s, uv + float2( 0.0,  -ts.y)).rgb);
+    float br = length(tex.sample(s, uv + float2( ts.x, -ts.y)).rgb);
+    float gx = -tl + tr - 2.0 * l + 2.0 * r - bl + br;
+    float gy = -tl - 2.0 * tp - tr + bl + 2.0 * bt + br;
+    return sqrt(gx * gx + gy * gy);
+}
+
+// Edge view: per-channel gradient magnitude (central differences). Replaces the
+// image with an outline; distinct from the Sobel overlay above.
+static inline float3 edgeGradient(texture2d<float, access::sample> tex, sampler s, float2 uv) {
+    float2 ts = 1.0 / float2(tex.get_width(), tex.get_height());
+    float3 hgr = tex.sample(s, uv + float2(ts.x, 0.0)).rgb - tex.sample(s, uv - float2(ts.x, 0.0)).rgb;
+    float3 vgr = tex.sample(s, uv + float2(0.0, ts.y)).rgb - tex.sample(s, uv - float2(0.0, ts.y)).rgb;
+    return sqrt(hgr * hgr + vgr * vgr);
+}
+
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     texture2d<float, access::sample> texScreen [[texture(0)]],
@@ -88,74 +193,161 @@ fragment float4 fragmentMain(
     constexpr sampler s(address::clamp_to_edge, filter::linear, mip_filter::linear);
 
     float2 uv = in.uv;
+
+    // ========================================================================
+    // VHS (original implementation): per-line horizontal jitter warps the uv
+    // before sampling; the tape artifacts (scanlines, dropout, hiss, chroma
+    // bleed, desat, vignette) are gathered here and composited post-tonemap.
+    // ========================================================================
+    float  vhsScan   = 1.0;            // scanline brightness modulation
+    float3 vhsAdd    = float3(0.0);    // additive tape artifacts (dropout/hiss)
+    float  vhsVig    = 1.0;            // soft edge vignette
+    float  vhsDesat  = 0.0;            // desaturation amount
+    float  vhsChroma = 0.0;            // horizontal chroma-bleed offset
+    if (params.enableVHS > 0.5) {
+        float t = params.time;
+        uv.x += vhsLineJitter(uv.y, t);
+        vhsScan = 0.88 + 0.12 * sin(uv.y * 720.0);
+        float drop = vhsDropout(uv, t);
+        // Fine tape "snow": ~2px cells horizontally (real VHS luma noise streaks
+        // along the scanline), per-scanline vertically, reseeded each frame —
+        // finer and more authentic than a coarse square-cell hash.
+        float2 px = uv * float2(texScreen.get_width(), texScreen.get_height());
+        float hiss = hash21(float2(floor(px.x * 0.5), floor(px.y)) + floor(t * 60.0)) - 0.5;
+        // Head-switching noise stays coarse — that band really is blocky on tape.
+        float headSwitch = smoothstep(0.05, 0.0, uv.y) *
+                           (hash21(float2(uv.x * 200.0, floor(t * 30.0))) - 0.2);
+        vhsAdd = float3(drop * 0.5 + hiss * 0.10 + headSwitch * 0.6);
+        vhsDesat = 0.15;
+        float2 vd = uv - 0.5;
+        vhsVig = 1.0 - dot(vd, vd) * 0.5;
+        vhsChroma = 0.004;
+    }
+
+    // ========================================================================
+    // TV signal glitch: blocky horizontal displacement + RGB tearing. Warps uv
+    // here (after VHS, before CRT) so it stacks with both.
+    // ========================================================================
+    float glitchSplit = 0.0;
+    if (params.enableGlitch > 0.5) {
+        float2 gd = tvGlitch(uv.y, params.time, params.glitchIntensity);
+        uv.x += gd.x;
+        glitchSplit = gd.y;
+    }
+
+    // ========================================================================
+    // CRT: barrel distortion; samples pushed off-screen render black.
+    // ========================================================================
+    bool offScreen = false;
+    if (params.enableCRT > 0.5) {
+        float2 c = (uv - 0.5) * 2.0;
+        float2 crtOff = abs(c.yx) * float2(0.2, 0.25);
+        c += c * crtOff * crtOff;
+        uv = c * 0.5 + 0.5;
+        offScreen = uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0;
+    }
+
     float2 center = float2(0.5, 0.5);
     float2 toCenter = uv - center;
     float distFromCenter = length(toCenter);
 
     // ========================================================================
-    // Chromatic Aberration & God Rays
+    // Chromatic Aberration (+ CRT phosphor split) & God Rays
     // ========================================================================
-    float caStrength = params.chromaticAberrationStrength;
-    float caFalloff = params.chromaticAberrationFalloff;
-
-    // Chromatic aberration increases toward edges
-    float caAmount = pow(distFromCenter, caFalloff) * caStrength;
+    float caAmount = (params.enableChromaticAberration > 0.5)
+        ? pow(distFromCenter, params.chromaticAberrationFalloff) * params.chromaticAberrationStrength
+        : 0.0;
     float2 caDirection = normalize(toCenter + 0.0001); // Direction from center
+    float2 rOff = caDirection * caAmount;
+    float2 bOff = -caDirection * caAmount;
+    if (params.enableCRT > 0.5) { rOff += float2(0.001, 0.0); bOff += float2(-0.001, 0.0); }
+    // VHS chroma bleed: a purely horizontal R/B smear (low chroma bandwidth).
+    if (params.enableVHS > 0.5) { rOff.x += vhsChroma; bOff.x -= vhsChroma; }
+    // TV-glitch RGB tearing: stacks on top of the CA/CRT/VHS channel offsets.
+    if (params.enableGlitch > 0.5) { rOff.x += glitchSplit; bOff.x -= glitchSplit; }
 
     // Sample RGB channels with offset
-    float2 uvR = uv + caDirection * caAmount;
-    float2 uvB = uv - caDirection * caAmount;
+    float2 uvR = uv + rOff;
+    float2 uvB = uv + bOff;
 
     float3 color;
     color.r = texScreen.sample(s, uvR).r + texGodRays.sample(s, uvR).r;
     color.g = texScreen.sample(s, uv).g + texGodRays.sample(s, uv).g;
     color.b = texScreen.sample(s, uvB).b + texGodRays.sample(s, uvB).b;
 
-    // (AO is applied to the ambient/IBL term in the lighting pass, not here —
-    // a whole-image multiply would darken direct light too.)
+    // (Bloom is composited into colorRT by the BloomComposite pass before this
+    // shader on the Metal path, so no bloom sample here. AO is applied to the
+    // ambient/IBL term in lighting — a whole-image multiply would darken direct
+    // light too.)
 
     // ========================================================================
-    // Color Grading (in HDR space, before tone mapping)
+    // Sobel edge overlay (HDR domain; bright pixels suppress the overlay)
     // ========================================================================
-
-    // Apply exposure
-    color *= params.exposure;
-
-    // Temperature and tint
-    color = adjustTemperature(color, params.temperature);
-    color = adjustTint(color, params.tint);
-
-    // Brightness (additive)
-    color += params.brightness;
+    if (params.enableSobel > 0.5) {
+        float lum = length(color * params.exposure);
+        float edgeStrength = 1.0 - smoothstep(2.0, 4.0, lum);
+        float edge = smoothstep(0.1, 0.5, sobelMagnitude(texScreen, s, uv));
+        color = mix(color, float3(0.1), edge * edgeStrength);
+    }
 
     // ========================================================================
-    // Tone Mapping (HDR -> LDR)
+    // Color Grading (HDR) + Tone Mapping (HDR -> LDR)
     // ========================================================================
-    color = aces(color);
+    if (params.enableToneMapping > 0.5) color *= params.exposure;
+    if (params.enableColorGrading > 0.5) {
+        color = adjustTemperature(color, params.temperature);
+        color = adjustTint(color, params.tint);
+        color += params.brightness;
+    }
+    if (params.enableToneMapping > 0.5) color = aces(color);
+    if (params.enableColorGrading > 0.5) {
+        color = adjustSaturation(color, params.saturation);
+        color = adjustContrast(color, params.contrast);
+    }
 
     // ========================================================================
-    // Post Tone Mapping Effects (in LDR space)
+    // Edge view: replace the image with its gradient magnitude (outline look).
+    // Distinct from Sobel (which overlays). Later stylizations apply on top.
     // ========================================================================
-
-    // Saturation (better in LDR space)
-    color = adjustSaturation(color, params.saturation);
-
-    // Contrast (better in LDR space)
-    color = adjustContrast(color, params.contrast);
+    if (params.enableEdges > 0.5) color = edgeGradient(texScreen, s, uv);
 
     // ========================================================================
-    // Vignette (final effect)
+    // Posterize (quantize LDR into N steps)
     // ========================================================================
-    float vignetteRadius = params.vignetteRadius;
-    float vignetteSoftness = params.vignetteSoftness;
-    float vignetteStrength = params.vignetteStrength;
+    if (params.enablePosterize > 0.5) {
+        float lv = max(params.posterizeLevels, 1.0);
+        color = floor(color * lv) / lv;
+    }
 
-    float vignette = smoothstep(vignetteRadius, vignetteRadius - vignetteSoftness, distFromCenter);
-    vignette = mix(1.0, vignette, vignetteStrength);
-    color *= vignette;
+    // ========================================================================
+    // Vignette
+    // ========================================================================
+    if (params.enableVignette > 0.5) {
+        float vignette = smoothstep(params.vignetteRadius, params.vignetteRadius - params.vignetteSoftness, distFromCenter);
+        vignette = mix(1.0, vignette, params.vignetteStrength);
+        color *= vignette;
+    }
+
+    // VHS overlays (LDR): desaturate, scanlines, additive tape artifacts, edge
+    // vignette. All factors are neutral (no-ops) when VHS is disabled.
+    float vhsLum = dot(color, float3(0.2126, 0.7152, 0.0722));
+    color = mix(color, float3(vhsLum), vhsDesat);
+    color *= vhsScan;
+    color += vhsAdd;
+    color *= vhsVig;
+    if (params.enableCRT > 0.5) color += sin(uv.y * 800.0 + params.time * 10.0) * 0.04;
+
+    // Film grain (LDR, screen-space). Static by default; Animated reseeds each
+    // frame for a flickering grain. Uses the undistorted screen uv (in.uv).
+    if (params.enableFilmGrain > 0.5) {
+        float2 gseed = in.uv * float2(texScreen.get_width(), texScreen.get_height());
+        if (params.filmGrainAnimated > 0.5) gseed += float2(params.time * 91.7, params.time * 47.3);
+        float g = hash21(gseed) - 0.5;
+        color += g * params.filmGrainStrength;
+    }
 
     // Ensure color is in valid range
     color = saturate(color);
 
-    return float4(color, 1.0);
+    return offScreen ? float4(0.0, 0.0, 0.0, 1.0) : float4(color, 1.0);
 }

@@ -8,3 +8,6 @@ target_link_libraries(microvoxel PRIVATE Vapor)
 # (assets/scenes/main.json = three dioramas, big.json = the streaming world).
 vapor_copy_engine_assets(microvoxel)
 vapor_copy_game_assets(microvoxel "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+# Publish the .metal shaders self-contained (flatten local #include) and
+# compile-check them at build time. APPLE-only no-op elsewhere.
+vapor_flatten_metal_shaders(microvoxel)

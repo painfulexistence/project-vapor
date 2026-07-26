@@ -198,10 +198,19 @@ float3x3 inverse(float3x3 const m) {
     }
     float const invDet = 1.0f / det;
 
+    // Adjugate = TRANSPOSE of the cofactor matrix (A..I above). The float3x3
+    // constructor takes columns, so the adjugate's columns are the cofactor
+    // rows (A,B,C)/(D,E,F)/(G,H,I). The previous column order (A,D,G)/... laid
+    // the cofactors back down untransposed, so this returned (M^-1)^T instead
+    // of M^-1 — and every transpose(inverse(model)) normal-matrix call site
+    // then collapsed to M^-1, rotating normals BACKWARDS for any model whose
+    // transform carries rotation. (Identity-rotation nodes looked fine, which
+    // is why floors/backdrops shaded correctly while rotated glTF nodes went
+    // wrong on Metal only — GLSL's builtin inverse() kept Vulkan correct.)
     return invDet * float3x3{
-        float3(A, D, G),
-        float3(B, E, H),
-        float3(C, F, I)
+        float3(A, B, C),
+        float3(D, E, F),
+        float3(G, H, I)
     };
 }
 
