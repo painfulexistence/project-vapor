@@ -89,7 +89,11 @@ float causticPattern(vec2 p, float t) {
     }
     c /= 4.0;
     c = 1.17 - pow(c, 1.4);
-    return pow(abs(c), 8.0);
+    // MUST stay clamped: c is unbounded (the 1/length term spikes wherever the
+    // lattice denominator crosses zero), so pow(|c|, 8) reaches ~1e12 at pool
+    // coordinates and the multiplicative boost below turns every submerged
+    // pixel pure white. The pattern is a 0..1 mask, nothing more.
+    return clamp(pow(abs(c), 8.0), 0.0, 1.0);
 }
 
 void main() {
