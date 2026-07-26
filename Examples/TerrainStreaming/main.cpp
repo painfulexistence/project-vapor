@@ -268,6 +268,13 @@ auto main(int argc, char* args[]) -> int {
                         tc.cbtTessellation = !tc.cbtTessellation;
                         tc.regenerate = true;
                         fmt::print("CBT tessellation: {}\n", tc.cbtTessellation ? "on" : "off");
+                        // Regenerate rebuilds the merged scene buffers; the
+                        // persistent GPU-driven structures (Metal scene ICB,
+                        // meshlet buffers) can hold stale references across
+                        // that. Prefer setting cbtTessellation in the scene
+                        // JSON and restarting when testing those paths.
+                        fmt::print("note: after toggling, Bindless MDI / Meshlet may need an app "
+                                   "restart; CPU and Indirect+MDI are unaffected.\n");
                     }
                     if (e.key.scancode == SDL_SCANCODE_T) {
                         // Teleport 2 km along the view direction, kept inside

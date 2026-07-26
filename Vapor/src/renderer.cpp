@@ -3131,6 +3131,16 @@ void Renderer::ensureMergedGeometry() {
     if (mergedVertexBuffer.isValid()) rhi->destroyBuffer(mergedVertexBuffer);
     if (mergedIndexBuffer.isValid()) rhi->destroyBuffer(mergedIndexBuffer);
 
+    // The Metal scene ICB inherits residency for the merged buffers it encodes
+    // draws against; those handles just died, so drop the ICB too — gpuCullPass
+    // lazily recreates it and re-encodes against the fresh buffers. Without
+    // this, Bindless MDI keeps replaying commands that reference the destroyed
+    // buffers after a terrain regenerate / streamed-mesh rebuild.
+    if (sceneICB.isValid()) {
+        rhi->destroyIndirectCommandBuffer(sceneICB);
+        sceneICB = {};
+    }
+
     BufferDesc vbDesc;
     vbDesc.size = m_mergedVertices.size() * sizeof(Vapor::VertexData);
     vbDesc.usage = BufferUsage::Vertex;
