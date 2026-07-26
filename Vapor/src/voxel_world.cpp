@@ -276,6 +276,11 @@ void VoxelWorld::prepareGeneration(Uint32 seedIn) {
     occMax = glm::ivec3(INT_MIN);
     pageTableDirty = true;
     paletteDirty = true;
+    // Every chunk the caller is about to run must report back before consumers
+    // that need the finished volume (collision geometry) may read it.
+    const glm::ivec2 chunks = columnChunkCount();
+    pendingChunks.store(static_cast<Uint32>(std::max(chunks.x, 0) * std::max(chunks.y, 0)),
+                        std::memory_order_release);
 
     // Feature placements (terrain only — object kinds carry their own shape),
     // scaled so the density per footprint area matches the original 256^2
@@ -311,6 +316,17 @@ void VoxelWorld::prepareGeneration(Uint32 seedIn) {
 }
 
 void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
+    generateColumnChunkImpl(chunkX, chunkZ);
+    // Report completion on every path (including the out-of-range early out)
+    // so generationComplete() can never stall.
+    Uint32 remaining = pendingChunks.load(std::memory_order_relaxed);
+    while (remaining > 0 &&
+           !pendingChunks.compare_exchange_weak(remaining, remaining - 1, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)) {
+    }
+}
+
+void VoxelWorld::generateColumnChunkImpl(int chunkX, int chunkZ) {
     const int x0 = chunkX * GEN_CHUNK_DIM;
     const int z0 = chunkZ * GEN_CHUNK_DIM;
     if (x0 >= gridDim.x || z0 >= gridDim.z || x0 < 0 || z0 < 0) return;

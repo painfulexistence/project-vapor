@@ -62,6 +62,27 @@ namespace Vapor {
         glm::vec3 halfSize = glm::vec3(0.5f);
     };
 
+    // Derives a collider from the entity's VoxelVolumeComponent once that
+    // volume has finished generating (VoxelColliderSystem builds it). The
+    // paired RigidbodyComponent's motion type picks the shape: a Static body
+    // gets the exposed-face triangle mesh (Jolt's mesh shape cannot move), a
+    // Dynamic or Kinematic body gets a convex hull of the solid voxels. The
+    // body is placed at the entity transform, which is the volume's pivot, so
+    // the collider lines up with what the raymarch draws — including rotation.
+    struct VoxelColliderComponent {
+        // Support directions sampled for the dynamic hull; more is rounder.
+        int hullDirections = 64;
+        // Mesh extraction is O(surface area) and runs inline on the frame the
+        // volume completes, so a huge streaming world would stall it. Volumes
+        // with more grid voxels than this get no mesh collider (0 = no limit).
+        // The default admits the 256^3 demo terrain (16.7M) and rejects the
+        // 1024x256x1024 --big world (268M).
+        Uint32 maxMeshVoxels = 32u * 1024u * 1024u;
+        // Set true to drop the body and rebuild it from the current voxels
+        // (e.g. after a large edit); cleared once the rebuild is queued.
+        bool rebuild = false;
+    };
+
     struct SphereColliderComponent {
         float radius = 0.5f;
     };

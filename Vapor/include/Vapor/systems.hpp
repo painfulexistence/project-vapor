@@ -547,6 +547,76 @@ namespace Vapor {
     };
 
     // ============================================================================
+    // VoxelColliderSystem — gives voxel volumes a physics body.
+    //
+    // Reactive, mirroring the app-side body-create systems: an entity carrying
+    // {VoxelVolumeComponent, VoxelColliderComponent, RigidbodyComponent,
+    // TransformComponent} with an invalid BodyHandle gets a Jolt body the frame
+    // its volume finishes generating. The rigidbody's motion type picks the
+    // shape — Static takes the exposed-face triangle mesh (Jolt mesh shapes are
+    // static-only), Dynamic/Kinematic take a convex hull of the solid voxels.
+    //
+    // Shape coordinates are grid-local, but the body sits at the entity
+    // transform, which is the volume's PIVOT (the grid centred in x/z, rising
+    // from y). Both are offset by the same half-extent the OBB raymarch uses,
+    // so collider and visuals agree, rotation included: Physics3D::process
+    // writes each dynamic body's pose back to the TransformComponent, and
+    // VoxelVolumeSystem then hands that pose to the renderer the same frame.
+    //
+    // Digging does NOT refresh the collider yet; set VoxelColliderComponent::
+    // rebuild to force one (cheap for props, a full re-mesh for terrain).
+    // ============================================================================
+    class VoxelColliderSystem {
+    public:
+        static void update(entt::registry& reg, Physics3D* physics) {
+            if (!physics) return;
+            auto view = reg.view<VoxelVolumeComponent, VoxelColliderComponent, RigidbodyComponent,
+                                 TransformComponent>();
+            for (auto entity : view) {
+                auto& vc = view.get<VoxelColliderComponent>(entity);
+                auto& rb = view.get<RigidbodyComponent>(entity);
+
+                if (vc.rebuild && rb.body.valid()) {
+                    physics->destroyBody(rb.body);
+                    rb.body = BodyHandle {};
+                }
+                vc.rebuild = false;
+                if (rb.body.valid()) continue;
+
+                auto& vv = view.get<VoxelVolumeComponent>(entity);
+                // Wait for every chunk: a half-generated world would mesh to a
+                // collider full of holes that never gets corrected.
+                if (!vv.world.value || !vv.world.value->generationComplete()) continue;
+                const VoxelWorld& world = *vv.world.value;
+                if (world.solidVoxels() == 0) continue;
+
+                const auto& tf = view.get<TransformComponent>(entity);
+                const glm::vec3 ext = world.extent();
+                const glm::vec3 pivotOffset(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+
+                if (rb.motionType == BodyMotionType::Static) {
+                    const glm::ivec3 d = world.dim();
+                    const auto voxels = static_cast<Uint64>(d.x) * static_cast<Uint64>(d.y) * static_cast<Uint64>(d.z);
+                    if (vc.maxMeshVoxels != 0 && voxels > static_cast<Uint64>(vc.maxMeshVoxels)) continue;
+                    std::vector<glm::vec3> verts;
+                    std::vector<Uint32> indices;
+                    world.buildSurfaceMesh(verts, indices);
+                    if (indices.empty()) continue;
+                    for (auto& p : verts) p -= pivotOffset;
+                    rb.body = physics->createMeshBody(verts, indices, tf.position, tf.rotation, rb.motionType);
+                } else {
+                    std::vector<glm::vec3> points;
+                    world.buildConvexHullPoints(points, vc.hullDirections);
+                    if (points.size() < 4) continue;  // degenerate: no volume to hull
+                    for (auto& p : points) p -= pivotOffset;
+                    rb.body = physics->createConvexHullBody(points, tf.position, tf.rotation, rb.motionType);
+                }
+                if (rb.body.valid()) physics->addBody(rb.body, rb.motionType != BodyMotionType::Static);
+            }
+        }
+    };
+
+    // ============================================================================
     // 天氣系統 - the weather state machine (clouds / dimming / precipitation / lightning)
     // ============================================================================
     // Blends the singleton WeatherComponent toward its target state and fans the

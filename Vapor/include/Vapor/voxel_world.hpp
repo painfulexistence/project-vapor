@@ -119,6 +119,12 @@ public:
     void generateColumnChunk(int chunkX, int chunkZ);
     void generate(Uint32 seedIn);
     glm::ivec2 columnChunkCount() const;
+    // True once every chunk queued by the last prepareGeneration has finished.
+    // Consumers that need the whole volume (collision geometry) must wait for
+    // this; the renderer does not, since it picks up bricks as they land.
+    bool generationComplete() const {
+        return !pageTable.empty() && pendingChunks.load(std::memory_order_acquire) == 0;
+    }
 
     // ---- Editing (local meters: volume min corner = origin) --------------
     // Clears voxels to air inside the sphere, updating occupancy bits, freeing
@@ -214,6 +220,7 @@ private:
     }
 
     void setDefaultPalette();
+    void generateColumnChunkImpl(int chunkX, int chunkZ);
     // Allocates a pool slot (mutex-held by caller); PAGE_EMPTY when exhausted.
     Uint32 allocSlotLocked();
     void freeSlotLocked(Uint32 slot);
@@ -237,6 +244,7 @@ private:
     std::vector<FeatureSphere> features;      // crystals + glowstone, in voxels
     std::atomic<Uint64> solidCount { 0 };
     std::atomic<Uint64> droppedCount { 0 };   // bricks lost to pool exhaustion
+    std::atomic<Uint32> pendingChunks { 0 };  // chunks still to run; 0 = fully generated
     glm::ivec3 occMin { 0 };                   // tight solid bounds (voxels, inclusive);
     glm::ivec3 occMax { -1 };                  // occMax < occMin => empty. Guarded by poolMutex.
 

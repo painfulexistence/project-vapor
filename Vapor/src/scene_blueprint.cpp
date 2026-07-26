@@ -190,6 +190,9 @@ BlueprintComponents& BlueprintComponents::instance() {
         // invalid BodyHandle and creates/registers the body reactively.
         r.registerComponent<BoxColliderComponent>("boxCollider");
         r.registerComponent<SphereColliderComponent>("sphereCollider");
+        // Collider derived from the entity's voxel volume; VoxelColliderSystem
+        // builds the shape once the volume has generated.
+        r.registerComponent<VoxelColliderComponent>("voxelCollider");
         r.registerApplier("rigidbody", [](entt::registry& reg, entt::entity e, const nlohmann::json& j) {
             RigidbodyComponent rb;
             const std::string motion = j.value("motionType", "dynamic");

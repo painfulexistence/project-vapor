@@ -9,9 +9,13 @@
 // no triangles. Every volume depth-composites with the others through the
 // MicroVoxel pass's depth writes, an angled warm sun gives raking shadows, and
 // holding E digs spheres out of whichever volume is under the crosshair
-// (per-brick uploads, no remeshing — the point of the raymarch model). The
-// rotated props exercise the OBB raymarch; the small ones, per-object grid
-// right-sizing and tight bounds. Pass --big for a single
+// (per-brick uploads, no remeshing — the point of the raymarch model).
+//
+// The props are also PHYSICS bodies: their colliders are derived from their own
+// voxels (a convex hull per prop, a triangle mesh of the terrain's exposed
+// faces), so they drop in, bounce off the terrain and pile into each other,
+// and Jolt's pose drives the OBB raymarch — a tumbling crate renders tumbling.
+// Pass --big for a single
 // 1024 x 256 x 1024 world (51 m across at 5 cm) instead of the dioramas —
 // generation streams in chunk-by-chunk on the task scheduler while you fly.
 //
@@ -351,6 +355,13 @@ auto main(int argc, char* args[]) -> int {
     auto engineCore = std::make_unique<Vapor::EngineCore>();
     engineCore->init();
 
+    // Physics: the props are dynamic rigid bodies whose colliders come from
+    // their own voxels (VoxelColliderSystem), so they fall onto the static
+    // terrain collider and pile into each other. Jolt writes each body's pose
+    // back to its TransformComponent, which is exactly what the OBB raymarch
+    // reads — so a tumbling crate renders tumbling.
+    auto physics = std::make_unique<Vapor::Physics3D>();
+
     auto renderer = createRenderer(gfxBackend, window);
     if (!renderer) {
         fmt::print(stderr, "Failed to create renderer (backend unavailable?)\n");
@@ -358,6 +369,7 @@ auto main(int argc, char* args[]) -> int {
         SDL_Quit();
         return 1;
     }
+    physics->init(engineCore->getTaskScheduler(), renderer->getDebugDraw());
 
     // Declarative scene: the volumes (voxelVolume components), sun, sky and fly
     // camera are all authored in the scene JSON — main.json is one 256^3 @ 5 cm
@@ -415,6 +427,8 @@ auto main(int argc, char* args[]) -> int {
 
     fmt::print("MicroVoxel loaded. WASD move, R/F up/down, IJKL look, LShift sprint, Esc quit.\n");
     fmt::print("Raymarched 5 cm voxel volumes — no triangles. Hold E to dig into them.\n");
+    fmt::print("Props are rigid bodies with voxel-derived hulls; they drop onto the terrain mesh "
+               "collider and collide with each other.\n");
     fmt::print("Debug: 0=final 1=albedo 2=normals 3=AO 4=shadow 5=GI 6=material | "
                "G/O/H/X/N/V toggle GI/AO/shadow/reflections/denoiser/cross-volume | B = split raw|denoised | "
                "P = quad flora.\n");
@@ -549,6 +563,11 @@ auto main(int argc, char* args[]) -> int {
 
         // ---- Engine + ECS systems ------------------------------------------
         engineCore->update(deltaTime);
+        // Reactive collider creation, then the step. Both run before the
+        // transform/voxel systems so a body's new pose reaches the raymarch on
+        // the same frame it was integrated.
+        Vapor::VoxelColliderSystem::update(registry, physics.get());
+        physics->process(registry, deltaTime);
         Vapor::TransformSystem::update(registry);
         Vapor::LightGatherSystem::update(registry, scene.get());
         Vapor::SkySystem::update(registry, renderer.get());
@@ -585,6 +604,7 @@ auto main(int argc, char* args[]) -> int {
         renderer->endFrame();
     }
 
+    physics->deinit();
     engineCore->shutdown();
     renderer->shutdown();
     SDL_DestroyWindow(window);
