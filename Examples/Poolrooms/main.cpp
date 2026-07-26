@@ -401,9 +401,14 @@ auto main(int argc, char* args[]) -> int {
     scene->stagedMeshes.clear();
     scene->stagedMeshTransforms.clear();
 
-    // Static collision.
+    // Static collision. Jolt's BoxShape carries a convex radius (0.05 by
+    // default) and refuses any box whose smallest half-extent is under it, so
+    // thin procedural colliders get inflated rather than taking the whole app
+    // down with "Failed to create box shape".
+    constexpr float kMinHalfExtent = 0.05f;
     for (const poolgen::CollisionBox& box : world.colliders) {
-        BodyHandle body = physics->createBoxBody(box.halfExtents, box.center,
+        const glm::vec3 half = glm::max(box.halfExtents, glm::vec3(kMinHalfExtent));
+        BodyHandle body = physics->createBoxBody(half, box.center,
                                                  glm::quat(1, 0, 0, 0), BodyMotionType::Static);
         physics->addBody(body, false);
     }

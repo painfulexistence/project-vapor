@@ -65,7 +65,10 @@ struct MeshData {
     }
 };
 
-// Axis-aligned collision box, consumed by the physics setup in main.cpp.
+// Axis-aligned collision box for the app's physics setup. Note that convex
+// box shapes usually carry a convex radius (Jolt's default is 0.05) and the
+// backend will reject a box whose smallest half-extent falls below it — clamp
+// thin colliders before handing them over.
 struct CollisionBox {
     glm::vec3 center;
     glm::vec3 halfExtents;

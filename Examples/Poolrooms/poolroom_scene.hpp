@@ -441,8 +441,10 @@ inline PoolroomScene buildPoolroomScene() {
         for (float sx : { cx - gap * 0.5f, cx + gap * 0.5f }) {
             handrailBow(glm::vec3(sx, 0.0f, poolEdgeZ + dirOut * 0.38f), dirIn,
                         0.78f, 0.82f, S.waterLevel - 0.85f);
+            // Post collider around the rail's vertical run. Kept at/above the
+            // physics convex radius (0.05) — Jolt rejects thinner boxes.
             S.colliders.push_back({ glm::vec3(sx, 0.4f, poolEdgeZ + dirOut * 0.38f),
-                                    glm::vec3(0.04f, 0.42f, 0.04f) });
+                                    glm::vec3(0.06f, 0.42f, 0.06f) });
         }
         const glm::vec3 zoneMin(cx - 0.55f, poolFloorY, poolEdgeZ - 0.6f);
         const glm::vec3 zoneMax(cx + 0.55f, 0.95f, poolEdgeZ + 0.6f);
