@@ -1,16 +1,17 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// RHI water surface — MSL twin of Water.vert / Water.frag. See those files for
-// the design notes; the algorithm and the WaterData layout are identical (the
-// CPU struct in graphics_effects.hpp is the single source of truth).
+// RHI water surface — MSL twin of Water.vert / Water.frag. See those files
+// for the design notes; the algorithm and the WaterData layout are identical
+// (the CPU struct in graphics_effects.hpp is the single source of truth).
 //
 // Bindings through the RHI:
 //   vertex:   buffer(0) = CameraRenderData, buffer(1) = WaterData,
-//             buffer(2) = WaterVertexData[] (pulled by vertex_id)
+//             buffer(2) = WaterVertexData[] (pulled by vertex_id),
+//             buffer(3) = FFT displacement float4[] (manual bilinear)
 //   fragment: buffer(0) = WaterData, buffer(1) = CameraRenderData,
-//             texture(0..7) = normal1, normal2, sceneColor snapshot,
-//             sceneDepth, sceneNormal, envCube, foam, noise; sampler(0..7).
+//             texture(0..8) = simNormalFoam, detail1, detail2, sceneColor,
+//             sceneDepth, envCube, reflectionMap, foam, noise
 
 struct CameraDataRHI {
     float4x4 proj;
@@ -22,11 +23,10 @@ struct CameraDataRHI {
     float2 _pad;
     float3 position;
     float _pad2;
-    // frustumPlanes follow on the CPU side; unused here.
 };
 
 struct WaveRHI {
-    float3 direction;   // MSL float3 occupies 16 bytes, matching the CPU pad
+    float3 direction;
     float steepness;
     float waveLength;
     float amplitude;
@@ -63,6 +63,9 @@ struct WaterDataRHI {
     float4 causticsParams;
     float4 causticsBoundsMin;
     float4 causticsBoundsMax;
+    float4x4 reflectionViewProj;
+    float4 fftParams;         // x=patch size y=detail tiling z=detail strength w=displacement scale
+    float4 reflectionParams;  // x=planar strength y=distortion z=whitecap scale w=FFT resolution
 };
 
 struct WaterVertexRHI {
@@ -73,66 +76,36 @@ struct WaterVertexRHI {
 
 struct WaterVSOut {
     float4 position [[position]];
-    float3 normalView;
-    float3 tangentView;
-    float3 binormalView;
     float4 positionView;
-    float4 texCoord0;
+    float4 texCoord0;        // xy: patch UV, zw: grid UV
     float4 screenPosition;
-    float4 positionWorld;
-    float4 worldNormalAndHeight;
+    float4 positionWorld;    // w: edge dampening
+    float4 dispSample;
 };
 
-struct WaveResultRHI {
-    float3 position;
-    float3 normal;
-    float3 binormal;
-    float3 tangent;
-};
-
-static WaveResultRHI calculateWaveRHI(WaveRHI wave, float3 wavePosition, float edgeDampen, float time, uint numWaves) {
-    WaveResultRHI result;
-
-    float frequency = 2.0 / wave.waveLength;
-    float phaseConstant = wave.speed * frequency;
-    float qi = wave.steepness / (wave.amplitude * frequency * float(numWaves));
-    float rad = frequency * dot(float3(wave.direction).xz, wavePosition.xz) + time * phaseConstant;
-    float sinR = sin(rad);
-    float cosR = cos(rad);
-
-    result.position.x = wavePosition.x + qi * wave.amplitude * wave.direction.x * cosR * edgeDampen;
-    result.position.z = wavePosition.z + qi * wave.amplitude * wave.direction.z * cosR * edgeDampen;
-    result.position.y = wave.amplitude * sinR * edgeDampen;
-
-    float waFactor = frequency * wave.amplitude;
-    float radN = frequency * dot(float3(wave.direction), result.position) + time * phaseConstant;
-    float sinN = sin(radN);
-    float cosN = cos(radN);
-
-    result.binormal.x = 1.0 - (qi * wave.direction.x * wave.direction.x * waFactor * sinN);
-    result.binormal.z = -1.0 * (qi * wave.direction.x * wave.direction.z * waFactor * sinN);
-    result.binormal.y = wave.direction.x * waFactor * cosN;
-
-    result.tangent.x = -1.0 * (qi * wave.direction.x * wave.direction.z * waFactor * sinN);
-    result.tangent.z = 1.0 - (qi * wave.direction.z * wave.direction.z * waFactor * sinN);
-    result.tangent.y = wave.direction.z * waFactor * cosN;
-
-    result.normal.x = -1.0 * (wave.direction.x * waFactor * cosN);
-    result.normal.z = -1.0 * (wave.direction.z * waFactor * cosN);
-    result.normal.y = 1.0 - (qi * waFactor * sinN);
-
-    result.binormal = normalize(result.binormal);
-    result.tangent = normalize(result.tangent);
-    result.normal = normalize(result.normal);
-
-    return result;
+static float3 waterSampleDisplacement(float2 patchUV, uint n, device const float4* dispBuf) {
+    if (n == 0u) return float3(0.0);
+    float2 f = fract(patchUV) * float(n) - 0.5;
+    float2 fl = floor(f);
+    float2 fr = f - fl;
+    int2 i0 = int2(fl);
+    uint x0 = uint((i0.x % int(n) + int(n)) % int(n));
+    uint y0 = uint((i0.y % int(n) + int(n)) % int(n));
+    uint x1 = (x0 + 1u) % n;
+    uint y1 = (y0 + 1u) % n;
+    float3 d00 = dispBuf[y0 * n + x0].xyz;
+    float3 d10 = dispBuf[y0 * n + x1].xyz;
+    float3 d01 = dispBuf[y1 * n + x0].xyz;
+    float3 d11 = dispBuf[y1 * n + x1].xyz;
+    return mix(mix(d00, d10, fr.x), mix(d01, d11, fr.x), fr.y);
 }
 
 vertex WaterVSOut vertexMain(
     uint vertexID [[vertex_id]],
     constant CameraDataRHI& camera [[buffer(0)]],
     constant WaterDataRHI& water [[buffer(1)]],
-    device const WaterVertexRHI* vertices [[buffer(2)]]
+    device const WaterVertexRHI* vertices [[buffer(2)]],
+    device const float4* dispBuf [[buffer(3)]]
 ) {
     WaterVSOut out;
 
@@ -142,53 +115,18 @@ vertex WaterVSOut vertexMain(
     float dampening = 1.0 - pow(saturate(abs(texCoord0.z - 0.5) / 0.5), water.dampeningFactor);
     dampening *= 1.0 - pow(saturate(abs(texCoord0.w - 0.5) / 0.5), water.dampeningFactor);
 
-    WaveResultRHI finalWave;
-    finalWave.position = float3(0.0);
-    finalWave.normal = float3(0.0);
-    finalWave.tangent = float3(0.0);
-    finalWave.binormal = float3(0.0);
+    float4 baseWorld = water.modelMatrix * position;
+    float2 patchUV = baseWorld.xz / max(water.fftParams.x, 1e-3);
 
-    uint numWaves = min(water.waveCount, 4u);
-    for (uint waveId = 0u; waveId < numWaves; ++waveId) {
-        WaveResultRHI w = calculateWaveRHI(water.waves[waveId], position.xyz, dampening, water.time, numWaves);
-        finalWave.position += w.position;
-        finalWave.normal += w.normal;
-        finalWave.tangent += w.tangent;
-        finalWave.binormal += w.binormal;
-    }
+    uint n = uint(water.reflectionParams.w + 0.5);
+    float3 d = waterSampleDisplacement(patchUV, n, dispBuf) * (dampening * water.fftParams.w);
 
-    if (numWaves > 0u) {
-        finalWave.position -= position.xyz * float(numWaves - 1u);
-        finalWave.normal = normalize(finalWave.normal);
-        finalWave.tangent = normalize(finalWave.tangent);
-        finalWave.binormal = normalize(finalWave.binormal);
-    } else {
-        finalWave.position = position.xyz;
-        finalWave.normal = float3(0.0, 1.0, 0.0);
-        finalWave.tangent = float3(1.0, 0.0, 0.0);
-        finalWave.binormal = float3(0.0, 0.0, 1.0);
-    }
-
-    out.worldNormalAndHeight.w = finalWave.position.y - position.y;
-
-    position = float4(finalWave.position, 1.0);
-    out.positionWorld = water.modelMatrix * position;
-    out.positionView = camera.view * out.positionWorld;
+    out.positionWorld = float4(baseWorld.xyz + d, dampening);
+    out.positionView = camera.view * float4(out.positionWorld.xyz, 1.0);
     out.position = camera.proj * out.positionView;
     out.screenPosition = out.position;
-
-    float3x3 normalMatrix = float3x3(
-        water.modelMatrix[0].xyz,
-        water.modelMatrix[1].xyz,
-        water.modelMatrix[2].xyz
-    );
-
-    out.worldNormalAndHeight.xyz = normalize(normalMatrix * finalWave.normal);
-    out.normalView = normalize((camera.view * float4(out.worldNormalAndHeight.xyz, 0.0)).xyz);
-    out.tangentView = normalize((camera.view * float4(normalMatrix * finalWave.tangent, 0.0)).xyz);
-    out.binormalView = normalize((camera.view * float4(normalMatrix * finalWave.binormal, 0.0)).xyz);
-
-    out.texCoord0 = texCoord0;
+    out.texCoord0 = float4(patchUV, texCoord0.zw);
+    out.dispSample = float4(d, 0.0);
 
     return out;
 }
@@ -204,15 +142,9 @@ static float waterNDGGX(float linearRoughness, float nDotH) {
     return a2 / (WATER_PI * d * d);
 }
 
-static float3 waterFresnel(float lDotH, float3 f0) {
-    return f0 + (1.0 - f0) * pow(1.0 - lDotH, 5.0);
-}
-
 static float waterSmithGGX(float linearRoughness, float nDotL, float nDotV) {
     float k = linearRoughness * 0.5;
-    float ggxL = nDotL / (nDotL * (1.0 - k) + k);
-    float ggxV = nDotV / (nDotV * (1.0 - k) + k);
-    return ggxL * ggxV;
+    return (nDotL / (nDotL * (1.0 - k) + k)) * (nDotV / (nDotV * (1.0 - k) + k));
 }
 
 static float2 waterClipToScreenUV(float4 clipPos) {
@@ -227,196 +159,105 @@ static float3 waterWorldPosFromDepth(float2 uv, float depth, constant CameraData
     return (camera.invView * float4(viewPos.xyz, 1.0)).xyz;
 }
 
-static float3 waterViewPosFromDepth(float2 uv, float depth, constant CameraDataRHI& camera) {
-    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
-    float4 viewPos = camera.invProj * float4(ndc, depth, 1.0);
-    return viewPos.xyz / viewPos.w;
-}
-
 fragment float4 fragmentMain(
     WaterVSOut in [[stage_in]],
     constant WaterDataRHI& water [[buffer(0)]],
     constant CameraDataRHI& camera [[buffer(1)]],
-    texture2d<float, access::sample> waterNormalMap1 [[texture(0)]],
-    texture2d<float, access::sample> waterNormalMap2 [[texture(1)]],
-    texture2d<float, access::sample> sceneColor [[texture(2)]],
-    texture2d<float, access::sample> sceneDepth [[texture(3)]],
-    texture2d<float, access::sample> sceneNormal [[texture(4)]],
+    texture2d<float, access::sample> simNormalFoam [[texture(0)]],
+    texture2d<float, access::sample> detailNormal1 [[texture(1)]],
+    texture2d<float, access::sample> detailNormal2 [[texture(2)]],
+    texture2d<float, access::sample> sceneColor [[texture(3)]],
+    texture2d<float, access::sample> sceneDepth [[texture(4)]],
     texturecube<float, access::sample> envMap [[texture(5)]],
-    texture2d<float, access::sample> foamMap [[texture(6)]],
-    texture2d<float, access::sample> noiseMap [[texture(7)]]
+    texture2d<float, access::sample> reflectionMap [[texture(6)]],
+    texture2d<float, access::sample> foamMap [[texture(7)]],
+    texture2d<float, access::sample> noiseMap [[texture(8)]]
 ) {
     constexpr sampler linearWrapSampler(address::repeat, filter::linear, mip_filter::linear);
     constexpr sampler pointClampSampler(address::clamp_to_edge, filter::nearest);
     constexpr sampler linearClampSampler(address::clamp_to_edge, filter::linear, mip_filter::linear);
 
-    float3 normal = normalize(in.normalView);
-    float3 tangent = normalize(in.tangentView);
-    float3 binormal = normalize(in.binormalView);
+    float dampening = saturate(in.positionWorld.w);
+    float2 patchUV = in.texCoord0.xy;
 
-    float2 normalMapCoords1 = in.texCoord0.xy + water.time * water.normalMapScroll.xy * water.normalMapScrollSpeed.x;
-    float2 normalMapCoords2 = in.texCoord0.xy + water.time * water.normalMapScroll.zw * water.normalMapScrollSpeed.y;
+    // ── Surface normal: FFT sim + scrolling detail layers ───────────────────
+    float4 simSample = simNormalFoam.sample(linearWrapSampler, patchUV);
+    float3 N = normalize(simSample.xyz);
+    N = normalize(mix(float3(0.0, 1.0, 0.0), N, dampening));
 
+    float2 det1UV = patchUV * water.fftParams.y + water.time * water.normalMapScroll.xy * water.normalMapScrollSpeed.x;
+    float2 det2UV = patchUV * water.fftParams.y + water.time * water.normalMapScroll.zw * water.normalMapScrollSpeed.y;
+    float3 dn1 = detailNormal1.sample(linearWrapSampler, det1UV).rgb * 2.0 - 1.0;
+    float3 dn2 = detailNormal2.sample(linearWrapSampler, det2UV).rgb * 2.0 - 1.0;
+    float2 detXZ = (dn1.xy + dn2.xy) * (0.5 * water.fftParams.z * dampening);
+    N = normalize(float3(N.x + detXZ.x, N.y, N.z + detXZ.y));
+
+    float3 viewDirWorld = normalize(camera.position - in.positionWorld.xyz);
     float2 hdrCoords = waterClipToScreenUV(in.screenPosition);
 
-    float3 normalMap1 = waterNormalMap1.sample(linearWrapSampler, normalMapCoords1).rgb * 2.0 - 1.0;
-    float3 normalMap2 = waterNormalMap2.sample(linearWrapSampler, normalMapCoords2).rgb * 2.0 - 1.0;
-    float3x3 texSpace = float3x3(tangent, binormal, normal);
-    float3 finalNormal = normalize(texSpace * normalMap1);
-    finalNormal += normalize(texSpace * normalMap2);
-    finalNormal = normalize(finalNormal);
+    // ── Fresnel ─────────────────────────────────────────────────────────────
+    float f0 = 0.16 * water.reflectance * water.reflectance;
+    float nDotVWorld = saturate(dot(N, viewDirWorld));
+    float fresnel = f0 + (1.0 - f0) * pow(1.0 - nDotVWorld, 5.0);
 
-    // ── Sun specular (GGX + sparkle noise) ──────────────────────────────────
-    float linearRoughness = water.roughness * water.roughness;
-    float3 viewDir = -normalize(in.positionView.xyz);
-    float3 lightDir = -normalize((camera.view * float4(water.sunDirection.xyz, 0.0)).xyz);
-    float3 halfVec = normalize(viewDir + lightDir);
-    float nDotL = saturate(dot(finalNormal, lightDir));
-    float nDotV = abs(dot(finalNormal, viewDir)) + WATER_EPSILON;
-    float nDotH = saturate(dot(finalNormal, halfVec));
-    float lDotH = saturate(dot(lightDir, halfVec));
-
-    float3 f0 = float3(0.16 * water.reflectance * water.reflectance);
-    float normalDistribution = waterNDGGX(linearRoughness, nDotH);
-    float3 fresnelReflectance = waterFresnel(lDotH, f0);
-    float geometryTerm = waterSmithGGX(linearRoughness, nDotL, nDotV);
-
-    float specularNoise = noiseMap.sample(linearWrapSampler, normalMapCoords1 * 0.5).r;
-    specularNoise *= noiseMap.sample(linearWrapSampler, normalMapCoords2 * 0.5).r;
-    specularNoise *= noiseMap.sample(linearWrapSampler, in.texCoord0.xy * 0.5).r;
-
-    float3 specularFactor = (geometryTerm * normalDistribution) * fresnelReflectance
-                          * water.specIntensity * nDotL * specularNoise;
-
-    // ── Screen-space reflections ────────────────────────────────────────────
-    float3 reflectionVector = normalize(reflect(-viewDir, finalNormal));
-    bool ssrEnabled = water.ssrSettings.y > 0.0;
-
-    float3 rayMarchPosition = in.positionView.xyz;
-    float2 hitUV = float2(0.0);
-    float stepCount = 0.0;
-    float forwardStepCount = water.ssrSettings.y;
-    float3 finalSceneViewPos = float3(0.0);
-    bool foundHit = false;
-
-    if (ssrEnabled) {
-        while (stepCount < water.ssrSettings.y) {
-            rayMarchPosition += reflectionVector * water.ssrSettings.x;
-
-            float4 rayClip = camera.proj * float4(rayMarchPosition, 1.0);
-            if (abs(rayClip.w) < WATER_EPSILON) rayClip.w = WATER_EPSILON;
-
-            if (abs(rayClip.x) > rayClip.w || abs(rayClip.y) > rayClip.w || rayClip.z > rayClip.w) {
-                stepCount += 1.0;
-                continue;
-            }
-
-            float2 rayUV = waterClipToScreenUV(rayClip);
-            if (rayUV.x < 0.0 || rayUV.x > 1.0 || rayUV.y < 0.0 || rayUV.y > 1.0) {
-                stepCount += 1.0;
-                continue;
-            }
-
-            float sceneZ = sceneDepth.sample(pointClampSampler, rayUV).r;
-            float3 sceneViewPos = waterViewPosFromDepth(rayUV, sceneZ, camera);
-
-            if (sceneViewPos.z >= rayMarchPosition.z) {
-                forwardStepCount = stepCount;
-                finalSceneViewPos = sceneViewPos;
-                hitUV = rayUV;
-                foundHit = true;
-                break;
-            }
-            stepCount += 1.0;
-        }
-
-        if (foundHit && forwardStepCount < water.ssrSettings.y) {
-            float refineStep = 0.0;
-            while (refineStep < water.ssrSettings.z) {
-                rayMarchPosition -= reflectionVector * water.ssrSettings.x / water.ssrSettings.z;
-                float4 rayClip = camera.proj * float4(rayMarchPosition, 1.0);
-                if (abs(rayClip.w) < WATER_EPSILON) rayClip.w = WATER_EPSILON;
-                float2 rayUV = clamp(waterClipToScreenUV(rayClip), float2(0.0), float2(1.0));
-
-                float sceneZ = sceneDepth.sample(pointClampSampler, rayUV).r;
-                float3 sceneViewPos = waterViewPosFromDepth(rayUV, sceneZ, camera);
-
-                if (sceneViewPos.z < rayMarchPosition.z) {
-                    break;
-                }
-                hitUV = rayUV;
-                finalSceneViewPos = sceneViewPos;
-                refineStep += 1.0;
-            }
-        }
-    }
-
-    float ssrFactor = 0.0;
-    if (ssrEnabled && foundHit) {
-        float3 ssrReflectionNormal = normalize(sceneNormal.sample(pointClampSampler, hitUV).xyz);
-        float3 ssrReflectionNormalView = normalize((camera.view * float4(ssrReflectionNormal, 0.0)).xyz);
-        float2 ssrDistanceFactor = float2(abs(0.5 - hdrCoords.x), abs(0.5 - hdrCoords.y)) * 2.0;
-
-        float hitDistanceFactor = (forwardStepCount < water.ssrSettings.y)
-            ? (1.0 - forwardStepCount / water.ssrSettings.y) : 0.0;
-        float depthFactor = 1.0 / (1.0 + abs(finalSceneViewPos.z - rayMarchPosition.z) * water.ssrSettings.w);
-        float normalFactor = 1.0 - saturate(dot(ssrReflectionNormalView, finalNormal));
-
-        ssrFactor = (1.0 - abs(nDotV))
-                  * hitDistanceFactor
-                  * saturate(1.0 - ssrDistanceFactor.x - ssrDistanceFactor.y)
-                  * depthFactor
-                  * normalFactor;
-    }
-
-    float3 ssrColor = (foundHit && ssrFactor > 0.001)
-        ? sceneColor.sample(pointClampSampler, hitUV).rgb : float3(0.0);
-
-    // Environment fallback: the IBL prefiltered cubemap (split-sum LOD).
-    float3 envReflectionDir = (camera.invView * float4(reflectionVector, 0.0)).xyz;
-    float3 envColor = envMap.sample(linearClampSampler, envReflectionDir, level(water.roughness * 4.0)).rgb
+    // ── Reflection: planar RT with normal distortion, env cube fallback ─────
+    float3 envDir = reflect(-viewDirWorld, N);
+    float3 envColor = envMap.sample(linearClampSampler, envDir, level(water.roughness * 4.0)).rgb
                     * water.causticsBoundsMax.w;
 
-    float3 reflectionColor = mix(envColor, ssrColor, saturate(ssrFactor)) * water.surfaceColor.rgb;
+    float3 reflectionColor = envColor;
+    if (water.reflectionParams.x > 0.0) {
+        float4 rclip = water.reflectionViewProj * float4(in.positionWorld.xyz, 1.0);
+        if (rclip.w > WATER_EPSILON) {
+            float2 ruv = waterClipToScreenUV(rclip) + N.xz * water.reflectionParams.y;
+            float2 border = min(ruv, 1.0 - ruv);
+            float inRT = saturate(min(border.x, border.y) * 12.0);
+            float3 planar = reflectionMap.sample(linearClampSampler,
+                                                 clamp(ruv, float2(0.001), float2(0.999))).rgb;
+            reflectionColor = mix(envColor, planar, inRT * water.reflectionParams.x);
+        }
+    }
+    reflectionColor *= water.surfaceColor.rgb;
 
-    // ── Refraction ──────────────────────────────────────────────────────────
-    float2 distortedTexCoord = hdrCoords + ((finalNormal.xz + finalNormal.xy) * 0.5) * water.refractionDistortionFactor;
-    float distortedDepth = sceneDepth.sample(pointClampSampler, distortedTexCoord).r;
-    float3 distortedPosition = waterWorldPosFromDepth(distortedTexCoord, distortedDepth, camera);
+    // ── Refraction: scene snapshot with depth-based absorption ──────────────
+    float2 distortedUV = hdrCoords + N.xz * water.refractionDistortionFactor;
+    float distortedDepth = sceneDepth.sample(pointClampSampler, distortedUV).r;
+    float3 distortedPos = waterWorldPosFromDepth(distortedUV, distortedDepth, camera);
+    float2 refractionUV = (distortedPos.y < in.positionWorld.y) ? distortedUV : hdrCoords;
+    float3 refractionColor = sceneColor.sample(linearClampSampler, refractionUV).rgb * water.refractionColor.rgb;
 
-    float2 refractionTexCoord = (distortedPosition.y < in.positionWorld.y) ? distortedTexCoord : hdrCoords;
-    float3 waterColor = sceneColor.sample(linearClampSampler, refractionTexCoord).rgb * water.refractionColor.rgb;
+    float sceneDepthHere = sceneDepth.sample(pointClampSampler, hdrCoords).r;
+    float3 scenePos = waterWorldPosFromDepth(hdrCoords, sceneDepthHere, camera);
+    float depthSoftenedAlpha = saturate(length(scenePos - in.positionWorld.xyz) / water.depthSofteningDistance);
 
-    float sceneDepthSample = sceneDepth.sample(pointClampSampler, hdrCoords).r;
-    float3 scenePosition = waterWorldPosFromDepth(hdrCoords, sceneDepthSample, camera);
+    float3 refractedFloorPos = (distortedPos.y < in.positionWorld.y) ? distortedPos : scenePos;
+    refractionColor = mix(refractionColor, water.refractionColor.rgb,
+                          saturate((in.positionWorld.y - refractedFloorPos.y) / water.refractionHeightFactor));
 
-    float depthSoftenedAlpha = saturate(length(scenePosition - in.positionWorld.xyz) / water.depthSofteningDistance);
-
-    float3 waterSurfacePosition = (distortedPosition.y < in.positionWorld.y) ? distortedPosition : scenePosition;
-    waterColor = mix(waterColor, water.refractionColor.rgb,
-                     saturate((in.positionWorld.y - waterSurfacePosition.y) / water.refractionHeightFactor));
+    // ── Sun specular (GGX) ──────────────────────────────────────────────────
+    float3 lightDirWorld = -normalize(water.sunDirection.xyz);
+    float3 halfVec = normalize(viewDirWorld + lightDirWorld);
+    float nDotL = saturate(dot(N, lightDirWorld));
+    float nDotV = abs(dot(N, viewDirWorld)) + WATER_EPSILON;
+    float nDotH = saturate(dot(N, halfVec));
+    float linearRoughness = max(water.roughness * water.roughness, 1e-4);
+    float specularNoise = noiseMap.sample(linearWrapSampler, det1UV * 0.5).r
+                        * noiseMap.sample(linearWrapSampler, det2UV * 0.5).r;
+    float3 specular = float3(waterNDGGX(linearRoughness, nDotH) * waterSmithGGX(linearRoughness, nDotL, nDotV))
+                    * fresnel * water.specIntensity * nDotL * (0.5 + specularNoise)
+                    * water.sunColorIntensity.rgb * water.sunColorIntensity.w;
 
     // ── Combine ─────────────────────────────────────────────────────────────
-    float3 geometricNormal = normalize(in.normalView);
-    float waveTopReflectionFactor = pow(1.0 - saturate(dot(geometricNormal, viewDir)), 3.0);
-    float reflectionBlend = saturate(saturate(length(in.positionView.xyz) / water.refractionDistanceFactor)
-                                     + waveTopReflectionFactor);
-    float3 waterBaseColor = mix(waterColor, reflectionColor, reflectionBlend);
+    float3 color = mix(refractionColor, reflectionColor, saturate(fresnel)) + specular;
 
-    float3 finalWaterColor = waterBaseColor
-                           + specularFactor * water.sunColorIntensity.rgb * water.sunColorIntensity.w;
+    // ── Foam: whitecaps (displacement Jacobian) + shoreline ─────────────────
+    float whitecap = simSample.a * water.reflectionParams.z;
+    float shore = pow(1.0 - depthSoftenedAlpha, 3.0);
+    float foamAmount = saturate(whitecap + shore)
+                     * noiseMap.sample(linearWrapSampler, patchUV * water.foamTiling).r;
+    float3 foamColor = foamMap.sample(linearWrapSampler, patchUV * water.foamTiling + N.xz * 0.1).rgb
+                     * water.foamBrightness;
+    color = mix(color, foamColor, saturate(foamAmount) * depthSoftenedAlpha);
 
-    // ── Foam ────────────────────────────────────────────────────────────────
-    float3 foamColor = foamMap.sample(linearWrapSampler, (normalMapCoords1 + normalMapCoords2) * water.foamTiling).rgb;
-    float foamNoise = noiseMap.sample(linearWrapSampler, in.texCoord0.xy * water.foamTiling).r;
-
-    float foamAmount = saturate((in.worldNormalAndHeight.w - water.foamHeightStart) / water.foamFadeDistance);
-    foamAmount *= pow(saturate(dot(in.worldNormalAndHeight.xyz, float3(0.0, 1.0, 0.0))), water.foamAngleExponent);
-    foamAmount *= foamNoise;
-    foamAmount += pow(1.0 - depthSoftenedAlpha, 3.0);
-
-    finalWaterColor = mix(finalWaterColor, foamColor * water.foamBrightness,
-                          saturate(foamAmount) * depthSoftenedAlpha);
-
-    return float4(finalWaterColor, depthSoftenedAlpha);
+    return float4(color, depthSoftenedAlpha);
 }

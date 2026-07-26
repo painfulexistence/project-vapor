@@ -1,0 +1,107 @@
+#version 450
+// FFT water — initial spectrum h0(k). GLSL twin of the waterSpectrumInit
+// kernel in 3d_water_fft_rhi.metal.
+//
+// Tessendorf-style setup: for every wave vector k on the N x N lattice draw
+// two complex Gaussians and scale by sqrt(S(k)/2), storing h0(k) in RG and
+// conj(h0(-k)) in BA so the evolve kernel needs a single fetch.
+//
+// The spectrum is a directional Phillips-type gravity spectrum with a
+// finite-depth correction and a capillary cutoff — tuned so pool-scale
+// parameters (low wind, small patch) give centimeter ripples instead of an
+// ocean swell.
+//
+// Runs once (and again when spectrum-shaping params change).
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Must match Vapor::WaterSimParams (std430).
+layout(std430, set = 0, binding = 0) readonly buffer SimParams {
+    uint resolution;
+    float patchSize;
+    float windSpeedMps;
+    float windDirRad;
+    float amplitude;
+    float choppiness;
+    float depthMeters;
+    float smallWaveCutoff;
+    float directionalSpread;
+    float gravity;
+    float surfaceTension;
+    float timeScale;
+    float time;
+    uint seed;
+    float _padA;
+    float _padB;
+} sim;
+
+layout(set = 1, binding = 0, rgba32f) uniform image2D h0Tex;
+
+const float PI = 3.14159265359;
+
+// PCG-ish integer hash -> [0,1).
+float hash1(uint x) {
+    x = x * 747796405u + 2891336453u;
+    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+    x = (x >> 22u) ^ x;
+    return float(x) / 4294967296.0;
+}
+
+// Box-Muller: two uniforms -> one standard Gaussian.
+float gaussian(uint id, uint salt) {
+    float u1 = max(hash1(id * 4u + salt + sim.seed * 0x9E3779B9u), 1e-6);
+    float u2 = hash1(id * 4u + salt + 1u + sim.seed * 0x85EBCA6Bu);
+    return sqrt(-2.0 * log(u1)) * cos(2.0 * PI * u2);
+}
+
+// Directional spectrum amplitude sqrt(S(k)/2) for wave vector k.
+float spectrumAmp(vec2 k) {
+    float kLen = length(k);
+    if (kLen < 1e-5) return 0.0;
+
+    float kSq = kLen * kLen;
+    vec2 windDir = vec2(cos(sim.windDirRad), sin(sim.windDirRad));
+
+    // Phillips base: A * exp(-1/(kL)^2) / k^4, L = wind fetch scale.
+    float L = sim.windSpeedMps * sim.windSpeedMps / sim.gravity;
+    float phillips = sim.amplitude * exp(-1.0 / max(kSq * L * L, 1e-8)) / max(kSq * kSq, 1e-8);
+
+    // Directional concentration |cos|^n about the wind, with a small
+    // isotropic floor so cross-waves never die completely.
+    float c = dot(normalize(k), windDir);
+    float dir = mix(0.08, 1.0, pow(abs(c), sim.directionalSpread));
+    // Slight suppression of waves running against the wind.
+    if (c < 0.0) dir *= 0.35;
+
+    // Capillary cutoff: kill wavelengths below smallWaveCutoff.
+    float cutoff = sim.smallWaveCutoff;
+    phillips *= exp(-kSq * cutoff * cutoff);
+
+    // Finite depth reduces long-wave energy (kd << 1).
+    phillips *= tanh(min(kLen * sim.depthMeters, 20.0));
+
+    return sqrt(max(phillips * dir, 0.0) * 0.5);
+}
+
+void main() {
+    uvec2 id = gl_GlobalInvocationID.xy;
+    uint n = sim.resolution;
+    if (id.x >= n || id.y >= n) return;
+
+    // Wave vector for this lattice cell: components in [-N/2, N/2) * 2pi/L.
+    float twoPiOverL = 2.0 * PI / sim.patchSize;
+    vec2 k = vec2(float(int(id.x) - int(n) / 2), float(int(id.y) - int(n) / 2)) * twoPiOverL;
+    // -k lattice index (wraps; the N/2 row/col is its own mirror).
+    uvec2 idNeg = uvec2((n - id.x) % n, (n - id.y) % n);
+
+    uint flatId = id.y * n + id.x;
+    uint flatNeg = idNeg.y * n + idNeg.x;
+
+    // h0(k) = (g1 + i g2)/sqrt(2) * sqrt(S(k)/2) — the same RNG stream keyed
+    // by lattice id everywhere, so h0(-k) computed here equals the value the
+    // -k thread computes for its own h0(k).
+    vec2 h0k = vec2(gaussian(flatId, 0u), gaussian(flatId, 2u)) * spectrumAmp(k);
+    vec2 h0mk = vec2(gaussian(flatNeg, 0u), gaussian(flatNeg, 2u)) * spectrumAmp(-k);
+
+    imageStore(h0Tex, ivec2(id), vec4(h0k, h0mk.x, -h0mk.y));  // BA = conj(h0(-k))
+}

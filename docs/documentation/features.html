@@ -40,7 +40,7 @@
         <tr><td>Volumetric Clouds</td><td>Procedural volumetric cloud rendering.</td></tr>
         <tr><td>Atmosphere Rendering</td><td>Rayleigh + Mie scattering atmosphere model.</td></tr>
         <tr><td>Sun / Lens Flare</td><td>Sun lens flare effect.</td></tr>
-        <tr><td>Water Rendering</td><td>RHI water pass (both backends): Gerstner surface, dual scrolling normal maps, SSR with IBL-cubemap fallback, snapshot refraction, projected caustics, foam. Off by default; opt in via the IRenderer water API (see Examples/Poolrooms). The legacy Metal-native pass remains disabled.</td></tr>
+        <tr><td>Water Rendering</td><td>RHI water stack (both backends): FFT spectral simulation (GPU inverse FFT, finite-depth capillary-gravity dispersion, choppy displacement + Jacobian foam), planar reflections from a mirrored-camera pass with waterline clipping, snapshot refraction, projected caustics, fresnel shading. Off by default; opt in via the IRenderer water API (see Examples/Poolrooms). The legacy Metal-native pass remains disabled.</td></tr>
         <tr><td>2D Batch Rendering</td><td>Screen-space quads, lines, rectangles, circles, triangles — batched.</td></tr>
         <tr><td>3D Batch Rendering</td><td>World-space batch rendering with depth testing.</td></tr>
         <tr><td>Sprite / Texture Quad</td><td>Textured quad rendering with rotation and tint.</td></tr>

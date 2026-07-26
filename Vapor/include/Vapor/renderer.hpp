@@ -357,7 +357,11 @@ public:
                       float texTileX, float texTileZ) override;
     void setWaterTransform(const WaterTransform& transform) override;
     void setWaterSettings(const WaterData& settings) override;
+    // FFT simulation parameters. Spectrum-shaping changes trigger a rebake on
+    // the next frame; resolution is pinned to 256 (the FFT kernels bake N).
+    void setWaterSimParams(const WaterSimParams& params) override;
     WaterData& getWaterSettings() { return waterSettings; }
+    WaterSimParams& getWaterSimParams() { return waterSimParams; }
     const WaterTransform& getWaterTransform() const { return waterTransform; }
     // Replace the built-in procedural water textures. Null pointers keep the
     // current texture for that slot.
@@ -458,11 +462,14 @@ private:
     void bloomUpsamplePass();
     void skyAtmospherePass();
     void lightScatteringPass();
-    // Water: caustics light submerged geometry (fullscreen, colorRT swap),
-    // then the surface draws over a snapshot of the caustic-lit scene.
+    // Water: the FFT sim computes the surface fields, the mirrored-camera
+    // planar reflection renders, caustics light submerged geometry (fullscreen,
+    // colorRT swap), then the surface draws over a snapshot of that scene.
+    void waterSimPass();
+    void waterReflectionPass();
     void waterCausticsPass();
     void waterPass();
-    void updateWaterDataBuffer();  // per-frame WaterData refresh, shared by both
+    void updateWaterDataBuffer();  // per-frame WaterData refresh, shared by all
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
@@ -856,6 +863,39 @@ private:
     WaterTransform waterTransform;
     bool waterEnabled = false;
     void createWaterDefaultTextures();
+
+    // FFT simulation (WaterSim pass): spectrum + inverse-FFT chain producing
+    // the displacement field (texture + vertex-stage buffer mirror) and the
+    // normal/whitecap map the surface shader consumes.
+    WaterSimParams waterSimParams;
+    bool waterSpectrumDirty = true;
+    BufferHandle waterSimParamsBuffer;
+    BufferHandle waterFFTDirBuffer[2];  // prebaked {0}=rows {1}=cols (no per-frame writes)
+    BufferHandle waterDispBuffer;       // float4[N^2] displacement, read by Water.vert
+    TextureHandle waterH0Tex;
+    TextureHandle waterSpecATex;
+    TextureHandle waterSpecBTex;
+    TextureHandle waterDispTex;
+    TextureHandle waterSimNormalTex;
+    ShaderHandle waterSpectrumInitShader;
+    ShaderHandle waterSpectrumEvolveShader;
+    ShaderHandle waterFFTShader;
+    ShaderHandle waterFFTAssembleShader;
+    ShaderHandle waterFFTNormalsShader;
+    ComputePipelineHandle waterSpectrumInitPipeline;
+    ComputePipelineHandle waterSpectrumEvolvePipeline;
+    ComputePipelineHandle waterFFTPipeline;
+    ComputePipelineHandle waterFFTAssemblePipeline;
+    ComputePipelineHandle waterFFTNormalsPipeline;
+
+    // Planar reflection (WaterReflection pass): the scene re-rendered through
+    // the mirrored camera into a half-res HDR target, sampled projectively by
+    // the surface shader.
+    TextureHandle waterReflColorRT;
+    TextureHandle waterReflDepthRT;
+    ShaderHandle waterReflVertexShader;
+    ShaderHandle waterReflFragmentShader;
+    PipelineHandle waterReflPipeline;
     // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
     // import/parsing lives in a separate PR). One AABB volume per scene; a
     // procedural 64^3 test grid stands in until setVolumeDensity() gets real

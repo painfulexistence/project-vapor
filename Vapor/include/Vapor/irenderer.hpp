@@ -263,6 +263,8 @@ public:
                               float texTileX, float texTileZ) {}
     virtual void setWaterTransform(const WaterTransform& transform) {}
     virtual void setWaterSettings(const WaterData& settings) {}
+    // FFT simulation parameters (spectrum shape, wind, choppiness, depth).
+    virtual void setWaterSimParams(const WaterSimParams& params) {}
     // Replace the built-in procedural water textures (normal x2, foam, noise).
     // Null pointers keep the current texture for that slot.
     virtual void setWaterTextures(const std::shared_ptr<Vapor::Image>& normalMap1,

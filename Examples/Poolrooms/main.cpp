@@ -416,33 +416,42 @@ auto main(int argc, char* args[]) -> int {
         renderer->setWaterTransform(wt);
 
         Vapor::WaterData w{};
-        w.surfaceColor = glm::vec4(0.80f, 0.88f, 0.92f, 1.0f);
+        w.surfaceColor = glm::vec4(0.82f, 0.90f, 0.94f, 1.0f);
         w.refractionColor = glm::vec4(0.42f, 0.68f, 0.72f, 1.0f);
-        w.ssrSettings = glm::vec4(0.09f, 56.0f, 12.0f, 10.0f);
-        w.normalMapScroll = glm::vec4(1.0f, 0.35f, -0.45f, 1.0f);
+        w.normalMapScroll = glm::vec4(1.0f, 0.35f, -0.45f, 1.0f);   // detail-layer scroll
         w.normalMapScrollSpeed = glm::vec2(0.011f, 0.008f);
         w.refractionDistortionFactor = 0.03f;
         w.refractionHeightFactor = 2.2f;
-        w.refractionDistanceFactor = 55.0f;
         w.depthSofteningDistance = 0.30f;
-        w.foamHeightStart = 10.0f;  // pools don't foam
-        w.foamFadeDistance = 0.4f;
         w.foamTiling = 2.0f;
-        w.foamAngleExponent = 80.0f;
         w.roughness = 0.045f;
-        w.reflectance = 0.55f;
-        w.specIntensity = 30.0f;
-        w.foamBrightness = 1.2f;
+        w.reflectance = 0.38f;      // F0 = 0.16*r^2 ~ 0.023 — real water
+        w.specIntensity = 6.0f;
+        w.foamBrightness = 1.1f;
         w.dampeningFactor = 4.0f;
-        w.waveCount = 3;
-        // Calm indoor pool: centimeter ripples, no wind swell.
-        w.waves[0] = { glm::vec3(0.62f, 0.0f, -0.78f), 0.0f, 0.20f, 2.1f, 0.012f, 0.50f };
-        w.waves[1] = { glm::vec3(-0.70f, 0.0f, -0.71f), 0.0f, 0.18f, 1.4f, 0.009f, 0.38f };
-        w.waves[2] = { glm::vec3(0.22f, 0.0f, 0.97f), 0.0f, 0.16f, 0.9f, 0.006f, 0.30f };
         w.causticsParams = glm::vec4(1.15f, 1.7f, 0.6f, world.waterLevel);
         w.causticsBoundsMin = glm::vec4(world.poolMinXZ.x, world.poolFloorY, world.poolMinXZ.y, 9.0f);
         w.causticsBoundsMax = glm::vec4(world.poolMaxXZ.x, world.waterLevel, world.poolMaxXZ.y, 1.0f);
+        // FFT patch spans the pool once along X so the tiling never shows;
+        // detail normals add close-up sparkle on top of the sim's normals.
+        w.fftParams = glm::vec4(16.0f, 6.0f, 0.30f, 1.0f);
+        // Planar reflection nearly full-on with a ripple-driven distortion.
+        w.reflectionParams = glm::vec4(0.85f, 0.05f, 0.5f, 256.0f);
         renderer->setWaterSettings(w);
+
+        // Spectral sim tuned for an indoor pool: light air movement, finite
+        // 2 m depth, capillary-friendly cutoff, broad directional spread (a
+        // pool sloshes every way; there is no fetch-aligned swell).
+        Vapor::WaterSimParams sp{};
+        sp.patchSize = 16.0f;
+        sp.windSpeedMps = 1.7f;
+        sp.windDirRad = 0.9f;
+        sp.amplitude = 0.65f;
+        sp.choppiness = 1.05f;
+        sp.depthMeters = 2.0f;
+        sp.smallWaveCutoff = 0.012f;
+        sp.directionalSpread = 2.5f;
+        renderer->setWaterSimParams(sp);
         renderer->setWaterEnabled(true);
     }
 

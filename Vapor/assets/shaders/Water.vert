@@ -1,10 +1,12 @@
 #version 450
 // RHI water surface — vertex stage. GLSL twin of 3d_water_rhi.metal.
 //
-// Gerstner wave sum (GPU Gems ch.1 form, same math as the legacy
-// 3d_water.metal) over a dual-UV grid built by MeshBuilder::buildWaterGrid:
-// uv0 tiles the normal maps, uv1 spans the whole grid 0..1 and drives edge
-// dampening so the surface lies flat where it meets the pool walls.
+// Displaces the pool grid by the FFT simulation output (WaterFFT* kernels):
+// the assemble kernel mirrors the displacement field into a storage buffer,
+// and this stage does a manual bilinear fetch from it (a plain SSBO read
+// works identically on both backends; the RHI has no vertex-stage texture
+// binding on Metal). uv1 spans the whole grid 0..1 and drives edge dampening
+// so the surface stays glued to the pool walls.
 //
 // Vertices are pulled from a storage buffer (no vertex attributes): the CPU
 // WaterVertexData is 7 tightly packed floats and std430 would pad a vec3
@@ -23,8 +25,7 @@ layout(std430, set = 0, binding = 0) readonly buffer CameraData {
 
 struct Wave {
     vec3 direction;
-    float _wpad;   // std430 packs the next float into a vec3's tail; the CPU
-                   // WaveData has an explicit pad here, so mirror it
+    float _wpad;
     float steepness;
     float waveLength;
     float amplitude;
@@ -32,6 +33,7 @@ struct Wave {
 };
 
 // Full CPU WaterData layout (graphics_effects.hpp) — keep in exact sync.
+// The waves[] block is legacy-only; the RHI path displaces from the FFT.
 layout(std430, set = 0, binding = 1) readonly buffer WaterBuf {
     mat4 modelMatrix;
     vec4 surfaceColor;
@@ -62,6 +64,9 @@ layout(std430, set = 0, binding = 1) readonly buffer WaterBuf {
     vec4 causticsParams;
     vec4 causticsBoundsMin;
     vec4 causticsBoundsMax;
+    mat4 reflectionViewProj;
+    vec4 fftParams;         // x=patch size y=detail tiling z=detail strength w=displacement scale
+    vec4 reflectionParams;  // x=planar strength y=distortion z=whitecap scale w=FFT resolution
 } water;
 
 // WaterVertexData: position.xyz, uv0.xy, uv1.xy — 7 floats, tightly packed.
@@ -69,58 +74,34 @@ layout(std430, set = 0, binding = 2) readonly buffer WaterVerts {
     float verts[];
 };
 
-layout(location = 0) out vec3 vNormalView;
-layout(location = 1) out vec3 vTangentView;
-layout(location = 2) out vec3 vBinormalView;
-layout(location = 3) out vec4 vPositionView;
-layout(location = 4) out vec4 vTexCoord0;      // xy: tiled UV, zw: grid UV
-layout(location = 5) out vec4 vScreenPosition;
-layout(location = 6) out vec4 vPositionWorld;
-layout(location = 7) out vec4 vWorldNormalAndHeight;
-
-struct WaveResult {
-    vec3 position;
-    vec3 normal;
-    vec3 binormal;
-    vec3 tangent;
+// FFT displacement field (dx, height, dz, 0) per lattice cell.
+layout(std430, set = 0, binding = 3) readonly buffer WaterDispBuf {
+    vec4 disp[];
 };
 
-WaveResult calculateWave(Wave wave, vec3 wavePosition, float edgeDampen, float time, uint numWaves) {
-    WaveResult result;
+layout(location = 0) out vec4 vPositionView;
+layout(location = 1) out vec4 vTexCoord0;      // xy: patch UV, zw: grid UV
+layout(location = 2) out vec4 vScreenPosition;
+layout(location = 3) out vec4 vPositionWorld;  // w: edge dampening
+layout(location = 4) out vec4 vDispSample;     // xyz: sampled displacement
 
-    float frequency = 2.0 / wave.waveLength;
-    float phaseConstant = wave.speed * frequency;
-    float qi = wave.steepness / (wave.amplitude * frequency * float(numWaves));
-    float rad = frequency * dot(wave.direction.xz, wavePosition.xz) + time * phaseConstant;
-    float sinR = sin(rad);
-    float cosR = cos(rad);
-
-    result.position.x = wavePosition.x + qi * wave.amplitude * wave.direction.x * cosR * edgeDampen;
-    result.position.z = wavePosition.z + qi * wave.amplitude * wave.direction.z * cosR * edgeDampen;
-    result.position.y = wave.amplitude * sinR * edgeDampen;
-
-    float waFactor = frequency * wave.amplitude;
-    float radN = frequency * dot(wave.direction, result.position) + time * phaseConstant;
-    float sinN = sin(radN);
-    float cosN = cos(radN);
-
-    result.binormal.x = 1.0 - (qi * wave.direction.x * wave.direction.x * waFactor * sinN);
-    result.binormal.z = -1.0 * (qi * wave.direction.x * wave.direction.z * waFactor * sinN);
-    result.binormal.y = wave.direction.x * waFactor * cosN;
-
-    result.tangent.x = -1.0 * (qi * wave.direction.x * wave.direction.z * waFactor * sinN);
-    result.tangent.z = 1.0 - (qi * wave.direction.z * wave.direction.z * waFactor * sinN);
-    result.tangent.y = wave.direction.z * waFactor * cosN;
-
-    result.normal.x = -1.0 * (wave.direction.x * waFactor * cosN);
-    result.normal.z = -1.0 * (wave.direction.z * waFactor * cosN);
-    result.normal.y = 1.0 - (qi * waFactor * sinN);
-
-    result.binormal = normalize(result.binormal);
-    result.tangent = normalize(result.tangent);
-    result.normal = normalize(result.normal);
-
-    return result;
+// Manual bilinear over the wrapped FFT lattice.
+vec3 sampleDisplacement(vec2 patchUV) {
+    uint n = uint(water.reflectionParams.w + 0.5);
+    if (n == 0u) return vec3(0.0);
+    vec2 f = fract(patchUV) * float(n) - 0.5;
+    vec2 fl = floor(f);
+    vec2 fr = f - fl;
+    ivec2 i0 = ivec2(fl);
+    uint x0 = uint((i0.x % int(n) + int(n)) % int(n));
+    uint y0 = uint((i0.y % int(n) + int(n)) % int(n));
+    uint x1 = (x0 + 1u) % n;
+    uint y1 = (y0 + 1u) % n;
+    vec3 d00 = disp[y0 * n + x0].xyz;
+    vec3 d10 = disp[y0 * n + x1].xyz;
+    vec3 d01 = disp[y1 * n + x0].xyz;
+    vec3 d11 = disp[y1 * n + x1].xyz;
+    return mix(mix(d00, d10, fr.x), mix(d01, d11, fr.x), fr.y);
 }
 
 void main() {
@@ -128,50 +109,19 @@ void main() {
     vec4 position = vec4(verts[vid + 0u], verts[vid + 1u], verts[vid + 2u], 1.0);
     vec4 texCoord0 = vec4(verts[vid + 3u], verts[vid + 4u], verts[vid + 5u], verts[vid + 6u]);
 
-    // Edge dampening clamps wave motion where the grid meets its border.
+    // Edge dampening: 1 in the middle of the grid, 0 at the border.
     float dampening = 1.0 - pow(clamp(abs(texCoord0.z - 0.5) / 0.5, 0.0, 1.0), water.dampeningFactor);
     dampening *= 1.0 - pow(clamp(abs(texCoord0.w - 0.5) / 0.5, 0.0, 1.0), water.dampeningFactor);
 
-    WaveResult finalWave;
-    finalWave.position = vec3(0.0);
-    finalWave.normal = vec3(0.0);
-    finalWave.tangent = vec3(0.0);
-    finalWave.binormal = vec3(0.0);
+    vec4 baseWorld = water.modelMatrix * position;
+    vec2 patchUV = baseWorld.xz / max(water.fftParams.x, 1e-3);
 
-    uint numWaves = min(water.waveCount, 4u);
-    for (uint waveId = 0u; waveId < numWaves; ++waveId) {
-        WaveResult w = calculateWave(water.waves[waveId], position.xyz, dampening, water.time, numWaves);
-        finalWave.position += w.position;
-        finalWave.normal += w.normal;
-        finalWave.tangent += w.tangent;
-        finalWave.binormal += w.binormal;
-    }
+    vec3 d = sampleDisplacement(patchUV) * (dampening * water.fftParams.w);
 
-    if (numWaves > 0u) {
-        finalWave.position -= position.xyz * float(numWaves - 1u);
-        finalWave.normal = normalize(finalWave.normal);
-        finalWave.tangent = normalize(finalWave.tangent);
-        finalWave.binormal = normalize(finalWave.binormal);
-    } else {
-        finalWave.position = position.xyz;
-        finalWave.normal = vec3(0.0, 1.0, 0.0);
-        finalWave.tangent = vec3(1.0, 0.0, 0.0);
-        finalWave.binormal = vec3(0.0, 0.0, 1.0);
-    }
-
-    vWorldNormalAndHeight.w = finalWave.position.y - position.y;
-
-    position = vec4(finalWave.position, 1.0);
-    vPositionWorld = water.modelMatrix * position;
-    vPositionView = view * vPositionWorld;
+    vPositionWorld = vec4(baseWorld.xyz + d, dampening);
+    vPositionView = view * vec4(vPositionWorld.xyz, 1.0);
     gl_Position = proj * vPositionView;
     vScreenPosition = gl_Position;
-
-    mat3 normalMatrix = mat3(water.modelMatrix);
-    vWorldNormalAndHeight.xyz = normalize(normalMatrix * finalWave.normal);
-    vNormalView = normalize((view * vec4(vWorldNormalAndHeight.xyz, 0.0)).xyz);
-    vTangentView = normalize((view * vec4(normalMatrix * finalWave.tangent, 0.0)).xyz);
-    vBinormalView = normalize((view * vec4(normalMatrix * finalWave.binormal, 0.0)).xyz);
-
-    vTexCoord0 = texCoord0;
+    vTexCoord0 = vec4(patchUV, texCoord0.zw);
+    vDispSample = vec4(d, 0.0);
 }

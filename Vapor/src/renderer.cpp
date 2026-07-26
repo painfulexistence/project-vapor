@@ -316,6 +316,10 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         waterSettings.causticsBoundsMin = glm::vec4(-50.0f, -10.0f, -50.0f, 8.0f);
         waterSettings.causticsBoundsMax = glm::vec4(50.0f, 0.0f, 50.0f, 1.0f);
 
+        waterSettings.reflectionViewProj = glm::mat4(1.0f);
+        waterSettings.fftParams = glm::vec4(16.0f, 6.0f, 0.35f, 1.0f);
+        waterSettings.reflectionParams = glm::vec4(0.85f, 0.05f, 0.5f, 256.0f);
+
         BufferDesc waterDesc;
         waterDesc.size = sizeof(WaterData);
         waterDesc.usage = BufferUsage::Uniform;
@@ -323,6 +327,49 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
         createFrameSlottedBuffer(waterDataBuffer, waterDesc, &waterSettings, sizeof(waterSettings));
 
         createWaterDefaultTextures();
+
+        // FFT water simulation resources (WaterSim pass). The kernels bake
+        // N = 256 (shared-memory FFT), so every field is sized for it.
+        {
+            BufferDesc simDesc;
+            simDesc.size = sizeof(WaterSimParams);
+            simDesc.usage = BufferUsage::Uniform;
+            simDesc.memoryUsage = MemoryUsage::CPUtoGPU;
+            createFrameSlottedBuffer(waterSimParamsBuffer, simDesc, &waterSimParams, sizeof(waterSimParams));
+
+            // FFT axis selectors: two write-once buffers instead of one buffer
+            // rewritten between the row/column dispatches — host-visible
+            // updates land immediately while the GPU reads later, so a
+            // mid-frame rewrite would race.
+            for (Uint32 dir = 0; dir < 2; ++dir) {
+                BufferDesc dd;
+                dd.size = sizeof(Uint32) * 4;
+                dd.usage = BufferUsage::Uniform;
+                dd.memoryUsage = MemoryUsage::CPUtoGPU;
+                waterFFTDirBuffer[dir] = rhi->createBuffer(dd);
+                const Uint32 v[4] = { dir, 0u, 0u, 0u };
+                rhi->updateBuffer(waterFFTDirBuffer[dir], v, 0, sizeof(v));
+            }
+
+            BufferDesc dispDesc;
+            dispDesc.size = sizeof(glm::vec4) * 256 * 256;
+            dispDesc.usage = BufferUsage::Storage;
+            dispDesc.memoryUsage = MemoryUsage::GPU;
+            waterDispBuffer = rhi->createBuffer(dispDesc);
+
+            TextureDesc td;
+            td.width = 256;
+            td.height = 256;
+            td.format = PixelFormat::RGBA32_FLOAT;
+            td.usage = TextureUsage::Storage;
+            waterH0Tex = rhi->createTexture(td);
+            waterSpecATex = rhi->createTexture(td);
+            waterSpecBTex = rhi->createTexture(td);
+            td.format = PixelFormat::RGBA16_FLOAT;
+            waterDispTex = rhi->createTexture(td);
+            td.usage = TextureUsage::Storage | TextureUsage::Sampled;
+            waterSimNormalTex = rhi->createTexture(td);
+        }
 
         BufferDesc volDesc;
         volDesc.size = sizeof(VolumeRenderData);
@@ -1360,11 +1407,16 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("SkyAtmosphere",
         [](Renderer& r) { r.skyAtmospherePass(); });
 
-    // Water: caustics boost submerged pixels first (colorRT swap), then the
-    // surface draws refraction/SSR from a snapshot of that caustic-lit scene.
-    // After the sky so reflections can include it, before the fogs so haze
-    // sits on top of the surface. Both passes no-op until an app configures
-    // and enables water (see the Water Surface API).
+    // Water: the FFT sim produces this frame's surface fields, the planar
+    // reflection renders the mirrored scene, caustics boost submerged pixels
+    // (colorRT swap), then the surface draws refraction from a snapshot of
+    // that caustic-lit scene and reflections from the mirror. After the sky
+    // so lighting is settled, before the fogs so haze sits on top. All four
+    // passes no-op until an app configures and enables water.
+    renderGraph.addPass("WaterSim",
+        [](Renderer& r) { r.waterSimPass(); }, PassFlags::RequiresCompute);
+    renderGraph.addPass("WaterReflection",
+        [](Renderer& r) { r.waterReflectionPass(); });
     renderGraph.addPass("WaterCaustics",
         [](Renderer& r) { r.waterCausticsPass(); });
     renderGraph.addPass("Water",
@@ -4599,7 +4651,170 @@ void Renderer::updateWaterDataBuffer() {
     waterSettings.sunDirection = glm::vec4(-glm::normalize(atmosphereData.sunDirection), 0.0f);
     waterSettings.sunColorIntensity = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
     waterSettings.causticsParams.w = waterTransform.position.y;
+    // Mirror camera about the water plane y = waterLevel (Householder, world
+    // side: y -> 2*wl - y), pre-multiplied into the view. det(R) = -1 flips
+    // winding — the reflection pipeline culls FRONT faces to compensate. Used
+    // by the reflection pass to render and by the surface shader to sample.
+    {
+        const float wl = waterTransform.position.y;
+        glm::mat4 R(1.0f);
+        R[1][1] = -1.0f;
+        R[3][1] = 2.0f * wl;
+        waterSettings.reflectionViewProj = currentCamera.proj * (currentCamera.view * R);
+    }
+    waterSettings.reflectionParams.w = static_cast<float>(waterSimParams.resolution);
     rhi->updateBuffer(waterDataBuffer, &waterSettings, 0, sizeof(waterSettings));
+}
+
+// FFT water simulation: evolve the spectrum, inverse-FFT it into the
+// displacement field (texture + vertex-stage buffer mirror) and derive the
+// normal/whitecap map. ~7 small compute dispatches over 256^2 per frame; the
+// initial spectrum rebakes only when setWaterSimParams changes its shape.
+void Renderer::waterSimPass() {
+    if (!waterEnabled ||
+        !waterSpectrumInitPipeline.isValid() || !waterSpectrumEvolvePipeline.isValid() ||
+        !waterFFTPipeline.isValid() || !waterFFTAssemblePipeline.isValid() ||
+        !waterFFTNormalsPipeline.isValid() ||
+        !waterH0Tex.isValid() || !waterSpecATex.isValid() || !waterSpecBTex.isValid() ||
+        !waterDispTex.isValid() || !waterSimNormalTex.isValid() ||
+        !waterSimParamsBuffer.isValid() || !waterDispBuffer.isValid()) {
+        return;
+    }
+
+    waterSimParams.time = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+    rhi->updateBuffer(waterSimParamsBuffer, &waterSimParams, 0, sizeof(waterSimParams));
+
+    const Uint32 n = waterSimParams.resolution;  // 256 (the FFT kernel bakes N)
+    const Uint32 groups = (n + 15) / 16;
+
+    rhi->beginComputePass("WaterSim");
+
+    if (waterSpectrumDirty) {
+        rhi->bindComputePipeline(waterSpectrumInitPipeline);
+        rhi->setComputeBuffer(0, waterSimParamsBuffer, 0, sizeof(WaterSimParams));
+        rhi->setComputeTexture(0, waterH0Tex);
+        rhi->dispatch(groups, groups, 1);
+        rhi->computeBarrier();
+        waterSpectrumDirty = false;
+    }
+
+    // h(k,t) + horizontal displacement spectra.
+    rhi->bindComputePipeline(waterSpectrumEvolvePipeline);
+    rhi->setComputeBuffer(0, waterSimParamsBuffer, 0, sizeof(WaterSimParams));
+    rhi->setComputeTexture(0, waterH0Tex);
+    rhi->setComputeTexture(1, waterSpecATex);
+    rhi->setComputeTexture(2, waterSpecBTex);
+    rhi->dispatch(groups, groups, 1);
+    rhi->computeBarrier();
+
+    // Inverse FFT: rows then columns, both packed-spectrum textures, one
+    // workgroup (256 threads) per line, in place in shared memory.
+    rhi->bindComputePipeline(waterFFTPipeline);
+    for (Uint32 dir = 0; dir < 2; ++dir) {
+        rhi->setComputeBuffer(0, waterFFTDirBuffer[dir], 0, sizeof(Uint32) * 4);
+        rhi->setComputeTexture(0, waterSpecATex);
+        rhi->dispatch(n, 1, 1);
+        rhi->setComputeTexture(0, waterSpecBTex);
+        rhi->dispatch(n, 1, 1);
+        rhi->computeBarrier();
+    }
+
+    // Assemble displacement (sign fix + choppiness), mirrored into the SSBO
+    // the vertex stage reads.
+    rhi->bindComputePipeline(waterFFTAssemblePipeline);
+    rhi->setComputeBuffer(0, waterSimParamsBuffer, 0, sizeof(WaterSimParams));
+    rhi->setComputeBuffer(1, waterDispBuffer, 0, sizeof(glm::vec4) * 256 * 256);
+    rhi->setComputeTexture(0, waterSpecATex);
+    rhi->setComputeTexture(1, waterSpecBTex);
+    rhi->setComputeTexture(2, waterDispTex);
+    rhi->dispatch(groups, groups, 1);
+    rhi->computeBarrier();
+
+    // Normals + Jacobian whitecap foam from the finished displacement.
+    rhi->bindComputePipeline(waterFFTNormalsPipeline);
+    rhi->setComputeBuffer(0, waterSimParamsBuffer, 0, sizeof(WaterSimParams));
+    rhi->setComputeTexture(0, waterDispTex);
+    rhi->setComputeTexture(1, waterSimNormalTex);
+    rhi->dispatch(groups, groups, 1);
+
+    rhi->endComputePass();
+    rhi->computeBarrier();  // sim writes -> vertex/fragment reads
+}
+
+// Planar reflection: re-render every drawable through the mirrored camera
+// into a half-res HDR target (simplified shading: albedo x (irradiance + sun
+// lambert)), clipping below the waterline in the fragment stage. The
+// Atmospheric-style architecture — a Householder-mirrored view with flipped
+// culling — is exact for a flat plane, which SSR never is indoors: the
+// ceiling and walls it must reflect are usually off screen.
+void Renderer::waterReflectionPass() {
+    if (!waterEnabled || waterSettings.reflectionParams.x <= 0.0f ||
+        !waterReflPipeline.isValid() ||
+        !waterReflColorRT.isValid() || !waterReflDepthRT.isValid() ||
+        !waterDataBuffer.isValid() || !instanceDataBuffer.isValid() ||
+        !materialUniformBuffer.isValid()) {
+        return;
+    }
+
+    updateWaterDataBuffer();
+
+    RenderPassDesc rp;
+    rp.name = "WaterReflection";
+    rp.colorAttachments.push_back(waterReflColorRT);
+    rp.loadColor.push_back(false);
+    // Sky seen through the skylight wells: a dim zenith tint scaled by the
+    // sun so the clear tracks time of day (a full sky raymarch through a
+    // rippled mirror is not worth a pipeline).
+    rp.clearColors.push_back(glm::vec4(glm::vec3(0.36f, 0.48f, 0.66f) *
+                                       (0.12f * atmosphereData.sunIntensity), 1.0f));
+    rp.depthAttachment = waterReflDepthRT;
+    rp.loadDepth = false;
+    rp.clearDepth = 1.0f;
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(waterReflPipeline);
+
+    // Vulkan reads everything from set0 b0..b2 (any stage); Metal needs the
+    // same buffers bound per stage explicitly.
+    rhi->setVertexBuffer(0, waterDataBuffer, 0, sizeof(WaterData));
+    rhi->setVertexBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+    rhi->setVertexBuffer(2, instanceDataBuffer, 0,
+                         sizeof(Vapor::InstanceData) * std::max<Uint32>(1, totalInstanceCount));
+    rhi->setFragmentBuffer(0, waterDataBuffer, 0, sizeof(WaterData));
+    rhi->setFragmentBuffer(1, materialUniformBuffer, 0, sizeof(Vapor::MaterialData) * MAX_INSTANCES);
+
+    rhi->setTexture(2, 1,
+                    (m_iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex,
+                    clampSampler);
+    // Keep the per-draw albedo slot valid before the first MASK material binds.
+    if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
+        rhi->setTexture(2, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
+
+    // Same merged-vertex-pull requirement as shadowPass (Metal MDI layout).
+    const bool reflPullsMerged = backend == GraphicsBackend::Metal &&
+                                 m_mdiInstanceLayout && mergedVertexBuffer.isValid();
+    if (reflPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
+
+    // ALL drawables, not the camera-visible set — the mirror sees behind you.
+    for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        const RenderMesh& mesh = meshes[drawable.mesh];
+        auto it = drawableToInstanceID.find(drawableIdx);
+        if (it == drawableToInstanceID.end()) continue;
+
+        struct { Uint32 iid; Uint32 merged; } push{ it->second, reflPullsMerged ? 1u : 0u };
+        if (drawable.material < materials.size()) {
+            bindMaterialAlbedo(drawable.material);
+        }
+        if (!reflPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
+        rhi->setVertexBytes(&push, sizeof(push), 4);
+        if (mesh.indexBuffer.isValid()) {
+            rhi->bindIndexBuffer(mesh.indexBuffer, 0);
+            rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
+        } else if (mesh.vertexBuffer.isValid()) {
+            rhi->draw(mesh.vertexCount, 1, 0, 0);
+        }
+    }
+    rhi->endRenderPass();
 }
 
 // Caustics: fullscreen composite that boosts submerged opaque pixels (inside
@@ -4660,26 +4875,31 @@ void Renderer::waterPass() {
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(waterPipeline);
 
-    // Vertex stage: camera(0), water(1), grid verts(2) — GLSL set0 b0..b2,
-    // MSL vertex buffer(0..2).
+    // Vertex stage: camera(0), water(1), grid verts(2), FFT displacement(3) —
+    // GLSL set0 b0..b3, MSL vertex buffer(0..3).
     rhi->setVertexBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setVertexBuffer(1, waterDataBuffer, 0, sizeof(WaterData));
     rhi->setVertexBuffer(2, waterVertexBuffer, 0, 0);
+    rhi->setVertexBuffer(3, waterDispBuffer, 0, sizeof(glm::vec4) * 256 * 256);
 
     // Fragment stage: water(0), camera(1) — GLSL set1 b0..b1, MSL buffer(0..1).
     rhi->setFragmentBuffer(0, waterDataBuffer, 0, sizeof(WaterData));
     rhi->setFragmentBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
 
-    rhi->setTexture(2, 0, waterNormalTex1, defaultSampler);
-    rhi->setTexture(2, 1, waterNormalTex2, defaultSampler);
-    rhi->setTexture(2, 2, tempColorRT, clampSampler);       // scene snapshot
-    rhi->setTexture(2, 3, depthStencilRT, clampSampler);
-    rhi->setTexture(2, 4, normalRT, clampSampler);
+    rhi->setTexture(2, 0, waterSimNormalTex, defaultSampler);   // FFT normal + whitecap
+    rhi->setTexture(2, 1, waterNormalTex1, defaultSampler);     // detail layers
+    rhi->setTexture(2, 2, waterNormalTex2, defaultSampler);
+    rhi->setTexture(2, 3, tempColorRT, clampSampler);           // scene snapshot
+    rhi->setTexture(2, 4, depthStencilRT, clampSampler);
     rhi->setTexture(2, 5,
                     (m_iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex,
                     clampSampler);
-    rhi->setTexture(2, 6, waterFoamTex, defaultSampler);
-    rhi->setTexture(2, 7, waterNoiseTex, defaultSampler);
+    rhi->setTexture(2, 6,
+                    (waterSettings.reflectionParams.x > 0.0f && waterReflColorRT.isValid())
+                        ? waterReflColorRT : blackTex,
+                    clampSampler);
+    rhi->setTexture(2, 7, waterFoamTex, defaultSampler);
+    rhi->setTexture(2, 8, waterNoiseTex, defaultSampler);
 
     rhi->bindIndexBuffer(waterIndexBuffer);
     rhi->drawIndexed(waterIndexCount, 1, 0, 0, 0);
@@ -4743,6 +4963,24 @@ void Renderer::setWaterSettings(const WaterData& settings) {
     waterSettings.depthSofteningDistance = std::max(waterSettings.depthSofteningDistance, 1e-4f);
     waterSettings.refractionHeightFactor = std::max(waterSettings.refractionHeightFactor, 1e-4f);
     waterSettings.refractionDistanceFactor = std::max(waterSettings.refractionDistanceFactor, 1e-4f);
+    waterSettings.fftParams.x = std::max(waterSettings.fftParams.x, 0.5f);  // patch size
+}
+
+void Renderer::setWaterSimParams(const WaterSimParams& params) {
+    WaterSimParams p = params;
+    if (p.resolution != 256u) {
+        fmt::print("setWaterSimParams: resolution forced to 256 (the FFT kernels bake N; got {})\n",
+                   p.resolution);
+        p.resolution = 256u;
+    }
+    p.patchSize = std::max(p.patchSize, 0.5f);
+    p.windSpeedMps = std::max(p.windSpeedMps, 0.05f);
+    p.gravity = std::max(p.gravity, 0.1f);
+    p.depthMeters = std::max(p.depthMeters, 0.05f);
+    p.surfaceTension = std::max(p.surfaceTension, 0.0f);
+    p.time = waterSimParams.time;  // keep the clock monotonic across edits
+    waterSimParams = p;
+    waterSpectrumDirty = true;
 }
 
 void Renderer::setWaterTextures(const std::shared_ptr<Vapor::Image>& normalMap1,
@@ -6625,6 +6863,22 @@ void Renderer::createRenderTargets() {
         normalRT = rhi->createTexture(desc);
     }
 
+    // Water planar reflection targets (half resolution, own depth). Destroyed
+    // and recreated here on resize, HiZ-style.
+    {
+        if (waterReflColorRT.isValid()) rhi->destroyTexture(waterReflColorRT);
+        if (waterReflDepthRT.isValid()) rhi->destroyTexture(waterReflDepthRT);
+        TextureDesc desc;
+        desc.width = std::max(1u, width / 2);
+        desc.height = std::max(1u, height / 2);
+        desc.format = PixelFormat::RGBA16_FLOAT;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+        waterReflColorRT = rhi->createTexture(desc);
+        desc.format = PixelFormat::Depth32Float;
+        desc.usage = TextureUsage::DepthStencil;
+        waterReflDepthRT = rhi->createTexture(desc);
+    }
+
     // Create shadow RT (half-res RT directional shadow, like native)
     {
         TextureDesc desc;
@@ -7444,6 +7698,57 @@ void Renderer::createRenderPipeline() {
                 waterPipeline = rhi->createPipeline(wd);
             }
 
+            // FFT simulation kernels.
+            auto makeWaterCompute = [&](const char* spv, ShaderHandle& outShader,
+                                        Uint32 tgX, Uint32 tgY) -> ComputePipelineHandle {
+                std::string code = readFile(spv);
+                if (code.empty()) return {};
+                ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+                d.codeSize = code.size(); d.entryPoint = "main";
+                outShader = rhi->createShader(d);
+                ComputePipelineDesc cd; cd.computeShader = outShader;
+                cd.threadGroupSizeX = tgX; cd.threadGroupSizeY = tgY;
+                return rhi->createComputePipeline(cd);
+            };
+            waterSpectrumInitPipeline   = makeWaterCompute("shaders/WaterSpectrumInit.comp.spv",   waterSpectrumInitShader, 16, 16);
+            waterSpectrumEvolvePipeline = makeWaterCompute("shaders/WaterSpectrumEvolve.comp.spv", waterSpectrumEvolveShader, 16, 16);
+            waterFFTPipeline            = makeWaterCompute("shaders/WaterFFT.comp.spv",            waterFFTShader, 256, 1);
+            waterFFTAssemblePipeline    = makeWaterCompute("shaders/WaterFFTAssemble.comp.spv",    waterFFTAssembleShader, 16, 16);
+            waterFFTNormalsPipeline     = makeWaterCompute("shaders/WaterFFTNormals.comp.spv",     waterFFTNormalsShader, 16, 16);
+
+            // Planar reflection: the whole drawable list through the mirrored
+            // camera. Mirrored winding -> cull FRONT.
+            std::string rvCode = readFile("shaders/WaterRefl.vert.spv");
+            std::string rfCode = readFile("shaders/WaterRefl.frag.spv");
+            if (!rvCode.empty() && !rfCode.empty()) {
+                ShaderDesc rvd; rvd.stage = ShaderStage::Vertex;   rvd.code = rvCode.data(); rvd.codeSize = rvCode.size(); rvd.entryPoint = "main";
+                waterReflVertexShader = rhi->createShader(rvd);
+                ShaderDesc rfd; rfd.stage = ShaderStage::Fragment; rfd.code = rfCode.data(); rfd.codeSize = rfCode.size(); rfd.entryPoint = "main";
+                waterReflFragmentShader = rhi->createShader(rfd);
+
+                PipelineDesc rd;
+                rd.vertexShader = waterReflVertexShader;
+                rd.fragmentShader = waterReflFragmentShader;
+                rd.vertexLayout.stride = sizeof(Vapor::VertexData);
+                rd.vertexLayout.attributes = {
+                    {0, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, position)},
+                    {1, PixelFormat::RG32_FLOAT,  offsetof(Vapor::VertexData, uv)},
+                    {2, PixelFormat::RGB32_FLOAT, offsetof(Vapor::VertexData, normal)},
+                    {3, PixelFormat::RGBA32_FLOAT, offsetof(Vapor::VertexData, tangent)},
+                };
+                rd.topology = PrimitiveTopology::TriangleList;
+                rd.blendMode = BlendMode::Opaque;
+                rd.depthTest = true;
+                rd.depthWrite = true;
+                rd.depthCompareOp = CompareOp::Less;
+                rd.cullMode = CullMode::Front;
+                rd.sampleCount = 1;
+                rd.hasDepthAttachment = true;
+                rd.depthAttachmentFormat = PixelFormat::Depth32Float;
+                rd.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                waterReflPipeline = rhi->createPipeline(rd);
+            }
+
             std::string wcCode = readFile("shaders/WaterCaustics.frag.spv");
             if (!wcCode.empty()) {
                 ShaderDesc wcd; wcd.stage = ShaderStage::Fragment; wcd.code = wcCode.data(); wcd.codeSize = wcCode.size(); wcd.entryPoint = "main";
@@ -7844,6 +8149,58 @@ void Renderer::createRenderPipeline() {
         waterCausticsPipeline = makeMetalPass("shaders/3d_water_caustics_rhi.metal", "vertexMain", "fragmentMain",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT },
                                               false, CompareOp::Less);
+
+        // FFT water simulation kernels (all five live in one MSL file).
+        {
+            std::string code = readFile("shaders/3d_water_fft_rhi.metal");
+            if (!code.empty()) {
+                auto makeWaterKernel = [&](const char* entry, Uint32 tgX, Uint32 tgY) -> ComputePipelineHandle {
+                    ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+                    d.codeSize = code.size(); d.entryPoint = entry;
+                    ShaderHandle sh = rhi->createShader(d);
+                    metalPassShaders.push_back(sh);
+                    ComputePipelineDesc cd; cd.computeShader = sh;
+                    cd.threadGroupSizeX = tgX; cd.threadGroupSizeY = tgY;
+                    return rhi->createComputePipeline(cd);
+                };
+                waterSpectrumInitPipeline   = makeWaterKernel("waterSpectrumInit", 16, 16);
+                waterSpectrumEvolvePipeline = makeWaterKernel("waterSpectrumEvolve", 16, 16);
+                waterFFTPipeline            = makeWaterKernel("waterFFT", 256, 1);
+                waterFFTAssemblePipeline    = makeWaterKernel("waterFFTAssemble", 16, 16);
+                waterFFTNormalsPipeline     = makeWaterKernel("waterFFTNormals", 16, 16);
+            }
+        }
+
+        // Planar reflection: raw-fetched vertices (shadow-pass pattern),
+        // mirrored winding -> cull FRONT, half-res HDR color + own depth.
+        {
+            std::string code = readFile("shaders/3d_water_refl_rhi.metal");
+            if (!code.empty()) {
+                ShaderDesc vd; vd.stage = ShaderStage::Vertex;   vd.code = code.data(); vd.codeSize = code.size(); vd.entryPoint = "vertexMain";
+                ShaderHandle vs = rhi->createShader(vd);
+                ShaderDesc fdd; fdd.stage = ShaderStage::Fragment; fdd.code = code.data(); fdd.codeSize = code.size(); fdd.entryPoint = "fragmentMain";
+                ShaderHandle fs = rhi->createShader(fdd);
+                metalPassShaders.push_back(vs);
+                metalPassShaders.push_back(fs);
+                PipelineDesc d;
+                d.vertexShader = vs;
+                d.fragmentShader = fs;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = true;
+                d.depthWrite = true;
+                d.depthCompareOp = CompareOp::Less;
+                d.cullMode = CullMode::Front;
+                d.frontFaceCounterClockwise = true;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = true;
+                d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                waterReflPipeline = rhi->createPipeline(d);
+            }
+        }
         volumetricFogPipeline = makeMetalPass("shaders/3d_volumetric_fog.metal", "volumetricFogVertex", "simpleFogFragment",
                                               BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
         // Froxel volumetric fog (Metal): inject + integrate compute kernels reused
@@ -9254,28 +9611,33 @@ void Renderer::drawGraphicsImGui() {
             ImGui::DragFloat("Reflection Distance", &waterSettings.refractionDistanceFactor, 0.5f, 0.01f, 200.0f);
             ImGui::DragFloat("Depth Softening", &waterSettings.depthSofteningDistance, 0.01f, 0.001f, 5.0f);
             ImGui::DragFloat("Env Reflection", &waterSettings.causticsBoundsMax.w, 0.01f, 0.0f, 4.0f);
-            if (ImGui::TreeNode("SSR")) {
-                ImGui::DragFloat("Step Size", &waterSettings.ssrSettings.x, 0.01f, 0.01f, 2.0f);
-                ImGui::DragFloat("Max Steps (0 = off)", &waterSettings.ssrSettings.y, 1.0f, 0.0f, 256.0f);
-                ImGui::DragFloat("Refine Steps", &waterSettings.ssrSettings.z, 1.0f, 1.0f, 64.0f);
-                ImGui::DragFloat("Depth Factor", &waterSettings.ssrSettings.w, 0.5f, 0.0f, 100.0f);
+            if (ImGui::TreeNode("Simulation (FFT)")) {
+                bool dirty = false;
+                dirty |= ImGui::DragFloat("Patch Size (m)", &waterSimParams.patchSize, 0.1f, 2.0f, 200.0f);
+                dirty |= ImGui::DragFloat("Wind Speed (m/s)", &waterSimParams.windSpeedMps, 0.05f, 0.05f, 30.0f);
+                dirty |= ImGui::SliderAngle("Wind Direction", &waterSimParams.windDirRad);
+                dirty |= ImGui::DragFloat("Amplitude", &waterSimParams.amplitude, 0.01f, 0.0f, 20.0f);
+                dirty |= ImGui::DragFloat("Depth (m)", &waterSimParams.depthMeters, 0.05f, 0.05f, 100.0f);
+                dirty |= ImGui::DragFloat("Small-Wave Cutoff (m)", &waterSimParams.smallWaveCutoff, 0.001f, 0.0f, 1.0f, "%.3f");
+                dirty |= ImGui::DragFloat("Directional Spread", &waterSimParams.directionalSpread, 0.1f, 0.0f, 64.0f);
+                if (dirty) waterSpectrumDirty = true;  // spectrum shape changed -> rebake
+                // Runtime-only fields (no rebake needed).
+                ImGui::DragFloat("Choppiness", &waterSimParams.choppiness, 0.01f, 0.0f, 3.0f);
+                ImGui::DragFloat("Time Scale", &waterSimParams.timeScale, 0.01f, 0.0f, 5.0f);
+                ImGui::DragFloat("Displacement Scale", &waterSettings.fftParams.w, 0.01f, 0.0f, 4.0f);
+                ImGui::DragFloat("Edge Dampening", &waterSettings.dampeningFactor, 0.1f, 0.001f, 20.0f);
+                if (ImGui::Button("Rebake Spectrum")) waterSpectrumDirty = true;
                 ImGui::TreePop();
             }
-            if (ImGui::TreeNode("Waves")) {
-                int wc = int(waterSettings.waveCount);
-                if (ImGui::SliderInt("Count", &wc, 0, 4)) waterSettings.waveCount = Uint32(wc);
-                ImGui::DragFloat("Edge Dampening", &waterSettings.dampeningFactor, 0.1f, 0.001f, 20.0f);
-                for (Uint32 i = 0; i < waterSettings.waveCount; ++i) {
-                    ImGui::PushID(int(i));
-                    auto& w = waterSettings.waves[i];
-                    ImGui::Text("Wave %u", i);
-                    ImGui::DragFloat3("Direction", &w.direction.x, 0.01f, -1.0f, 1.0f);
-                    ImGui::DragFloat("Steepness", &w.steepness, 0.01f, 0.0f, 2.0f);
-                    ImGui::DragFloat("Wavelength", &w.waveLength, 0.01f, 0.01f, 50.0f);
-                    ImGui::DragFloat("Amplitude", &w.amplitude, 0.001f, 0.0f, 2.0f);
-                    ImGui::DragFloat("Speed", &w.speed, 0.01f, 0.0f, 10.0f);
-                    ImGui::PopID();
-                }
+            if (ImGui::TreeNode("Reflection (planar)")) {
+                ImGui::DragFloat("Strength (0 = env only)", &waterSettings.reflectionParams.x, 0.01f, 0.0f, 1.0f);
+                ImGui::DragFloat("Distortion", &waterSettings.reflectionParams.y, 0.002f, 0.0f, 0.5f);
+                ImGui::DragFloat("Whitecap Scale", &waterSettings.reflectionParams.z, 0.01f, 0.0f, 4.0f);
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNode("Detail Normals")) {
+                ImGui::DragFloat("Tiling", &waterSettings.fftParams.y, 0.1f, 0.1f, 64.0f);
+                ImGui::DragFloat("Strength", &waterSettings.fftParams.z, 0.01f, 0.0f, 2.0f);
                 ImGui::TreePop();
             }
             if (ImGui::TreeNode("Normal Map Scroll")) {

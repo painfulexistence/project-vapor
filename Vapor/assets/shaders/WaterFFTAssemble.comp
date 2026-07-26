@@ -1,0 +1,50 @@
+#version 450
+// FFT water — assemble the displacement map from the transformed spectra.
+// GLSL twin of the waterFFTAssemble kernel in 3d_water_fft_rhi.metal.
+//
+// Applies the (-1)^(x+y) centered-spectrum sign, the choppiness scale on the
+// horizontal displacement, and writes displacement = (dx, height, dz, 0).
+// Normals and foam are derived from this texture in the follow-up kernel
+// (they need completed neighbors, hence the separate dispatch).
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SimParams {
+    uint resolution;
+    float patchSize;
+    float windSpeedMps;
+    float windDirRad;
+    float amplitude;
+    float choppiness;
+    float depthMeters;
+    float smallWaveCutoff;
+    float directionalSpread;
+    float gravity;
+    float surfaceTension;
+    float timeScale;
+    float time;
+    uint seed;
+    float _padA;
+    float _padB;
+} sim;
+
+layout(set = 1, binding = 0, rgba32f) uniform readonly image2D specATex;  // RG=h BA=dx
+layout(set = 1, binding = 1, rgba32f) uniform readonly image2D specBTex;  // RG=dz
+layout(set = 1, binding = 2, rgba16f) uniform writeonly image2D dispTex;
+
+void main() {
+    uvec2 id = gl_GlobalInvocationID.xy;
+    uint n = sim.resolution;
+    if (id.x >= n || id.y >= n) return;
+
+    float sign_ = (((id.x + id.y) & 1u) == 0u) ? 1.0 : -1.0;
+
+    vec4 a = imageLoad(specATex, ivec2(id));
+    vec4 b = imageLoad(specBTex, ivec2(id));
+
+    float h = a.x * sign_;
+    float dx = a.z * sign_ * sim.choppiness;
+    float dz = b.x * sign_ * sim.choppiness;
+
+    imageStore(dispTex, ivec2(id), vec4(dx, h, dz, 0.0));
+}

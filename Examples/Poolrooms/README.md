@@ -5,10 +5,18 @@ the backrooms style — and the showcase scene for the engine's RHI water pass.
 
 ## What it demonstrates
 
-- **RHI water surface** (`Renderer::waterPass`, new in this example's PR):
-  Gerstner ripples, dual scrolling normal maps, screen-space reflections with
-  an IBL-cubemap fallback, refraction from a scene snapshot with depth-tinted
-  absorption, GGX sun specular, and edge softening where the water meets tile.
+- **FFT water simulation** (`Renderer::waterSimPass`): a Tessendorf-style
+  spectral surface — directional Phillips spectrum with capillary cutoff and
+  finite-depth (2 m pool!) capillary-gravity dispersion, evolved per frame and
+  inverse-FFT'd on the GPU (256², shared-memory radix-2, both backends) into
+  a choppy displacement field plus a normal/whitecap-Jacobian map.
+- **Planar reflections** (`Renderer::waterReflectionPass`): the scene
+  re-rendered through a Householder-mirrored camera into a half-res HDR
+  target with waterline clipping and flipped culling (the architecture
+  Atmospheric's VoxelWorld uses) — exact for a flat pool, where SSR
+  fundamentally fails: the ceiling and walls a pool reflects are off-screen.
+  The surface samples it projectively with ripple distortion, falling back to
+  the IBL cubemap at the borders.
 - **Projected caustics** (`Renderer::waterCausticsPass`): an animated caustic
   web boosts every submerged pixel inside the pool volume, chromatically
   fringed, sun-tinted and depth-faded — the surface refracts the caustic-lit
@@ -50,21 +58,26 @@ in that folder for slot names and authoring notes. Geometry UVs map one tile
 face per texture, so a single photographed tile works as-is; grout lines and
 tile bevels are real geometry and stay crisp at any angle.
 
-## How the water pass fits the frame
+## How the water passes fit the frame
 
 ```
 ... -> MainRenderPass -> SkyAtmosphere
+    -> WaterSim        (compute: spectrum evolve -> inverse FFT -> displacement
+                        SSBO/texture + normal/foam map)
+    -> WaterReflection (mirrored camera -> half-res HDR RT, waterline-clipped,
+                        cull-flipped, simplified irradiance+sun shading)
     -> WaterCaustics   (fullscreen: submerged pixels x caustic web, colorRT swap)
     -> Water           (snapshot colorRT -> tempColorRT, then draw the surface
-                        into colorRT: SSR + IBL reflections, refraction from the
-                        snapshot, sun specular, alpha = shore softening)
+                        into colorRT: FFT displacement, fresnel blend of planar
+                        reflection vs refraction, sun specular, Jacobian foam)
     -> HeightFog -> VolumetricFog -> ... -> Bloom -> PostProcess
 ```
 
-Both passes are driven by `WaterData` (`graphics_effects.hpp`) and no-op until
-an app configures them through the `IRenderer` water API
-(`setWaterGrid` / `setWaterTransform` / `setWaterSettings` /
-`setWaterEnabled` / `setWaterTextures`). The GLSL and MSL shader twins
-(`Water.vert/.frag`, `WaterCaustics.frag`, `3d_water_rhi.metal`,
-`3d_water_caustics_rhi.metal`) declare the same struct layout field-for-field;
-`static_assert`s in `graphics_effects.hpp` pin the offsets.
+The passes are driven by `WaterData` + `WaterSimParams`
+(`graphics_effects.hpp`) and no-op until an app configures them through the
+`IRenderer` water API (`setWaterGrid` / `setWaterTransform` /
+`setWaterSettings` / `setWaterSimParams` / `setWaterEnabled` /
+`setWaterTextures`). The GLSL and MSL shader twins declare the same struct
+layouts field-for-field; `static_assert`s in `graphics_effects.hpp` pin the
+offsets, and the FFT butterfly is numerically verified against a brute-force
+DFT in the development notes.
