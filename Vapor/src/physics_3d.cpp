@@ -1119,6 +1119,25 @@ auto Physics3D::createCylinderBody(
     return BodyHandle{ nextBodyID++ };
 }
 
+// Ask Jolt to suppress ghost contacts on the internal edges of a mesh. A body
+// resting on a triangle soup generates contacts on the shared edges between
+// triangles, where the raw normal points along the edge rather than out of the
+// surface, so it gets nudged sideways and never settles — very visible on a
+// voxel collider, whose surface is nothing but shared edges. Costs extra
+// narrowphase work, which is the trade we want for props coming to rest.
+//
+// The flag arrived in Jolt 5.0 and the version here comes from whatever vcpkg
+// resolves, so it is applied only if the struct actually has it. This has to be
+// a template: outside one, the discarded branch of an `if constexpr` is still
+// checked, so naming a field that does not exist would be a hard error rather
+// than the no-op we want.
+template <typename Settings>
+static void enableEnhancedInternalEdgeRemoval(Settings& settings) {
+    if constexpr (requires { settings.mEnhancedInternalEdgeRemoval = true; }) {
+        settings.mEnhancedInternalEdgeRemoval = true;
+    }
+}
+
 auto Physics3D::createMeshBody(
     const std::vector<glm::vec3>& vertices,
     const std::vector<Uint32>& indices,
@@ -1161,6 +1180,7 @@ auto Physics3D::createMeshBody(
         convertMotionType(motionType),
         Layers::nonMoving// Mesh shapes should be static
     );
+    enableEnhancedInternalEdgeRemoval(bodySettings);
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
     if (!body) {
@@ -1201,6 +1221,7 @@ auto Physics3D::createConvexHullBody(
         convertMotionType(motionType),
         motionType == BodyMotionType::Static ? Layers::nonMoving : Layers::moving
     );
+    enableEnhancedInternalEdgeRemoval(bodySettings);
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
     if (!body) {
