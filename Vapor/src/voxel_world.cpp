@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <limits>
 
 namespace Vapor {
 
@@ -491,6 +492,205 @@ Uint8 VoxelWorld::voxelAt(const glm::ivec3& cell) const {
 Uint32 VoxelWorld::residentBricks() const {
     std::lock_guard<std::mutex> lock(poolMutex);
     return static_cast<Uint32>(bricks.size() - freeSlots.size());
+}
+
+// ============================================================================
+// Collision geometry. Both walk the finished voxel data without taking the pool
+// mutex (like voxelAt), so call them once generation for the volume is done.
+// Output is grid-local meters; see the header for the pivot caveat.
+// ============================================================================
+
+void VoxelWorld::buildSurfaceMesh(std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices) const {
+    outVertices.clear();
+    outIndices.clear();
+    if (pageTable.empty() || solidCount.load(std::memory_order_relaxed) == 0) return;
+
+    glm::ivec3 lo, hi;
+    occupiedVoxelBounds(lo, hi);
+    const glm::ivec3 bg = brickGrid();
+
+    auto brickEmpty = [&](const glm::ivec3& b) {
+        if (b.x < 0 || b.y < 0 || b.z < 0 || b.x >= bg.x || b.y >= bg.y || b.z >= bg.z) return true;
+        return pageTable[pageIndex(b)] == PAGE_EMPTY;
+    };
+
+    // Per-axis sweep: for each plane between two voxel slabs, mark the faces
+    // where exactly one side is solid (+1 = normal along +d, -1 = along -d),
+    // then merge equal-sign runs into maximal rectangles (greedy meshing).
+    std::vector<int8_t> mask;
+    for (int d = 0; d < 3; d++) {
+        const int u = (d + 1) % 3, v = (d + 2) % 3;  // (u, v, d) is right-handed: u x v = +d
+        const int du = hi[u] - lo[u] + 1;
+        const int dv = hi[v] - lo[v] + 1;
+        if (du <= 0 || dv <= 0) continue;
+        mask.assign(static_cast<size_t>(du) * dv, 0);
+
+        for (int s = lo[d]; s <= hi[d] + 1; s++) {
+            std::fill(mask.begin(), mask.end(), static_cast<int8_t>(0));
+            const bool aInside = (s - 1 >= 0);
+            const bool bInside = (s < gridDim[d]);
+            const int baD = aInside ? (s - 1) / BRICK_DIM : -1;
+            const int bbD = bInside ? s / BRICK_DIM : -1;
+
+            // Fill the mask a brick block at a time so empty regions cost one
+            // page lookup per 8x8 block instead of 64 voxel lookups.
+            for (int v0 = lo[v]; v0 <= hi[v];) {
+                const int vEnd = std::min(hi[v], (v0 / BRICK_DIM + 1) * BRICK_DIM - 1);
+                for (int u0 = lo[u]; u0 <= hi[u];) {
+                    const int uEnd = std::min(hi[u], (u0 / BRICK_DIM + 1) * BRICK_DIM - 1);
+                    glm::ivec3 ba(0), bb(0);
+                    ba[d] = baD;
+                    ba[u] = u0 / BRICK_DIM;
+                    ba[v] = v0 / BRICK_DIM;
+                    bb[d] = bbD;
+                    bb[u] = ba[u];
+                    bb[v] = ba[v];
+                    if (!brickEmpty(ba) || !brickEmpty(bb)) {
+                        for (int vv = v0; vv <= vEnd; vv++) {
+                            for (int uu = u0; uu <= uEnd; uu++) {
+                                glm::ivec3 ca(0), cb(0);
+                                ca[d] = s - 1;
+                                ca[u] = uu;
+                                ca[v] = vv;
+                                cb[d] = s;
+                                cb[u] = uu;
+                                cb[v] = vv;
+                                const bool sa = aInside && voxelAt(ca) != 0;
+                                const bool sb = bInside && voxelAt(cb) != 0;
+                                if (sa == sb) continue;  // both solid or both air: no face
+                                mask[static_cast<size_t>(vv - lo[v]) * du + (uu - lo[u])] =
+                                    sa ? static_cast<int8_t>(1) : static_cast<int8_t>(-1);
+                            }
+                        }
+                    }
+                    u0 = uEnd + 1;
+                }
+                v0 = vEnd + 1;
+            }
+
+            // Greedy merge: grow a run along u, then extend it along v while
+            // every cell of the run matches, emit one quad, clear, continue.
+            for (int j = 0; j < dv; j++) {
+                for (int i = 0; i < du;) {
+                    const int8_t m = mask[static_cast<size_t>(j) * du + i];
+                    if (m == 0) {
+                        i++;
+                        continue;
+                    }
+                    int w = 1;
+                    while (i + w < du && mask[static_cast<size_t>(j) * du + i + w] == m) w++;
+                    int h = 1;
+                    for (bool grow = true; grow && j + h < dv; ) {
+                        for (int k = 0; k < w; k++) {
+                            if (mask[static_cast<size_t>(j + h) * du + i + k] != m) {
+                                grow = false;
+                                break;
+                            }
+                        }
+                        if (grow) h++;
+                    }
+
+                    // Rectangle corners in voxel units, on the plane d = s.
+                    auto corner = [&](int uu, int vv) {
+                        glm::vec3 p(0.0f);
+                        p[d] = static_cast<float>(s);
+                        p[u] = static_cast<float>(uu);
+                        p[v] = static_cast<float>(vv);
+                        return p * voxelSize;
+                    };
+                    const glm::vec3 p00 = corner(lo[u] + i, lo[v] + j);
+                    const glm::vec3 p10 = corner(lo[u] + i + w, lo[v] + j);
+                    const glm::vec3 p11 = corner(lo[u] + i + w, lo[v] + j + h);
+                    const glm::vec3 p01 = corner(lo[u] + i, lo[v] + j + h);
+
+                    const auto base = static_cast<Uint32>(outVertices.size());
+                    outVertices.insert(outVertices.end(), { p00, p10, p11, p01 });
+                    // CCW seen from the outside: +u then +v for a +d normal.
+                    if (m > 0) {
+                        outIndices.insert(outIndices.end(),
+                                          { base, base + 1, base + 2, base, base + 2, base + 3 });
+                    } else {
+                        outIndices.insert(outIndices.end(),
+                                          { base, base + 2, base + 1, base, base + 3, base + 2 });
+                    }
+
+                    for (int b = 0; b < h; b++)
+                        for (int a = 0; a < w; a++) mask[static_cast<size_t>(j + b) * du + i + a] = 0;
+                    i += w;
+                }
+            }
+        }
+    }
+}
+
+void VoxelWorld::buildConvexHullPoints(std::vector<glm::vec3>& outPoints, int directions) const {
+    outPoints.clear();
+    if (pageTable.empty() || solidCount.load(std::memory_order_relaxed) == 0) return;
+
+    glm::ivec3 lo, hi;
+    occupiedVoxelBounds(lo, hi);
+
+    // Roughly even directions (Fibonacci sphere) plus the 6 axes, so the
+    // object's AABB extremes are always represented exactly.
+    std::vector<glm::vec3> dirs;
+    const int n = std::max(6, directions);
+    dirs.reserve(static_cast<size_t>(n) + 6);
+    constexpr float kGoldenAngle = 2.39996323f;
+    for (int i = 0; i < n; i++) {
+        const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(n);
+        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        const float a = kGoldenAngle * static_cast<float>(i);
+        dirs.push_back({ r * std::cos(a), r * std::sin(a), z });
+    }
+    dirs.insert(dirs.end(), { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } });
+
+    // A voxel is an axis-aligned unit cube, so for a given direction the
+    // maximizing corner offset is fixed (1 where the component is positive).
+    // The support search is then one dot per voxel per direction on the min
+    // corner, and the winning corner is recovered afterwards.
+    std::vector<float> best(dirs.size(), -std::numeric_limits<float>::max());
+    std::vector<glm::ivec3> bestCell(dirs.size(), glm::ivec3(0));
+    const glm::ivec3 bg = brickGrid();
+
+    for (int z = lo.z; z <= hi.z; z++) {
+        for (int y = lo.y; y <= hi.y; y++) {
+            for (int x = lo.x; x <= hi.x;) {
+                const glm::ivec3 bc(x / BRICK_DIM, y / BRICK_DIM, z / BRICK_DIM);
+                if (bc.x >= bg.x || bc.y >= bg.y || bc.z >= bg.z || pageTable[pageIndex(bc)] == PAGE_EMPTY) {
+                    x = (bc.x + 1) * BRICK_DIM;  // whole brick is air: skip the run
+                    continue;
+                }
+                if (voxelAt({ x, y, z }) != 0) {
+                    const glm::vec3 p(x, y, z);
+                    for (size_t k = 0; k < dirs.size(); k++) {
+                        const float dp = glm::dot(dirs[k], p);
+                        if (dp > best[k]) {
+                            best[k] = dp;
+                            bestCell[k] = { x, y, z };
+                        }
+                    }
+                }
+                x++;
+            }
+        }
+    }
+
+    outPoints.reserve(dirs.size());
+    for (size_t k = 0; k < dirs.size(); k++) {
+        if (best[k] == -std::numeric_limits<float>::max()) continue;
+        const glm::vec3 off(dirs[k].x > 0.0f ? 1.0f : 0.0f, dirs[k].y > 0.0f ? 1.0f : 0.0f,
+                            dirs[k].z > 0.0f ? 1.0f : 0.0f);
+        outPoints.push_back((glm::vec3(bestCell[k]) + off) * voxelSize);
+    }
+    // Several directions usually land on the same corner; drop the repeats.
+    std::sort(outPoints.begin(), outPoints.end(), [](const glm::vec3& a, const glm::vec3& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
+    outPoints.erase(std::unique(outPoints.begin(), outPoints.end(),
+                                [](const glm::vec3& a, const glm::vec3& b) { return a == b; }),
+                    outPoints.end());
 }
 
 void VoxelWorld::occupiedVoxelBounds(glm::ivec3& outMin, glm::ivec3& outMax) const {

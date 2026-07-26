@@ -132,6 +132,28 @@ public:
     bool raycast(const glm::vec3& localRo, const glm::vec3& localRd, float maxDist,
                  glm::vec3& outLocalHit, glm::ivec3& outCell) const;
 
+    // ---- Collision geometry ----------------------------------------------
+    // Both emit GRID-LOCAL meters: the grid's min corner is the origin, so a
+    // point is voxel coordinate * voxelSize. Callers that attach the shape to a
+    // body placed at the volume's pivot (the entity position — the grid centred
+    // in x/z, rising from y) must subtract (extent.x/2, 0, extent.z/2).
+
+    // Triangle mesh of every exposed voxel face, greedy-merged into maximal
+    // rectangles per slice, with outward winding. Feeds a Jolt MeshShape, which
+    // is STATIC-only — use it for terrain. Voxel-precise, and the merge keeps
+    // the triangle count far below one quad per face (large flat spans collapse
+    // to a single rectangle). Empty bricks are skipped a whole 8-voxel block at
+    // a time, so cost tracks surface area, not volume.
+    void buildSurfaceMesh(std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices) const;
+
+    // Support points of the solid voxels sampled over `directions` roughly even
+    // directions — a bounded point set whose convex hull approximates (and is
+    // inscribed in) the true hull. Feeds a Jolt ConvexHullShape, which is what a
+    // DYNAMIC body needs. Intended for small props; a whole terrain would give a
+    // useless hull. Points are deduplicated, so the result may be smaller than
+    // `directions`.
+    void buildConvexHullPoints(std::vector<glm::vec3>& outPoints, int directions = 64) const;
+
     // ---- Queries ---------------------------------------------------------
     Uint8 voxelAt(const glm::ivec3& cell) const;
     bool isInside(const glm::ivec3& cell) const {
