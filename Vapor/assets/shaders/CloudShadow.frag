@@ -115,24 +115,27 @@ float cloudHeightGradient(float heightFraction, float type) {
     return saturate(gradient);
 }
 
-float sampleCloudShape(vec3 worldPos) {
+// Shape lookup with the weather map's de-tiling warp — MUST match
+// CloudRaymarch.frag exactly, or the shadows land where the clouds aren't.
+float sampleCloudShape(vec3 worldPos, vec2 warp) {
     vec3 samplePos = worldPos + windOffset;
+    samplePos.xz += warp;
     return texture(shapeNoiseTex, samplePos * (shapeNoiseScale * 0.0001)).r;
 }
 
-vec2 sampleWeather(vec3 worldPos) {
+vec4 sampleWeather(vec3 worldPos) {
     vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
-    vec2 w = texture(weatherMapTex, weatherUV * 0.5).rg;  // 40 km tile (raymarch twin)
-    return vec2(w.r * cloudCoverage, w.g);
+    vec4 w = texture(weatherMapTex, weatherUV * 0.5);  // 40 km tile (raymarch twin)
+    return vec4(w.r * cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 1500.0);
 }
 
 float sampleCloudDensityCheap(vec3 worldPos) {
     float heightFraction = saturate((worldPos.y - cloudLayerBottom) / cloudLayerThickness);
     if (heightFraction <= 0.0 || heightFraction >= 1.0) return 0.0;
-    vec2 weather = sampleWeather(worldPos);
+    vec4 weather = sampleWeather(worldPos);
     float type = mix(weather.y, cloudType, 0.5);
     float heightGradient = cloudHeightGradient(heightFraction, type);
-    float baseShape = sampleCloudShape(worldPos);
+    float baseShape = sampleCloudShape(worldPos, weather.zw);
     float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - weather.x, 1.0, 0.0, 1.0));
     return baseCloud * cloudDensity;
 }

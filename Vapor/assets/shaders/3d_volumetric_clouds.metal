@@ -115,10 +115,20 @@ float cloudHeightGradient(float heightFraction, float cloudType) {
 // below are unchanged.
 constexpr sampler cloudNoiseSampler(address::repeat, filter::linear);
 
+// Baked detail FBM's approximate mean. The distance LOD blends toward it
+// rather than toward zero, so far clouds lose the detail VARIANCE but keep its
+// average erosion — fading to zero would have made them fatter with distance.
+constant float CLOUD_DETAIL_MEAN = 0.5;
+
 // Sample base cloud shape (128^3 Perlin-Worley volume)
 float sampleCloudShape(float3 worldPos, constant VolumetricCloudData& data,
-                       texture3d<float, access::sample> shapeTex) {
+                       texture3d<float, access::sample> shapeTex, float2 warp) {
+    // `warp`: low-frequency displacement from the weather map's BA channels
+    // (~20 km wavelength, +-1.5 km). The 128^3 volume tiles every 10 km of
+    // world space, which from the ground repeats 4-10x before the horizon on a
+    // regular grid; sliding each region differently breaks the alignment.
     float3 samplePos = worldPos + data.windOffset;
+    samplePos.xz += warp;
     return shapeTex.sample(cloudNoiseSampler, samplePos * (data.shapeNoiseScale * 0.0001)).r;
 }
 
@@ -134,6 +144,15 @@ float3 curlDistort(float3 p) {
 // Sample cloud detail (32^3 Worley-FBM volume)
 float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data,
                         texture3d<float, access::sample> detailTex) {
+    float dist = length(worldPos - data.cameraPosition);
+    // Distance LOD (twin of CloudRaymarch.frag). The 32^3 volume spans only
+    // 200 m of world space; past ~12 km a quarter-res pixel covers more than
+    // that, so the octave is subpixel and contributes per-frame noise rather
+    // than shape — averaged by the temporal pass into grey mush, and popping
+    // as shimmer when rotation drops the history.
+    float lodFade = 1.0 - smoothstep(12000.0, 30000.0, dist);
+    if (lodFade <= 0.001) return CLOUD_DETAIL_MEAN;
+
     // Apply wind (detail moves faster)
     float3 samplePos = worldPos + data.windOffset * 1.5;
 
@@ -149,22 +168,23 @@ float sampleCloudDetail(float3 worldPos, constant VolumetricCloudData& data,
     // Close-range octave (twin of CloudRaymarch.frag): same volume at 5x
     // frequency, decorrelated by a UV offset, faded out past ~2.5 km. Signed
     // perturbation keeps the mean erosion (and the far look) unchanged.
-    float nearW = 1.0 - smoothstep(800.0, 2500.0, length(worldPos - data.cameraPosition));
+    float nearW = 1.0 - smoothstep(800.0, 2500.0, dist);
     if (nearW > 0.01) {
         float hf = detailTex.sample(cloudNoiseSampler,
                                     samplePos * (data.detailNoiseScale * 0.005) + float3(0.37)).r;
         d += (hf - 0.5) * 0.35 * nearW;
     }
-    return d;
+    return mix(CLOUD_DETAIL_MEAN, d, lodFade);
 }
 
-// Sample the baked weather map (R = coverage base, G = type) — twin of
-// CloudRaymarch.frag. Scrolls with the wind at 0.6x the detail rate.
-float2 sampleWeather(float3 worldPos, constant VolumetricCloudData& data,
+// Sample the baked weather map — twin of CloudRaymarch.frag. R = coverage
+// base, G = type, BA = signed shape de-tiling warp. Scrolls with the wind at
+// 0.6x the detail rate. Returns (coverage, type, warp.xy) in metres.
+float4 sampleWeather(float3 worldPos, constant VolumetricCloudData& data,
                      texture2d<float, access::sample> weatherTex) {
     float2 weatherUV = (worldPos.xz + data.windOffset.xz * 0.6) * 0.00005 + data.time * 0.0002;
-    float2 w = weatherTex.sample(cloudNoiseSampler, weatherUV * 0.5).rg;  // 40 km tile
-    return float2(w.r * data.cloudCoverage, w.g);
+    float4 w = weatherTex.sample(cloudNoiseSampler, weatherUV * 0.5);  // 40 km tile
+    return float4(w.r * data.cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 1500.0);
 }
 
 // Main cloud density function. The cheap path never samples detailTex, so
@@ -183,7 +203,7 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
     }
 
     // Sample weather
-    float2 weather = sampleWeather(worldPos, data, weatherTex);
+    float4 weather = sampleWeather(worldPos, data, weatherTex);
     float coverage = weather.x;
     float cloudType = mix(weather.y, data.cloudType, 0.5);
 
@@ -191,7 +211,7 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
     float heightGradient = cloudHeightGradient(heightFraction, cloudType);
 
     // Base shape
-    float baseShape = sampleCloudShape(worldPos, data, shapeTex);
+    float baseShape = sampleCloudShape(worldPos, data, shapeTex, weather.zw);
 
     // Apply coverage (remapping creates hard edges)
     float baseCloud = remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0);
@@ -346,18 +366,44 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // View-sun angle for lighting
     float cosTheta = dot(rayDir, data.sunDirection);
 
-    // Step distribution (twin of CloudRaymarch.frag): UNIFORM from outside the
-    // layer (quadratic far-step jitter showed as shudder under rotation),
-    // QUADRATIC fine-near-camera only when inside — the fly-through case.
-    float warpPow = (tRange.x <= 0.001) ? 2.0 : 1.0;
-    float tPrev = tRange.x;
-    for (uint i = 0; i < data.primarySteps; i++) {
-        float u = (float(i) + blueNoise) / float(data.primarySteps);
-        float t = tRange.x + rayLength * pow(u, warpPow);
-        float dt = max(t - tPrev, 1e-3);
-        tPrev = t;
+    // Bound the step SIZE, not the step count (twin of CloudRaymarch.frag).
+    // A fixed primarySteps made the step length depend on view angle: 57 m at
+    // the zenith but 330 m near the horizon, where a ground ray enters the
+    // 9.5 km deck 55 km out and crosses 30 km of it. 330 m is longer than the
+    // whole 200 m detail-noise period, so the detail octave aliased into
+    // per-frame noise — grey mush after temporal averaging, vertical shudder
+    // when rotation invalidated the history. Fine steps come from the layer
+    // thickness instead (view-angle independent); coarse steps (4x) skip the
+    // empty air so the total stays in the same budget.
+    float baseFine = min(data.cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
+    uint maxIters = data.primarySteps * 2u;
 
+    float t = tRange.x + blueNoise * baseFine * 4.0;  // dither the layer entry
+    float tIntegrated = tRange.x;  // never integrate behind this (no double count)
+    bool inCloud = false;
+    int emptyRun = 0;
+
+    for (uint i = 0; i < maxIters && t < tRange.y; i++) {
+        // Steps grow with distance, lagging the detail LOD fade: once only the
+        // 10 km base shape survives, 4x coarser is still ~40 samples/feature.
+        float fineStep = baseFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
+        float coarseStep = fineStep * 4.0;
         float3 pos = rayOrigin + rayDir * t;
+
+        if (!inCloud) {
+            // Empty-space skip on the cheap density. Detail only ever erodes,
+            // so the cheap value is an upper bound — this cannot step over a
+            // cloud the full-quality path would have found.
+            if (sampleCloudDensity(pos, data, true, shapeTex, detailTex, weatherTex) > 0.0) {
+                // Back up one coarse step so the lit leading edge isn't clipped.
+                t = max(t - coarseStep, tIntegrated);
+                inCloud = true;
+                emptyRun = 0;
+            } else {
+                t += coarseStep;
+            }
+            continue;
+        }
 
         float density = sampleCloudDensity(pos, data, false, shapeTex, detailTex, weatherTex);
 
@@ -366,11 +412,11 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
             float3 luminance = cloudLighting(pos, rayDir, data, shapeTex, detailTex, weatherTex);
 
             // Beer-powder effect
-            float powder = beerPowderEnergy(density * dt * 10.0, cosTheta) * data.powderStrength +
+            float powder = beerPowderEnergy(density * fineStep * 10.0, cosTheta) * data.powderStrength +
                           (1.0 - data.powderStrength);
 
             // Integrate
-            float stepTransmittance = beerLambert(density, dt);
+            float stepTransmittance = beerLambert(density, fineStep);
             float3 stepScattering = luminance * (1.0 - stepTransmittance) * powder;
 
             scattering += transmittance * stepScattering;
@@ -381,7 +427,13 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
                 transmittance = 0.0;
                 break;
             }
+            emptyRun = 0;
+        } else if (++emptyRun >= 8) {
+            inCloud = false;  // out the far side — back to skipping
+            emptyRun = 0;
         }
+        t += fineStep;
+        tIntegrated = t;
     }
 
     // Aerial perspective (twin of CloudRaymarch.frag): distant decks sink into
@@ -393,6 +445,13 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
                       (data.sunIntensity * data.sunLightScale * 0.25) * mix(0.05, 1.0, apDay);
     scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
     transmittance = mix(transmittance, 1.0, haze * 0.5);
+
+    // The march stops at maxDist (100 km for sky pixels), reached at ~5 deg
+    // elevation on a flat deck — without an explicit fade the clouds ended
+    // there, leaving a hard line across the sky.
+    float distFade = smoothstep(60000.0, 95000.0, tRange.x);
+    scattering *= 1.0 - distFade;
+    transmittance = mix(transmittance, 1.0, distFade);
 
     return float4(scattering, transmittance);
 }

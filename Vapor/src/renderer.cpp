@@ -6045,11 +6045,18 @@ void Renderer::createCloudNoiseTextures() {
         cloudDetailNoiseTex = rhi->createTexture(d);
         rhi->updateTexture(cloudDetailNoiseTex, data.data(), data.size() * sizeof(uint16_t));
     }
-    // Weather map 512^2 RGBA8, tiling every 1.0 of weather UV (20 km world):
-    // R = coverage base (domain-warped FBM — fronts/streets/clear gaps instead
-    // of uniform value noise), G = cloud type, B = precipitation (reserved for
-    // the WeatherSystem to paint into). Replaces sampleWeather's per-sample
-    // valueNoise; the shaders multiply R by the weather state's cloudCoverage.
+    // Weather map 512^2 RGBA8. The shaders sample it at half frequency, so one
+    // tile spans ~40 km of world space. R = coverage base (domain-warped FBM —
+    // fronts/streets/clear gaps instead of uniform value noise), G = cloud
+    // type, BA = a signed de-tiling warp applied to the SHAPE volume lookup.
+    //
+    // The warp exists because the 128^3 shape volume tiles every 10 km, so from
+    // the ground the same blobs reappear 4-10x before the horizon on a regular
+    // grid — far more obvious than any weather-map repetition. BA carry a
+    // low-frequency periodic offset (+-1.5 km at a ~20 km wavelength) that
+    // slides each region of that grid by a different amount, so identical tiles
+    // no longer line up. It rides the weather fetch the density function
+    // already makes, so de-tiling costs no extra texture reads.
     {
         const int N = 512;
         std::vector<uint8_t> data(size_t(N) * N * 4);
@@ -6068,10 +6075,22 @@ void Renderer::createCloudNoiseTextures() {
             float type = glm::clamp(
                 tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.53f) + glm::vec3(100.0f, 100.0f, 0.0f), 2, 0x55u)
                     * 0.5f + 0.5f, 0.0f, 1.0f);
+            // De-tiling warp: 2 cells per tile, i.e. a ~20 km wavelength. That
+            // is deliberately close to the 10 km shape period — adjacent shape
+            // tiles then land on opposite phases of the warp and get offsets
+            // differing by up to ~3 km, which is what actually breaks the
+            // repeat. (Period 1 degenerates to a single gradient per tile and
+            // barely de-tiles; much higher would shear the blobs rather than
+            // displace them.) Periodic, so the map still tiles exactly.
+            glm::vec2 detile(
+                tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.19f), 2, 0x66u),
+                tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.83f), 2, 0x77u));
+            detile = glm::clamp(detile * 0.5f + 0.5f, 0.0f, 1.0f);
+
             data[i + 0] = uint8_t(coverage * 255.0f + 0.5f);
             data[i + 1] = uint8_t(type * 255.0f + 0.5f);
-            data[i + 2] = uint8_t(glm::clamp(coverage * 2.0f - 1.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
-            data[i + 3] = 255;
+            data[i + 2] = uint8_t(detile.x * 255.0f + 0.5f);
+            data[i + 3] = uint8_t(detile.y * 255.0f + 0.5f);
         }
         TextureDesc d;
         d.width = N; d.height = N; d.depth = 1;

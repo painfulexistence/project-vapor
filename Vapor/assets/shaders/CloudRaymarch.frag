@@ -16,8 +16,9 @@ layout(set = 2, binding = 0) uniform sampler2D sceneDepth;
 // below are unchanged. Repeat sampler — the tiles wrap.
 layout(set = 2, binding = 1) uniform sampler3D shapeNoiseTex;   // 128^3 Perlin-Worley base
 layout(set = 2, binding = 2) uniform sampler3D detailNoiseTex;  // 32^3 Worley FBM erosion
-// 512^2 weather map tiling every 1.0 of weather UV (~20 km): R = coverage
-// base (domain-warped FBM — fronts/streets), G = type, B = precip (reserved).
+// 512^2 weather map, sampled at half frequency (~40 km tile): R = coverage
+// base (domain-warped FBM — fronts/streets), G = type, BA = signed de-tiling
+// warp applied to the shape volume lookup.
 layout(set = 2, binding = 3) uniform sampler2D weatherMapTex;
 
 // Must match Vapor::VolumetricCloudRenderData (std430).
@@ -155,8 +156,20 @@ float cloudHeightGradient(float heightFraction, float type) {
     return saturate(gradient);
 }
 
-float sampleCloudShape(vec3 worldPos) {
+// Baked detail FBM's approximate mean. The LOD fade below blends toward it
+// rather than toward zero, so distant clouds lose the detail VARIANCE but keep
+// its average erosion — fading to zero would have made far clouds fatter.
+const float DETAIL_MEAN = 0.5;
+
+// Base shape lookup. The 128^3 volume tiles every 10 km of world space
+// (shapeNoiseScale 1 -> x0.0001), so from the ground the same blobs reappear
+// 4-10x before the horizon on a regular grid — the repetition the eye locks
+// onto. `warp` is a low-frequency displacement carried in the weather map's
+// BA channels (~20 km wavelength, +-1.5 km): adjacent shape tiles land on
+// opposite phases of it and get offsets ~3 km apart, so they stop matching.
+float sampleCloudShape(vec3 worldPos, vec2 warp) {
     vec3 samplePos = worldPos + windOffset;
+    samplePos.xz += warp;
     return texture(shapeNoiseTex, samplePos * (shapeNoiseScale * 0.0001)).r;
 }
 
@@ -170,6 +183,17 @@ vec3 curlDistort(vec3 p) {
 }
 
 float sampleCloudDetail(vec3 worldPos) {
+    float dist = length(worldPos - cameraPosition);
+    // Distance LOD. The 32^3 volume spans only 200 m of world space
+    // (detailNoiseScale 5 -> x0.005). Past ~12 km a single quarter-res pixel
+    // already covers more than that, so the octave is subpixel: it cannot add
+    // shape, only per-frame noise, which the temporal pass then averaged into
+    // flat grey (the "blurry" look) and which popped as shimmer whenever
+    // rotation dropped the history. Fade it out and let the 10 km base shape
+    // plus the aerial haze carry the far field.
+    float lodFade = 1.0 - smoothstep(12000.0, 30000.0, dist);
+    if (lodFade <= 0.001) return DETAIL_MEAN;
+
     vec3 samplePos = worldPos + windOffset * 1.5;
     // Wind-torn edges: distort the detail lookup with large-scale vector noise
     // (~500 m swirls at curlNoiseScale 1; strength 0.1 → ~30 m displacement).
@@ -183,35 +207,38 @@ float sampleCloudDetail(vec3 worldPos) {
     // ~25 m), UV-offset to decorrelate, faded out past ~2.5 km — at distance
     // it would be subpixel noise (temporal shimmer). Signed perturbation, so
     // the mean erosion (and the far look) is unchanged.
-    float nearW = 1.0 - smoothstep(800.0, 2500.0, length(worldPos - cameraPosition));
+    float nearW = 1.0 - smoothstep(800.0, 2500.0, dist);
     if (nearW > 0.01) {
         float hf = texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.005) + vec3(0.37)).r;
         d += (hf - 0.5) * 0.35 * nearW;
     }
-    return d;
+    return mix(DETAIL_MEAN, d, lodFade);
 }
 
-vec2 sampleWeather(vec3 worldPos) {
+// R = coverage base, G = type, BA = signed shape de-tiling warp (see the bake
+// in Renderer::createCloudNoiseTextures). Returns (coverage, type, warp.xy)
+// with the warp already decoded to metres.
+vec4 sampleWeather(vec3 worldPos) {
     // Scroll the coverage field with the wind (slower than the in-cloud detail,
     // so macro shapes lag the internal churn); small time term keeps the
     // pattern evolving. Coverage/type come pre-shaped from the weather map.
     vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
     // Half frequency (40 km tile): the 20 km tile repeated 3-5x to the
     // horizon and the eye locked onto the pattern.
-    vec2 w = texture(weatherMapTex, weatherUV * 0.5).rg;
-    return vec2(w.r * cloudCoverage, w.g);
+    vec4 w = texture(weatherMapTex, weatherUV * 0.5);
+    return vec4(w.r * cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 1500.0);
 }
 
 float sampleCloudDensity(vec3 worldPos, bool useCheap) {
     float heightFraction = saturate((worldPos.y - cloudLayerBottom) / cloudLayerThickness);
     if (heightFraction <= 0.0 || heightFraction >= 1.0) return 0.0;
 
-    vec2 weather = sampleWeather(worldPos);
+    vec4 weather = sampleWeather(worldPos);
     float coverage = weather.x;
     float type = mix(weather.y, cloudType, 0.5);
 
     float heightGradient = cloudHeightGradient(heightFraction, type);
-    float baseShape = sampleCloudShape(worldPos);
+    float baseShape = sampleCloudShape(worldPos, weather.zw);
     float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0));
 
     if (useCheap || baseCloud <= 0.0) return baseCloud * cloudDensity;
@@ -310,32 +337,65 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     float transmittance = 1.0;
     float cosTheta = dot(rayDir, sunDirection);
 
-    // Step distribution: UNIFORM when viewing the layer from outside (the far
-    // steps of a quadratic warp are ~2x coarser, and their larger per-frame
-    // jitter showed as vertical shudder whenever camera rotation invalidated
-    // the temporal history), QUADRATIC (fine near the camera) only when inside
-    // the layer — the fly-through case, where near-field detail is what
-    // matters and the in-cloud view masks far-step jitter. Each step
-    // integrates over its actual length dt, so Beer-Lambert stays correct.
-    float warpPow = (tRange.x <= 0.001) ? 2.0 : 1.0;
-    float tPrev = tRange.x;
-    for (uint i = 0u; i < primarySteps; i++) {
-        float u = (float(i) + blueNoise) / float(primarySteps);
-        float t = tRange.x + rayLength * pow(u, warpPow);
-        float dt = max(t - tPrev, 1e-3);
-        tPrev = t;
+    // Bound the step SIZE, not the step count. Splitting each ray into a fixed
+    // primarySteps made the step length depend entirely on view angle: 57 m at
+    // the zenith (5.5 km of layer) but 330 m near the horizon, where a ground
+    // ray enters the 9.5 km deck 55 km out and crosses 30 km of it. 330 m is
+    // longer than the whole 200 m detail-noise period, so every step sampled
+    // the detail octave at an unrelated point — per-frame noise that the
+    // temporal pass averaged into grey mush and that popped as vertical
+    // shudder when rotation invalidated the history.
+    //
+    // Fine steps are derived from the layer thickness instead, so the in-cloud
+    // sampling rate is view-angle independent; coarse steps (4x) skip the empty
+    // air, keeping the total step count in the same budget as before.
+    float baseFine = min(cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
+    uint maxIters = primarySteps * 2u;
 
+    float t = tRange.x + blueNoise * baseFine * 4.0;  // dither the layer entry
+    float tIntegrated = tRange.x;  // never integrate behind this (no double count)
+    bool inCloud = false;
+    int emptyRun = 0;
+
+    for (uint i = 0u; i < maxIters && t < tRange.y; i++) {
+        // Steps grow with distance, lagging the detail LOD fade above: by the
+        // time only the 10 km base shape survives, 4x coarser still gives ~40
+        // samples per feature.
+        float fineStep = baseFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
+        float coarseStep = fineStep * 4.0;
         vec3 pos = rayOrigin + rayDir * t;
+
+        if (!inCloud) {
+            // Empty-space skip on the cheap density. Detail only ever erodes,
+            // so the cheap value is an upper bound — this cannot step over a
+            // cloud that the full-quality path would have found.
+            if (sampleCloudDensity(pos, true) > 0.0) {
+                // Back up one coarse step so the lit leading edge isn't clipped.
+                t = max(t - coarseStep, tIntegrated);
+                inCloud = true;
+                emptyRun = 0;
+            } else {
+                t += coarseStep;
+            }
+            continue;
+        }
+
         float density = sampleCloudDensity(pos, false);
         if (density > 0.001) {
             vec3 luminance = cloudLighting(pos, rayDir);
-            float powder = beerPowderEnergy(density * dt * 10.0, cosTheta) * powderStrength +
+            float powder = beerPowderEnergy(density * fineStep * 10.0, cosTheta) * powderStrength +
                            (1.0 - powderStrength);
-            float stepTransmittance = beerLambert(density, dt);
+            float stepTransmittance = beerLambert(density, fineStep);
             scattering += transmittance * luminance * (1.0 - stepTransmittance) * powder;
             transmittance *= stepTransmittance;
             if (transmittance < 0.01) { transmittance = 0.0; break; }
+            emptyRun = 0;
+        } else if (++emptyRun >= 8) {
+            inCloud = false;  // out the far side — back to skipping
+            emptyRun = 0;
         }
+        t += fineStep;
+        tIntegrated = t;
     }
 
     // Aerial perspective: distant decks sink into the horizon haze — the
@@ -349,6 +409,14 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
                     (sunIntensity * sunLightScale * 0.25) * mix(0.05, 1.0, dayFactor);
     scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
     transmittance = mix(transmittance, 1.0, haze * 0.5);
+
+    // The march stops at maxDist (100 km for sky pixels), which on a flat deck
+    // is reached at ~5 deg elevation — without an explicit fade the clouds just
+    // ended there, leaving a hard line across the sky. Fade the contribution
+    // out before the cutoff so the deck dissolves into haze instead.
+    float distFade = smoothstep(60000.0, 95000.0, tRange.x);
+    scattering *= 1.0 - distFade;
+    transmittance = mix(transmittance, 1.0, distFade);
 
     return vec4(scattering, transmittance);
 }
