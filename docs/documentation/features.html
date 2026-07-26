@@ -142,6 +142,21 @@
 
     <hr>
 
+    <h2>Procedural Meshing (Vapor::procgen)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Immediate-Mode Emission</td><td>Header-only bake-time toolkit (glm + std only): <code>MeshData</code> streams, quad emitter, panel frames (origin, U, V) with CCW front faces. Feeds straight into <code>Mesh::initialize</code>.</td></tr>
+        <tr><td>Sweeps &amp; Lathe</td><td><code>sweepProfile</code> along open/closed paths (coping, cove trim), parallel-transport <code>sweepTube</code> (rails, slides, torus rims), <code>lathe</code> surfaces of revolution with pole fans.</td></tr>
+        <tr><td>Caps &amp; Extrusion</td><td><code>triangulatePolygon</code> — scanline trapezoid decomposition that survives touching/collinear hole layouts, crack-free (no T-junctions); <code>polygonCap</code> and <code>extrudePolygon</code> build on it.</td></tr>
+        <tr><td>Instancing &amp; Box CSG</td><td><code>appendTransformed</code> (inverse-transpose normals, mirroring flips winding), <code>frameTransform</code>, axis-aligned <code>subtractBox</code>/<code>emitBoxes</code> blockouts with covered-face culling and collider co-emission.</td></tr>
+        <tr><td>Pattern Generators</td><td><code>buildTilePanel</code>: beveled ceramic tiles with recessed grout channels as real geometry; bullnose/cove trim profiles (<code>procgen_patterns.hpp</code>).</td></tr>
+        <tr><td>Bake Validation</td><td><code>validate()</code> reports OOB indices, non-finite values, degenerate geometry/UV triangles (the MikkTSpace gate) and winding/normal disagreement. Covered by <code>tests/procgen_test.cpp</code>.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
     <h2>Action System (ActionManager)</h2>
     <table>
       <thead><tr><th>Feature</th><th>Description</th></tr></thead>

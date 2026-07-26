@@ -1,12 +1,12 @@
 #pragma once
 // ============================================================================
-// Poolrooms — scene assembly (engine-agnostic: glm + std only).
+// Poolrooms — scene assembly (glm + std + the Vapor::procgen headers only).
 //
-// Builds the whole environment out of the poolroom_mesh toolkit and returns
-// it as per-material geometry buckets plus collision boxes and gameplay
-// metadata. main.cpp converts the buckets into engine meshes/materials and
-// bodies — nothing in here touches the engine, so the layout is unit-testable
-// on its own.
+// Builds the whole environment out of the engine's procedural mesh toolkit
+// (Vapor/procgen.hpp + procgen_patterns.hpp) and returns it as per-material
+// geometry buckets plus collision boxes and gameplay metadata. main.cpp
+// converts the buckets into engine meshes/materials and bodies — nothing in
+// here touches the renderer, so the layout is unit-testable on its own.
 //
 // Layout (meters, Y up, deck surface at y = 0):
 //   * Hall interior 24 x 10, ceiling at 4.6, tiled walls and deck.
@@ -20,10 +20,14 @@
 //     water, and two glossy tube slides dropping from the north wall.
 // ============================================================================
 
-#include "poolroom_mesh.hpp"
+#include "Vapor/procgen.hpp"
+#include "Vapor/procgen_patterns.hpp"
 #include <array>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace poolgen {
+
+using namespace Vapor::procgen;
 
 // One geometry bucket per material so main.cpp can assign textures per slot.
 enum class MaterialSlot : int {
@@ -268,39 +272,27 @@ inline PoolroomScene buildPoolroomScene() {
         cove({ glm::vec3(hallMinX, 0, doorZ0b + doorW), glm::vec3(hallMinX, 0, hallMaxZ - inset) });
     }
 
-    // ── Ceiling ── flat plaster facing down, minus six skylight wells.
+    // ── Ceiling ── flat plaster facing down, minus six skylight wells: a
+    // single polygonCap with six holes (frame U=+X, V=+Z makes W=-Y, so the
+    // CCW cap faces the room below).
     {
         const float wellHalfX = 1.2f, wellHalfZ = 0.8f;
         const float wellDepth = 0.5f;
         const float wellXs[3] = { -5.0f, 0.0f, 5.0f };
         const float wellZs[2] = { -1.5f, 1.5f };
+        std::vector<std::vector<glm::vec2>> wells;
         for (float wx : wellXs) {
             for (float wz : wellZs) {
                 S.skylights.push_back(glm::vec4(wx, wz, wellHalfX, wellHalfZ));
+                const glm::vec2 lo(wx - wellHalfX - hallMinX, wz - wellHalfZ - hallMinZ);
+                const glm::vec2 hi(wx + wellHalfX - hallMinX, wz + wellHalfZ - hallMinZ);
+                wells.push_back({ { lo.x, lo.y }, { hi.x, lo.y }, { hi.x, hi.y }, { lo.x, hi.y } });
             }
         }
-        const float zEdges[6] = { wellZs[0] - wellHalfZ, wellZs[0] + wellHalfZ,
-                                  wellZs[1] - wellHalfZ, wellZs[1] + wellHalfZ, 0, 0 };
-        // Down-facing quad helper (U=+X, V=+Z -> normal -Y).
-        auto ceilQuad = [&](float x0, float z0, float x1, float z1) {
-            if (x1 - x0 < 1e-4f || z1 - z0 < 1e-4f) return;
-            plainQuad(glm::vec3(x0, ceilY, z0), glm::vec3(1, 0, 0), glm::vec3(0, 0, 1),
-                      x1 - x0, z1 - z0, 0.5f, ceil);
-        };
-        // Z strips without wells.
-        ceilQuad(hallMinX, hallMinZ, hallMaxX, zEdges[0]);
-        ceilQuad(hallMinX, zEdges[1], hallMaxX, zEdges[2]);
-        ceilQuad(hallMinX, zEdges[3], hallMaxX, hallMaxZ);
-        // Well rows: X segments between the wells.
-        for (float wz : wellZs) {
-            const float z0 = wz - wellHalfZ, z1 = wz + wellHalfZ;
-            float cursor = hallMinX;
-            for (float wx : wellXs) {
-                ceilQuad(cursor, z0, wx - wellHalfX, z1);
-                cursor = wx + wellHalfX;
-            }
-            ceilQuad(cursor, z0, hallMaxX, z1);
-        }
+        const glm::vec2 hallExt(hallMaxX - hallMinX, hallMaxZ - hallMinZ);
+        polygonCap(glm::vec3(hallMinX, ceilY, hallMinZ), glm::vec3(1, 0, 0), glm::vec3(0, 0, 1),
+                   { { 0, 0 }, { hallExt.x, 0 }, { hallExt.x, hallExt.y }, { 0, hallExt.y } },
+                   wells, 0.5f, ceil);
         // Well shafts: 4 plaster faces per well, facing into the shaft, from
         // the ceiling up to the open top.
         for (float wx : wellXs) {
@@ -324,25 +316,31 @@ inline PoolroomScene buildPoolroomScene() {
     }
 
     // ── Pillars ── four tiled faces each, on the north and south decks.
+    // Built ONCE around the origin, then stamped per center with
+    // appendTransformed (which would keep normals and winding honest even
+    // under rotation or mirroring).
     {
         const float half = 0.275f;
+        MeshData pillarWall, pillarGrout;
+        auto face = [&](glm::vec3 origin, glm::vec3 U) {
+            TilePanelDesc d = wallTiles;
+            d.width = 2.0f * half; d.height = ceilY;
+            buildTilePanel(origin, U, glm::vec3(0, 1, 0), d, pillarWall, pillarGrout);
+        };
+        // Outward faces: normal = U x +Y must point away from the pillar.
+        face(glm::vec3(half, 0, -half), glm::vec3(-1, 0, 0));   // south side -> -Z
+        face(glm::vec3(-half, 0, half), glm::vec3(1, 0, 0));    // north side -> +Z
+        face(glm::vec3(half, 0, half), glm::vec3(0, 0, -1));    // east side -> +X
+        face(glm::vec3(-half, 0, -half), glm::vec3(0, 0, 1));   // west side -> -X
+
         const glm::vec2 centers[6] = {
             { -8.0f, 3.9f }, { 0.0f, 3.9f }, { 8.0f, 3.9f },
             { -8.0f, -3.9f }, { 0.0f, -3.9f }, { 8.0f, -3.9f },
         };
         for (const glm::vec2& c : centers) {
-            const float x0 = c.x - half, x1 = c.x + half;
-            const float z0 = c.y - half, z1 = c.y + half;
-            auto face = [&](glm::vec3 origin, glm::vec3 U, float w) {
-                TilePanelDesc d = wallTiles;
-                d.width = w; d.height = ceilY;
-                buildTilePanel(origin, U, glm::vec3(0, 1, 0), d, wall, grout);
-            };
-            // Outward faces: normal = U x +Y must point away from the pillar.
-            face(glm::vec3(x1, 0, z0), glm::vec3(-1, 0, 0), x1 - x0);  // south side -> -Z
-            face(glm::vec3(x0, 0, z1), glm::vec3(1, 0, 0), x1 - x0);   // north side -> +Z
-            face(glm::vec3(x1, 0, z1), glm::vec3(0, 0, -1), z1 - z0);  // east side -> +X
-            face(glm::vec3(x0, 0, z0), glm::vec3(0, 0, 1), z1 - z0);   // west side -> -X
+            const glm::mat4 xf = glm::translate(glm::mat4(1.0f), glm::vec3(c.x, 0.0f, c.y));
+            appendTransformed(wall, pillarWall, xf);
+            appendTransformed(grout, pillarGrout, xf);
             S.colliders.push_back({ glm::vec3(c.x, ceilY * 0.5f, c.y),
                                     glm::vec3(half, ceilY * 0.5f, half) });
         }
@@ -551,17 +549,25 @@ inline PoolroomScene buildPoolroomScene() {
     }
 
     // ── Porthole wall lamps ── warm round fixtures: a metal rim ring (torus)
-    // around an emissive glow disc, slightly proud of the tile face. These
-    // carry the flooded-mode look: their glow discs reflect and smear across
+    // around an emissive lathed glass dome, slightly proud of the tile face.
+    // Built ONCE facing +Y, stamped onto each wall with frameTransform. These
+    // carry the flooded-mode look: their glow domes reflect and smear across
     // the water via the planar-reflection pass.
     {
         MeshData& glow = S.bucket(MaterialSlot::LampGlow);
+        MeshData glowProto, rimProto;
+        // Dome profile (radius, height), rim to pole; the base radius tucks
+        // under the rim torus (ring r=0.185, tube r=0.028 -> inner ~0.157).
+        lathe({ { 0.165f, 0.030f }, { 0.150f, 0.055f }, { 0.110f, 0.070f },
+                { 0.055f, 0.077f }, { 0.0f, 0.080f } }, 24, glowProto);
+        sweepTube(circlePath(glm::vec3(0, 0.035f, 0), glm::vec3(0, 1, 0), 0.185f, 24),
+                  0.028f, 10, 0.3f, rimProto, false);
         auto lamp = [&](glm::vec3 wallPos, glm::vec3 outNormal) {
             const glm::vec3 n = glm::normalize(outNormal);
-            disc(wallPos + n * 0.045f, n, 0.16f, 24, glow);
-            sweepTube(circlePath(wallPos + n * 0.035f, n, 0.185f, 24), 0.028f, 10, 0.3f,
-                      metal, false);
-            S.lamps.emplace_back(wallPos + n * 0.045f, n);
+            const glm::mat4 xf = frameTransform(wallPos, glm::cross(glm::vec3(0, 1, 0), n), n);
+            appendTransformed(glow, glowProto, xf);
+            appendTransformed(metal, rimProto, xf);
+            S.lamps.emplace_back(wallPos + n * 0.05f, n);
         };
         const float lampY = 2.25f;
         for (float lx : { -9.0f, -3.0f, 3.0f, 9.0f }) {
@@ -580,15 +586,13 @@ inline PoolroomScene buildPoolroomScene() {
 
     // ── Collision: room shell, deck, basin ──
     {
-        // Deck slabs (top at y=0).
-        S.colliders.push_back({ glm::vec3(0, -0.25f, (poolMaxZ + hallMaxZ) * 0.5f),
-                                glm::vec3(12.0f, 0.25f, (hallMaxZ - poolMaxZ) * 0.5f) });  // north
-        S.colliders.push_back({ glm::vec3(0, -0.25f, (poolMinZ + hallMinZ) * 0.5f),
-                                glm::vec3(12.0f, 0.25f, (poolMinZ - hallMinZ) * 0.5f) });  // south
-        S.colliders.push_back({ glm::vec3((hallMinX + poolMinX) * 0.5f, -0.25f, 0),
-                                glm::vec3((poolMinX - hallMinX) * 0.5f, 0.25f, 3.0f) });   // west
-        S.colliders.push_back({ glm::vec3((hallMaxX + poolMaxX) * 0.5f, -0.25f, 0),
-                                glm::vec3((hallMaxX - poolMaxX) * 0.5f, 0.25f, 3.0f) });   // east
+        // Deck slabs (top at y=0): one slab minus the pool cutout, via the
+        // box-CSG blockout tools.
+        std::vector<Box3> deckSolid{ { glm::vec3(hallMinX, -0.5f, hallMinZ),
+                                       glm::vec3(hallMaxX, 0.0f, hallMaxZ) } };
+        subtractBox(deckSolid, { glm::vec3(poolMinX, -1.0f, poolMinZ),
+                                 glm::vec3(poolMaxX, 1.0f, poolMaxZ) });
+        boxesToColliders(deckSolid, S.colliders);
         // Pool floor + basin walls.
         S.colliders.push_back({ glm::vec3(0, poolFloorY - 0.25f, 0), glm::vec3(7.35f, 0.25f, 3.35f) });
         const float bwCY = (poolFloorY + 0.0f) * 0.5f;

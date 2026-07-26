@@ -21,13 +21,17 @@ the backrooms style — and the showcase scene for the engine's RHI water pass.
   web boosts every submerged pixel inside the pool volume, chromatically
   fringed, sun-tinted and depth-faded — the surface refracts the caustic-lit
   floor, so the pattern reads correctly through the ripples.
-- **Fully procedural environment**: every mesh is generated at startup —
-  beveled ceramic tiles with recessed grout channels (real geometry, not a
-  normal map), a bullnose coping sweep around the rim, a waterline mosaic
-  band, cove trim, six skylight wells, tiled pillars, a dark corridor stub,
-  porthole wall lamps (emissive discs + warm point lights), a mosaic-tiled
-  stair block descending into the water, bent-tube pool handrails, and two
-  glossy tube slides dropping from the north wall with hollow open mouths.
+- **Fully procedural environment**: every mesh is generated at startup with
+  the engine's `Vapor::procgen` toolkit (`Vapor/include/Vapor/procgen.hpp` +
+  `procgen_patterns.hpp`) — beveled ceramic tiles with recessed grout
+  channels (real geometry, not a normal map), a bullnose coping sweep around
+  the rim, a waterline mosaic band, cove trim, a ceiling cap with six
+  skylight holes cut by the polygon triangulator, tiled pillars stamped from
+  one prototype via `appendTransformed`, a dark corridor stub, porthole wall
+  lamps (lathed emissive glass domes + warm point lights), a mosaic-tiled
+  stair block descending into the water, bent-tube pool handrails, two
+  glossy tube slides dropping from the north wall with hollow open mouths,
+  and deck colliders derived by box CSG (`subtractBox`).
 - **Walking, swimming, climbing player**: Jolt `CharacterVirtual` through the
   ECS `CharacterBodyComponent` — walk the deck, jump in, swim (gravity gives
   way to gentle buoyancy below the waterline), then walk out up the mosaic
