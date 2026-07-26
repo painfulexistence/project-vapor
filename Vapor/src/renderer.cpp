@@ -4848,11 +4848,11 @@ void Renderer::waterCausticsPass() {
     std::swap(colorRT, tempColorRT);  // colorRT now holds the caustic-lit scene
 }
 
-// Water surface: Gerstner grid with scrolling normal maps, SSR + IBL-cubemap
-// reflections, refraction from a snapshot of the scene, sun specular and foam.
-// Draws into colorRT (loadColor) with depth test against the opaque depth, no
-// depth write. The snapshot copy exists because a pass cannot sample its own
-// color attachment.
+// Water surface: FFT-displaced grid with detail normal layers, a fresnel blend
+// of the planar reflection (env cubemap at its borders) against snapshot
+// refraction, sun specular and Jacobian/shore foam. Draws into colorRT
+// (loadColor) with depth test against the opaque depth, no depth write. The
+// snapshot copy exists because a pass cannot sample its own color attachment.
 void Renderer::waterPass() {
     if (!waterEnabled || waterIndexCount == 0 || !waterPipeline.isValid() ||
         !colorRT.isValid() || !tempColorRT.isValid() || !depthStencilRT.isValid() ||
@@ -4863,7 +4863,7 @@ void Renderer::waterPass() {
 
     updateWaterDataBuffer();
 
-    // Snapshot the pre-water scene for refraction and SSR color.
+    // Snapshot the pre-water scene for refraction.
     rhi->copyTexture(colorRT, 0, tempColorRT, 0);
 
     RenderPassDesc rp;
@@ -4894,6 +4894,9 @@ void Renderer::waterPass() {
     rhi->setTexture(2, 5,
                     (m_iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex,
                     clampSampler);
+    // Planar reflection RT, or black when the reflection pass is off — the
+    // shader reads a black sample as "no planar data" and takes the env cube.
+    TextureHandle blackTex = textures[defaultBlackTexture].handle;
     rhi->setTexture(2, 6,
                     (waterSettings.reflectionParams.x > 0.0f && waterReflColorRT.isValid())
                         ? waterReflColorRT : blackTex,

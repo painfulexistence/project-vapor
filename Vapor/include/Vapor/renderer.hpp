@@ -341,10 +341,11 @@ public:
     // ========================================================================
     // Water Surface API (RHI port of the legacy Metal water pass)
     // ========================================================================
-    // Gerstner-wave surface with SSR + IBL reflections, snapshot refraction and
-    // projected caustics (waterPass / waterCausticsPass). Off by default; an
-    // app calls setWaterGrid + setWaterTransform + setWaterSettings, then
-    // enables it. The pass overwrites modelMatrix, time, the sun mirror and
+    // FFT spectral surface with planar reflections, snapshot refraction and
+    // projected caustics (waterSimPass / waterReflectionPass /
+    // waterCausticsPass / waterPass). Off by default; an app calls
+    // setWaterGrid + setWaterTransform + setWaterSettings (+ setWaterSimParams
+    // to tune the spectrum), then enables it. The pass overwrites modelMatrix, time, the sun mirror and
     // the water level (causticsParams.w) in the settings every frame; every
     // other WaterData field belongs to the app.
 

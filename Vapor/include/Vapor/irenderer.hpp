@@ -252,9 +252,9 @@ public:
     virtual void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {}
 
     // ---- Water surface --------------------------------------------------
-    // Gerstner water surface with SSR/IBL reflections, refraction and caustics.
-    // Implemented by the RHI renderer (waterPass/waterCausticsPass); no-ops on
-    // renderers without the pass. Off by default — an app configures the grid,
+    // FFT water surface with planar reflections, refraction and caustics.
+    // Implemented by the RHI renderer (waterSimPass/waterReflectionPass/
+    // waterCausticsPass/waterPass); no-ops on renderers without the passes. Off by default — an app configures the grid,
     // transform and settings, then enables it. See Renderer for the semantics
     // of each call.
     virtual void setWaterEnabled(bool enabled) {}

@@ -56,8 +56,8 @@ Controls: **WASD** move, **mouse** look (**Tab** toggles capture), **Space**
 jump / swim up, **LCtrl** swim down, **LShift** sprint, **Esc** quit.
 
 The example window has teleports and a sun-angle control; deep water tuning
-(waves, SSR, caustics, foam) lives in the engine debug panel under
-**Water Settings**.
+(FFT spectrum, reflection, caustics, foam, detail normals) lives in the
+engine debug panel under **Water Settings**.
 
 ## Using your own tile textures
 
