@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdint>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace Vapor {

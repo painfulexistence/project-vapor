@@ -3,6 +3,8 @@
 #include "Vapor/procgen_patterns.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
+#include <limits>
+#include <utility>
 
 // ============================================================================
 // Vapor::procgen verification — every property here is one the engine relies
