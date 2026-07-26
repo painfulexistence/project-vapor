@@ -16,7 +16,8 @@
 //     and sky light the room through them.
 //   * Six tiled pillars on the north/south decks.
 //   * Two doorways in the west wall into a dark corridor stub.
-//   * Two metal ladders over the coping down to the pool floor.
+//   * Bent-tube handrail entries, a mosaic stair block descending into the
+//     water, and two glossy tube slides dropping from the north wall.
 // ============================================================================
 
 #include "poolroom_mesh.hpp"
@@ -35,7 +36,10 @@ enum class MaterialSlot : int {
     Grout,        // recessed channels + cove trim
     Coping,       // bullnose stone around the rim
     DarkPlaster,  // corridor stub
-    Metal,        // ladders
+    Metal,        // handrails + lamp rims
+    LampGlow,     // porthole lamp faces (emissive)
+    SlideBlue,    // water-slide tube shells
+    SlideViolet,
     Count
 };
 
@@ -51,6 +55,9 @@ inline const char* materialSlotName(MaterialSlot s) {
         case MaterialSlot::Coping: return "coping";
         case MaterialSlot::DarkPlaster: return "dark_plaster";
         case MaterialSlot::Metal: return "metal";
+        case MaterialSlot::LampGlow: return "lamp_glow";
+        case MaterialSlot::SlideBlue: return "slide_blue";
+        case MaterialSlot::SlideViolet: return "slide_violet";
         default: return "unknown";
     }
 }
@@ -72,6 +79,10 @@ struct PoolroomScene {
     std::vector<std::pair<glm::vec3, glm::vec3>> ladderZones;  // (min, max)
     // Skylight well centers (X, Z) and half sizes — used to aim light shafts.
     std::vector<glm::vec4> skylights;  // x, z, halfX, halfZ
+    // Porthole wall lamps: position + outward normal. main.cpp attaches a warm
+    // point light to each; the glow disc itself is emissive geometry, so it
+    // shows up in the water's planar reflection.
+    std::vector<std::pair<glm::vec3, glm::vec3>> lamps;
 
     MeshData& bucket(MaterialSlot s) { return buckets[static_cast<size_t>(s)]; }
 };
@@ -400,52 +411,171 @@ inline PoolroomScene buildPoolroomScene() {
         S.colliders.push_back({ glm::vec3(corMidX, corCeil * 0.5f, corMaxZ + 0.175f), glm::vec3((corMaxX - corMinX) * 0.5f, corCeil * 0.5f, 0.175f) });  // north
     }
 
-    // ── Ladders ── two, on opposite long sides, bent over the coping.
+    // ── Pool-entry handrails ── the classic bent-tube Π hoop: up from the
+    // deck, a smooth bend over the coping, straight down into the water.
+    // (No rungs — reference-style grab rails; the climb zone still lets the
+    // player pull themselves out against one.)
+    const float railR = 0.024f;
+    const int railSides = 14;
+    auto handrailBow = [&](glm::vec3 deckAnchor, glm::vec3 dirIn, float overWater,
+                           float apexY, float dropToY) {
+        // deckAnchor: rail base on the deck (y = 0). dirIn: horizontal unit
+        // direction toward the pool. The hoop rises to apexY, runs
+        // `overWater` toward the pool and dives down to dropToY.
+        const float bendR = 0.24f;
+        std::vector<glm::vec3> path;
+        appendLine(path, deckAnchor + glm::vec3(0, 0.02f, 0),
+                   deckAnchor + glm::vec3(0, apexY - bendR, 0), 4, true);
+        appendArc(path, deckAnchor + glm::vec3(0, apexY - bendR, 0) + dirIn * bendR,
+                  -dirIn * bendR, glm::vec3(0, bendR, 0), 6);
+        appendLine(path, path.back(),
+                   deckAnchor + glm::vec3(0, apexY, 0) + dirIn * (overWater - bendR), 2, false);
+        appendArc(path, deckAnchor + glm::vec3(0, apexY - bendR, 0) + dirIn * (overWater - bendR),
+                  glm::vec3(0, bendR, 0), dirIn * bendR, 6);
+        appendLine(path, path.back(),
+                   deckAnchor + dirIn * overWater + glm::vec3(0, dropToY, 0), 6, false);
+        sweepTube(path, railR, railSides, 0.25f, metal, true);
+    };
+    auto poolEntry = [&](float cx, float poolEdgeZ, float dirOut) {
+        // dirOut = +1: deck at +Z of the pool edge; -1: deck at -Z.
+        const glm::vec3 dirIn(0, 0, -dirOut);
+        const float gap = 0.72f;  // hoop-to-hoop spacing
+        for (float sx : { cx - gap * 0.5f, cx + gap * 0.5f }) {
+            handrailBow(glm::vec3(sx, 0.0f, poolEdgeZ + dirOut * 0.38f), dirIn,
+                        0.78f, 0.82f, S.waterLevel - 0.85f);
+            S.colliders.push_back({ glm::vec3(sx, 0.4f, poolEdgeZ + dirOut * 0.38f),
+                                    glm::vec3(0.04f, 0.42f, 0.04f) });
+        }
+        const glm::vec3 zoneMin(cx - 0.55f, poolFloorY, poolEdgeZ - 0.6f);
+        const glm::vec3 zoneMax(cx + 0.55f, 0.95f, poolEdgeZ + 0.6f);
+        S.ladderZones.emplace_back(glm::min(zoneMin, zoneMax), glm::max(zoneMin, zoneMax));
+    };
+    poolEntry(6.2f, poolMaxZ, 1.0f);    // NE entry onto the north deck
+    poolEntry(-6.2f, poolMinZ, -1.0f);  // SW entry onto the south deck
+
+    // ── Tiled stairs into the pool ── a solid mosaic-tiled block descending
+    // from the west deck edge to swimming depth, flanked by two handrail
+    // hoops (the reference look: steps + smooth bent rails, no rung ladder).
     {
-        const float railR = 0.021f, rungR = 0.016f;
-        const int sides = 12;
-        const float railGap = 0.5f;  // rail-to-rail spacing along X
+        const int stepCount = 10;
+        const float rise = 0.21f, run = 0.32f;  // gentle enough for the capsule to walk up
+        const float halfW = 1.3f;                 // stairs span z in [-1.3, 1.3]
+        const float topX = poolMinX;              // flush with the west rim
+        TilePanelDesc stepTiles = accentTiles;    // 10 cm mosaic reads best on steps
 
-        auto ladder = [&](float cx, float poolEdgeZ, float dirOut) {
-            // dirOut = +1: deck is at +Z of the pool edge; -1: at -Z.
-            const float zIn = poolEdgeZ - dirOut * 0.11f;     // rail plane inside the pool
-            const float topY = 0.55f;                          // rail apex above deck
-            const float bendR = 0.18f;
-            const float zDeck = poolEdgeZ + dirOut * 0.42f;    // where it comes down on deck
-            for (float sx : { cx - railGap * 0.5f, cx + railGap * 0.5f }) {
-                std::vector<glm::vec3> path;
-                // Up from the pool floor.
-                appendLine(path, glm::vec3(sx, poolFloorY + 0.10f, zIn),
-                           glm::vec3(sx, topY - bendR, zIn), 8, true);
-                // Bend from vertical to horizontal (toward the deck).
-                appendArc(path, glm::vec3(sx, topY - bendR, zIn + dirOut * bendR),
-                          glm::vec3(0, 0, -dirOut * bendR), glm::vec3(0, bendR, 0), 6);
-                // Short horizontal run.
-                appendLine(path, path.back(),
-                           glm::vec3(sx, topY, zDeck - dirOut * bendR), 2, false);
-                // Bend from horizontal back to vertical (down to the deck).
-                appendArc(path, glm::vec3(sx, topY - bendR, zDeck - dirOut * bendR),
-                          glm::vec3(0, bendR, 0), glm::vec3(0, 0, dirOut * bendR), 6);
-                // Down to the deck.
-                appendLine(path, path.back(), glm::vec3(sx, 0.03f, zDeck), 3, false);
-                sweepTube(path, railR, sides, 0.25f, metal, true);
+        for (int i = 0; i < stepCount; ++i) {
+            const float x0 = topX + i * run;
+            const float x1 = x0 + run;
+            const float topY = -rise * static_cast<float>(i);
+            const float botY = topY - rise;
+            // Tread (up): U=+Z, V=+X.
+            TilePanelDesc t = stepTiles;
+            t.width = 2.0f * halfW; t.height = run;
+            buildTilePanel(glm::vec3(x0, topY, -halfW), glm::vec3(0, 0, 1), glm::vec3(1, 0, 0),
+                           t, accent, grout);
+            // Riser (faces +X, toward the pool interior).
+            TilePanelDesc r = stepTiles;
+            r.width = 2.0f * halfW; r.height = rise;
+            buildTilePanel(glm::vec3(x1, botY, -halfW), glm::vec3(0, 0, 1), glm::vec3(0, 1, 0),
+                           r, accent, grout);
+            // Solid sides down to the pool floor (the block reads as masonry).
+            TilePanelDesc sd = stepTiles;
+            sd.width = run; sd.height = topY - poolFloorY;
+            // south side faces -Z: U=-X from x1.
+            buildTilePanel(glm::vec3(x1, poolFloorY, -halfW), glm::vec3(-1, 0, 0), glm::vec3(0, 1, 0),
+                           sd, accent, grout);
+            // north side faces +Z: U=+X from x0.
+            buildTilePanel(glm::vec3(x0, poolFloorY, halfW), glm::vec3(1, 0, 0), glm::vec3(0, 1, 0),
+                           sd, accent, grout);
+            // Collision: full-depth box per step.
+            S.colliders.push_back({ glm::vec3((x0 + x1) * 0.5f, (poolFloorY + topY) * 0.5f, 0.0f),
+                                    glm::vec3(run * 0.5f, (topY - poolFloorY) * 0.5f, halfW) });
+        }
+        // Front face of the block (below the last riser, facing +X).
+        {
+            const float frontX = topX + stepCount * run;
+            const float frontTop = -rise * stepCount;
+            TilePanelDesc f = stepTiles;
+            f.width = 2.0f * halfW; f.height = frontTop - poolFloorY;
+            buildTilePanel(glm::vec3(frontX, poolFloorY, -halfW), glm::vec3(0, 0, 1), glm::vec3(0, 1, 0),
+                           f, accent, grout);
+        }
+        // Handrail hoops flanking the stairs, diving parallel to the pitch.
+        handrailBow(glm::vec3(topX - 0.45f, 0.0f, -(halfW + 0.18f)), glm::vec3(1, 0, 0),
+                    1.15f, 0.85f, S.waterLevel - 0.9f);
+        handrailBow(glm::vec3(topX - 0.45f, 0.0f, halfW + 0.18f), glm::vec3(1, 0, 0),
+                    1.15f, 0.85f, S.waterLevel - 0.9f);
+        // The stairs are their own exit — mark a climb-free zone is not
+        // needed; swimmers walk out. (Zones stay for the two rail entries.)
+    }
 
-                // Rail collision (thin box over the submerged run).
-                S.colliders.push_back({ glm::vec3(sx, (poolFloorY + topY) * 0.5f, zIn),
-                                        glm::vec3(0.035f, (topY - poolFloorY) * 0.5f, 0.035f) });
-            }
-            // Rungs between the rails, pool floor up to just above the water.
-            for (float ry = poolFloorY + 0.28f; ry < S.waterLevel + 0.25f; ry += 0.28f) {
-                cylinderBetween(glm::vec3(cx - railGap * 0.5f + railR, ry, zIn),
-                                glm::vec3(cx + railGap * 0.5f - railR, ry, zIn), rungR, 10, metal);
-            }
-            // Climb zone.
-            const glm::vec3 zoneMin(cx - 0.45f, poolFloorY, std::min(zIn, zDeck) - 0.35f);
-            const glm::vec3 zoneMax(cx + 0.45f, topY + 0.3f, std::max(zIn, zDeck) + 0.35f);
-            S.ladderZones.emplace_back(zoneMin, zoneMax);
+    // ── Water slides ── two glossy tube slides on the north wall: a vertical
+    // drop hugging the wall, a sweeping bend over the coping, and an open
+    // mouth grazing the water. Outer shell + inward-facing lining + a rim
+    // annulus make the mouth read as a real hollow tube.
+    {
+        const float tubeR = 0.42f, wallT = 0.05f;
+        auto slide = [&](float cx, MaterialSlot slot) {
+            MeshData& shell = S.bucket(slot);
+            const float zWall = hallMaxZ - 0.55f;   // drop axis, proud of the wall
+            const float bendR = 1.15f;
+            const float mouthY = 0.55f;             // mouth center: bottom clears the coping lip
+            const float mouthZ = poolMaxZ - 0.75f;  // hangs over the pool
+
+            std::vector<glm::vec3> path;
+            // Start above the ceiling plane so the open top edge is hidden
+            // (the ceiling is solid here — the skylight wells sit at z ±1.5).
+            appendLine(path, glm::vec3(cx, ceilY + 0.4f, zWall),
+                       glm::vec3(cx, mouthY + bendR, zWall), 6, true);
+            appendArc(path, glm::vec3(cx, mouthY + bendR, zWall - bendR),
+                      glm::vec3(0, 0, bendR), glm::vec3(0, -bendR, 0), 8);
+            appendLine(path, path.back(), glm::vec3(cx, mouthY, mouthZ), 3, false);
+
+            const size_t v0 = shell.positions.size();
+            const size_t i0 = shell.indices.size();
+            sweepTube(path, tubeR, 20, 1.0f, shell, false);          // outer
+            const size_t v1 = shell.positions.size();
+            const size_t i1 = shell.indices.size();
+            sweepTube(path, tubeR - wallT, 20, 1.0f, shell, false);  // lining
+            flipAppended(shell, v1, i1);
+            (void)v0; (void)i0;
+            annulus(glm::vec3(cx, mouthY, mouthZ), glm::vec3(0, 0, -1),
+                    tubeR, tubeR - wallT, 20, shell);
+
+            // Collision: the vertical column (players walk around it).
+            S.colliders.push_back({ glm::vec3(cx, ceilY * 0.5f, zWall),
+                                    glm::vec3(tubeR + 0.03f, ceilY * 0.5f, tubeR + 0.03f) });
         };
-        ladder(6.2f, poolMaxZ, 1.0f);    // NE ladder onto the north deck
-        ladder(-6.2f, poolMinZ, -1.0f);  // SW ladder onto the south deck
+        slide(3.6f, MaterialSlot::SlideBlue);
+        slide(5.2f, MaterialSlot::SlideViolet);
+    }
+
+    // ── Porthole wall lamps ── warm round fixtures: a metal rim ring (torus)
+    // around an emissive glow disc, slightly proud of the tile face. These
+    // carry the flooded-mode look: their glow discs reflect and smear across
+    // the water via the planar-reflection pass.
+    {
+        MeshData& glow = S.bucket(MaterialSlot::LampGlow);
+        auto lamp = [&](glm::vec3 wallPos, glm::vec3 outNormal) {
+            const glm::vec3 n = glm::normalize(outNormal);
+            disc(wallPos + n * 0.045f, n, 0.16f, 24, glow);
+            sweepTube(circlePath(wallPos + n * 0.035f, n, 0.185f, 24), 0.028f, 10, 0.3f,
+                      metal, false);
+            S.lamps.emplace_back(wallPos + n * 0.045f, n);
+        };
+        const float lampY = 2.25f;
+        for (float lx : { -9.0f, -3.0f, 3.0f, 9.0f }) {
+            lamp(glm::vec3(lx, lampY, hallMaxZ), glm::vec3(0, 0, -1));  // north wall
+            lamp(glm::vec3(lx, lampY, hallMinZ), glm::vec3(0, 0, 1));   // south wall
+        }
+        for (float lz : { -2.5f, 2.5f }) {
+            lamp(glm::vec3(hallMaxX, lampY, lz), glm::vec3(-1, 0, 0));  // east wall
+        }
+        // A dim pair on the corridor's far wall, glowing back through the
+        // doorways — the two doors read as lit portals from the hall.
+        const float corFarX = hallMinX - 0.35f - 2.8f;
+        lamp(glm::vec3(corFarX, 1.9f, -1.5f), glm::vec3(1, 0, 0));
+        lamp(glm::vec3(corFarX, 1.9f, 1.5f), glm::vec3(1, 0, 0));
     }
 
     // ── Collision: room shell, deck, basin ──

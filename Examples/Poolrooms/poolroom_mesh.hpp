@@ -448,6 +448,87 @@ inline void cylinderBetween(const glm::vec3& a, const glm::vec3& b, float radius
     sweepTube({ a, b }, radius, sides, glm::max(glm::length(b - a), 0.05f), out, true);
 }
 
+// Flip the winding and normals of every triangle appended after
+// `firstIndex`/`firstVertex` — turns an outward-facing sweep into an
+// inward-facing lining (slide interiors).
+inline void flipAppended(MeshData& m, size_t firstVertex, size_t firstIndex) {
+    for (size_t v = firstVertex; v < m.normals.size(); ++v) m.normals[v] = -m.normals[v];
+    for (size_t i = firstIndex; i + 2 < m.indices.size(); i += 3) {
+        std::swap(m.indices[i + 1], m.indices[i + 2]);
+    }
+}
+
+// Flat annulus (washer) facing `normal`: connects an outer and inner circle in
+// one plane — slide mouth rims. CCW seen from the normal side.
+inline void annulus(const glm::vec3& center, glm::vec3 normal, float outerR, float innerR,
+                    int segments, MeshData& out) {
+    normal = glm::normalize(normal);
+    const glm::vec3 ref = std::abs(normal.y) < 0.95f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    const glm::vec3 u = glm::normalize(glm::cross(ref, normal));
+    const glm::vec3 v = glm::cross(normal, u);
+    const uint32_t base = static_cast<uint32_t>(out.positions.size());
+    for (int s = 0; s <= segments; ++s) {
+        const float a = 2.0f * glm::pi<float>() * (static_cast<float>(s) / segments);
+        const glm::vec3 radial = u * std::cos(a) + v * std::sin(a);
+        out.positions.push_back(center + radial * outerR);
+        out.positions.push_back(center + radial * innerR);
+        for (int k = 0; k < 2; ++k) {
+            out.normals.push_back(normal);
+            out.uvs.push_back(glm::vec2(static_cast<float>(s) / segments, k ? 1.0f : 0.0f));
+        }
+    }
+    for (int s = 0; s < segments; ++s) {
+        const uint32_t o0 = base + s * 2, i0 = o0 + 1, o1 = o0 + 2, i1 = o0 + 3;
+        // CCW seen from the +normal side (angle increases counter-clockwise
+        // in the right-handed u,v basis about n).
+        out.indices.push_back(o0); out.indices.push_back(i1); out.indices.push_back(i0);
+        out.indices.push_back(o0); out.indices.push_back(o1); out.indices.push_back(i1);
+    }
+}
+
+// Flat disc facing `normal` (triangle fan, concentric UVs) — porthole lamp
+// faces and similar round fixtures.
+inline void disc(const glm::vec3& center, glm::vec3 normal, float radius, int segments,
+                 MeshData& out) {
+    normal = glm::normalize(normal);
+    const glm::vec3 ref = std::abs(normal.y) < 0.95f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    const glm::vec3 u = glm::normalize(glm::cross(ref, normal));
+    const glm::vec3 v = glm::cross(normal, u);
+
+    const uint32_t base = static_cast<uint32_t>(out.positions.size());
+    out.positions.push_back(center);
+    out.normals.push_back(normal);
+    out.uvs.push_back(glm::vec2(0.5f, 0.5f));
+    for (int s = 0; s <= segments; ++s) {
+        const float a = 2.0f * glm::pi<float>() * (static_cast<float>(s) / segments);
+        const glm::vec3 radial = u * std::cos(a) + v * std::sin(a);
+        out.positions.push_back(center + radial * radius);
+        out.normals.push_back(normal);
+        out.uvs.push_back(glm::vec2(0.5f + 0.5f * std::cos(a), 0.5f + 0.5f * std::sin(a)));
+    }
+    for (int s = 0; s < segments; ++s) {
+        // CCW seen from the normal side: u x v basis is right-handed about it.
+        out.indices.push_back(base);
+        out.indices.push_back(base + 1 + s);
+        out.indices.push_back(base + 2 + s);
+    }
+}
+
+// Circular ring path (for torus-like fixture rims via sweepTube).
+inline std::vector<glm::vec3> circlePath(const glm::vec3& center, const glm::vec3& normal,
+                                         float radius, int segments) {
+    const glm::vec3 n = glm::normalize(normal);
+    const glm::vec3 ref = std::abs(n.y) < 0.95f ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    const glm::vec3 u = glm::normalize(glm::cross(ref, n));
+    const glm::vec3 v = glm::cross(n, u);
+    std::vector<glm::vec3> path;
+    for (int s = 0; s <= segments; ++s) {
+        const float a = 2.0f * glm::pi<float>() * (static_cast<float>(s) / segments);
+        path.push_back(center + (u * std::cos(a) + v * std::sin(a)) * radius);
+    }
+    return path;
+}
+
 // ── Plain surfaces (plaster ceiling, corridor, skylight wells) ──────────────
 
 // Single rectangle in a panel frame with a flat-tiled UV (uvScale = texels per

@@ -24,12 +24,18 @@ the backrooms style — and the showcase scene for the engine's RHI water pass.
 - **Fully procedural environment**: every mesh is generated at startup —
   beveled ceramic tiles with recessed grout channels (real geometry, not a
   normal map), a bullnose coping sweep around the rim, a waterline mosaic
-  band, cove trim, six skylight wells, tiled pillars, a dark corridor stub
-  and two swept-tube pool ladders down to the floor.
+  band, cove trim, six skylight wells, tiled pillars, a dark corridor stub,
+  porthole wall lamps (emissive discs + warm point lights), a mosaic-tiled
+  stair block descending into the water, bent-tube pool handrails, and two
+  glossy tube slides dropping from the north wall with hollow open mouths.
 - **Walking, swimming, climbing player**: Jolt `CharacterVirtual` through the
   ECS `CharacterBodyComponent` — walk the deck, jump in, swim (gravity gives
-  way to gentle buoyancy below the waterline), and climb either ladder back
-  out (hold W against it).
+  way to gentle buoyancy below the waterline), then walk out up the mosaic
+  stairs or pull yourself out against a handrail entry (hold W).
+- **Two moods**: the sunlit pool, and a flooded liminal dusk (`--flooded` or
+  the panel checkbox) — the whole hall waist-deep in murky warm-green water,
+  smooth viscous FFT swells, a dim ember sun, and the porthole lamps
+  smearing across the surface through the planar reflection.
 - **Skylight lighting**: the sun + procedural atmosphere enter through the
   ceiling wells (PSSM-shadowed), the sky IBL fills the room, god rays and a
   bounded humid fog bank sell the air.

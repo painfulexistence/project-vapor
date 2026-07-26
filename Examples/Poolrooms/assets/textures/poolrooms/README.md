@@ -7,7 +7,8 @@ Naming: `<slot>_<kind>.png` where
 
 - `<slot>` is one of
   `deck_tile`, `wall_tile`, `pool_wall_tile`, `pool_floor_tile`,
-  `accent_tile`, `grout`, `coping`, `ceiling_plaster`, `dark_plaster`, `metal`
+  `accent_tile`, `grout`, `coping`, `ceiling_plaster`, `dark_plaster`,
+  `metal`, `lamp_glow`, `slide_blue`, `slide_violet`
 - `<kind>` is one of `albedo`, `normal`, `roughness`
 
 Examples: `deck_tile_albedo.png`, `wall_tile_normal.png`, `accent_tile_roughness.png`.
