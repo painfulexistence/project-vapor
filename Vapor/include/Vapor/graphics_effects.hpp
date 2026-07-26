@@ -3,6 +3,7 @@
 // particles, sun flare. Separated from core GPU structs to keep each file
 // focused on a single visual system.
 #include <SDL3/SDL_stdinc.h>
+#include <cstddef>
 #include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -45,7 +46,26 @@ struct alignas(16) WaterData {
     Uint32 waveCount;
     float dampeningFactor;
     float time;
+    float _pad2;
+    // ── RHI water-pass extension (appended; the legacy 3d_water.metal reads
+    // only the prefix above). Sun mirrors the atmosphere the way the fog
+    // passes do, so the water pass needs no extra light-buffer binding.
+    glm::vec4 sunDirection;       // xyz = world dir FROM the sun (normalized)
+    glm::vec4 sunColorIntensity;  // rgb + w = intensity
+    glm::vec4 causticsParams;     // x=intensity (0=off) y=world scale z=speed w=water level Y
+    glm::vec4 causticsBoundsMin;  // xyz = world AABB min of the water volume, w = fade depth
+    glm::vec4 causticsBoundsMax;  // xyz = world AABB max, w = env reflection intensity
 };
+
+// The three shader twins (Water.vert/.frag, WaterCaustics.frag,
+// 3d_water_rhi.metal, 3d_water_caustics_rhi.metal) declare this layout
+// field-for-field; any change here must be mirrored there. std430 and MSL
+// agree with the C++ offsets only because of the explicit _pad members.
+static_assert(sizeof(WaveData) == 32, "WaveData layout drifted from the shader twins");
+static_assert(offsetof(WaterData, refractionDistortionFactor) == 144, "WaterData tunables must start at 144");
+static_assert(offsetof(WaterData, waves) == 192, "WaterData waves must start at 192");
+static_assert(offsetof(WaterData, sunDirection) == 336, "WaterData extension must start at 336");
+static_assert(sizeof(WaterData) == 416, "WaterData layout drifted from the shader twins");
 
 struct WaterTransform {
     glm::vec3 position = glm::vec3(0.0f);

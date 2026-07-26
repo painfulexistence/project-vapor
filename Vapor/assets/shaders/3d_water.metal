@@ -27,6 +27,8 @@ struct WaterData {
     float4 ssrSettings;
     float4 normalMapScroll;
     float2 normalMapScrollSpeed;
+    float2 _pad1;  // matches the CPU struct (graphics_effects.hpp); without it
+                   // every tunable below reads 8 bytes off
     float refractionDistortionFactor;
     float refractionHeightFactor;
     float refractionDistanceFactor;

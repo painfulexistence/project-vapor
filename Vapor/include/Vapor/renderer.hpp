@@ -2,6 +2,7 @@
 #include "irenderer.hpp"
 #include "rhi.hpp"
 #include "render_data.hpp"
+#include "graphics_effects.hpp"  // WaterData/WaterTransform (water pass)
 #include "render_graph.hpp"
 #include "camera.hpp"
 #include "graphics.hpp"
@@ -338,6 +339,34 @@ public:
     bool& getMicroVoxelGICrossVolume() { return microVoxelGICrossVolume; }
 
     // ========================================================================
+    // Water Surface API (RHI port of the legacy Metal water pass)
+    // ========================================================================
+    // Gerstner-wave surface with SSR + IBL reflections, snapshot refraction and
+    // projected caustics (waterPass / waterCausticsPass). Off by default; an
+    // app calls setWaterGrid + setWaterTransform + setWaterSettings, then
+    // enables it. The pass overwrites modelMatrix, time, the sun mirror and
+    // the water level (causticsParams.w) in the settings every frame; every
+    // other WaterData field belongs to the app.
+
+    void setWaterEnabled(bool enabled) override { waterEnabled = enabled; }
+    bool isWaterEnabled() const override { return waterEnabled; }
+    // Rebuild the surface grid (MeshBuilder::buildWaterGrid): tilesX*tilesZ
+    // quads of tileSize meters, centered on the origin; texTile* = normal-map
+    // UV repeats across the whole grid.
+    void setWaterGrid(Uint32 tilesX, Uint32 tilesZ, float tileSize,
+                      float texTileX, float texTileZ) override;
+    void setWaterTransform(const WaterTransform& transform) override;
+    void setWaterSettings(const WaterData& settings) override;
+    WaterData& getWaterSettings() { return waterSettings; }
+    const WaterTransform& getWaterTransform() const { return waterTransform; }
+    // Replace the built-in procedural water textures. Null pointers keep the
+    // current texture for that slot.
+    void setWaterTextures(const std::shared_ptr<Vapor::Image>& normalMap1,
+                          const std::shared_ptr<Vapor::Image>& normalMap2,
+                          const std::shared_ptr<Vapor::Image>& foamMap,
+                          const std::shared_ptr<Vapor::Image>& noiseMap) override;
+
+    // ========================================================================
     // Texture Creation (for sprites/batch rendering)
     // ========================================================================
 
@@ -429,6 +458,11 @@ private:
     void bloomUpsamplePass();
     void skyAtmospherePass();
     void lightScatteringPass();
+    // Water: caustics light submerged geometry (fullscreen, colorRT swap),
+    // then the surface draws over a snapshot of the caustic-lit scene.
+    void waterCausticsPass();
+    void waterPass();
+    void updateWaterDataBuffer();  // per-frame WaterData refresh, shared by both
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
@@ -800,6 +834,28 @@ private:
     BufferHandle heightFogDataBuffer;
     HeightFogRenderData heightFogSettings;
     bool heightFogEnabled = true;
+
+    // Water surface + caustics (see the Water Surface API section above).
+    // The grid lives in a storage buffer pulled by vertex_id / gl_VertexIndex
+    // (WaterVertexData is 28 tightly packed bytes — std430 would misalign it
+    // as a vertex attribute struct, so both backends pull manually).
+    PipelineHandle waterPipeline;
+    ShaderHandle waterVertexShader;
+    ShaderHandle waterFragmentShader;
+    PipelineHandle waterCausticsPipeline;
+    ShaderHandle waterCausticsShader;
+    BufferHandle waterDataBuffer;
+    BufferHandle waterVertexBuffer;
+    BufferHandle waterIndexBuffer;
+    Uint32 waterIndexCount = 0;
+    TextureHandle waterNormalTex1;
+    TextureHandle waterNormalTex2;
+    TextureHandle waterFoamTex;
+    TextureHandle waterNoiseTex;
+    WaterData waterSettings{};  // zero-init; real defaults set in initialize()
+    WaterTransform waterTransform;
+    bool waterEnabled = false;
+    void createWaterDefaultTextures();
     // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
     // import/parsing lives in a separate PR). One AABB volume per scene; a
     // procedural 64^3 test grid stands in until setVolumeDensity() gets real

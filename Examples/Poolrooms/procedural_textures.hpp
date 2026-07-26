@@ -1,0 +1,192 @@
+#pragma once
+// ============================================================================
+// Poolrooms — procedural placeholder textures (engine-agnostic: glm + std).
+//
+// Every material slot renders with these until real textures are dropped into
+// Res/textures/poolrooms/ (see assets/textures/poolrooms/README.md and the
+// loader in main.cpp). All images are RGBA8 and tileable.
+//
+// Tile albedos are authored per-tile: the UV cell [0,1]² is one tile face, so
+// a texture describes a single tile (glaze gradient, edge tint, speckle) and
+// the panel geometry repeats it. Normal/roughness maps follow the same idea.
+// ============================================================================
+
+#include <glm/glm.hpp>
+#include <cmath>
+#include <cstdint>
+#include <vector>
+
+namespace pooltex {
+
+struct ImageRGBA8 {
+    uint32_t size = 0;
+    std::vector<uint8_t> pixels;  // size*size*4
+};
+
+// Tileable value noise (wrapped lattice + smooth interpolation + fBm).
+inline float hash2(int x, int y, uint32_t seed) {
+    uint32_t h = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u + seed * 2246822519u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return float((h ^ (h >> 16)) & 0xFFFFFFu) / float(0xFFFFFFu);
+}
+
+inline float fbm(float x, float y, int period, int octaves, uint32_t seed) {
+    float sum = 0.0f, amp = 0.5f, freq = 1.0f;
+    for (int o = 0; o < octaves; ++o) {
+        const int p = period * int(freq);
+        const float fx = x * freq, fy = y * freq;
+        int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
+        float tx = fx - float(x0), ty = fy - float(y0);
+        tx = tx * tx * (3.0f - 2.0f * tx);
+        ty = ty * ty * (3.0f - 2.0f * ty);
+        auto wrap = [p](int v) { return ((v % p) + p) % p; };
+        const float c00 = hash2(wrap(x0), wrap(y0), seed + uint32_t(o) * 101u);
+        const float c10 = hash2(wrap(x0 + 1), wrap(y0), seed + uint32_t(o) * 101u);
+        const float c01 = hash2(wrap(x0), wrap(y0 + 1), seed + uint32_t(o) * 101u);
+        const float c11 = hash2(wrap(x0 + 1), wrap(y0 + 1), seed + uint32_t(o) * 101u);
+        sum += ((c00 * (1 - tx) + c10 * tx) * (1 - ty) + (c01 * (1 - tx) + c11 * tx) * ty) * amp;
+        amp *= 0.5f;
+        freq *= 2.0f;
+    }
+    return sum;
+}
+
+inline ImageRGBA8 makeImage(uint32_t size) {
+    ImageRGBA8 img;
+    img.size = size;
+    img.pixels.assign(size_t(size) * size * 4, 255);
+    return img;
+}
+
+inline void putPixel(ImageRGBA8& img, uint32_t x, uint32_t y, glm::vec3 c) {
+    const size_t i = (size_t(y) * img.size + x) * 4;
+    img.pixels[i + 0] = uint8_t(glm::clamp(c.r, 0.0f, 1.0f) * 255.0f);
+    img.pixels[i + 1] = uint8_t(glm::clamp(c.g, 0.0f, 1.0f) * 255.0f);
+    img.pixels[i + 2] = uint8_t(glm::clamp(c.b, 0.0f, 1.0f) * 255.0f);
+    img.pixels[i + 3] = 255;
+}
+
+// Distance to the closest cell edge in cell space (0 at edges, 0.5 center).
+inline float edgeDistance(float u, float v) {
+    return glm::min(glm::min(u, 1.0f - u), glm::min(v, 1.0f - v));
+}
+
+// ── Tile face albedo ── glazed ceramic: soft center gradient, darker rim,
+// speckle, faint diagonal glaze streaks.
+inline ImageRGBA8 tileAlbedo(glm::vec3 base, glm::vec3 rimTint, uint32_t seed, uint32_t size = 256) {
+    ImageRGBA8 img = makeImage(size);
+    for (uint32_t y = 0; y < size; ++y) {
+        for (uint32_t x = 0; x < size; ++x) {
+            const float u = (x + 0.5f) / size, v = (y + 0.5f) / size;
+            const float e = edgeDistance(u, v);
+            // Rim darkening in the outer 8% of the face.
+            const float rim = glm::smoothstep(0.0f, 0.08f, e);
+            // Gentle center sheen.
+            const float sheen = 1.0f + 0.05f * (1.0f - glm::length(glm::vec2(u, v) - glm::vec2(0.5f)) * 2.0f);
+            // Glaze streaks + speckle.
+            const float streak = fbm(u * 3.0f + v * 5.0f, v * 3.0f, 4, 3, seed) - 0.5f;
+            const float speck = fbm(u * 24.0f, v * 24.0f, 24, 2, seed + 7u) - 0.5f;
+            glm::vec3 c = base * sheen * (1.0f + 0.045f * streak + 0.03f * speck);
+            c = glm::mix(rimTint * base, c, glm::mix(0.55f, 1.0f, rim));
+            putPixel(img, x, y, c);
+        }
+    }
+    return img;
+}
+
+// ── Tile face normal map ── mostly flat glaze with a soft pillow toward the
+// rim and low-amplitude waviness. Tangent-space, +Z out.
+inline ImageRGBA8 tileNormal(float pillow, float waviness, uint32_t seed, uint32_t size = 256) {
+    ImageRGBA8 img = makeImage(size);
+    auto height = [&](float u, float v) {
+        // Pillow: raised center falling toward the edges (last 10%).
+        const float e = edgeDistance(u, v);
+        const float h = glm::smoothstep(0.0f, 0.10f, e) * pillow;
+        return h + fbm(u * 6.0f, v * 6.0f, 6, 3, seed) * waviness;
+    };
+    const float d = 1.0f / size;
+    for (uint32_t y = 0; y < size; ++y) {
+        for (uint32_t x = 0; x < size; ++x) {
+            const float u = (x + 0.5f) / size, v = (y + 0.5f) / size;
+            const float dhdx = (height(u + d, v) - height(u - d, v)) / (2.0f * d);
+            const float dhdy = (height(u, v + d) - height(u, v - d)) / (2.0f * d);
+            const glm::vec3 n = glm::normalize(glm::vec3(-dhdx, -dhdy, 1.0f));
+            putPixel(img, x, y, n * 0.5f + 0.5f);
+        }
+    }
+    return img;
+}
+
+// ── Tile roughness ── grayscale in RGB (the shader reads one channel):
+// smooth glaze center, rougher rim, smudges.
+inline ImageRGBA8 tileRoughness(float centerR, float rimR, uint32_t seed, uint32_t size = 256) {
+    ImageRGBA8 img = makeImage(size);
+    for (uint32_t y = 0; y < size; ++y) {
+        for (uint32_t x = 0; x < size; ++x) {
+            const float u = (x + 0.5f) / size, v = (y + 0.5f) / size;
+            const float e = edgeDistance(u, v);
+            const float rim = 1.0f - glm::smoothstep(0.0f, 0.10f, e);
+            const float smudge = (fbm(u * 5.0f, v * 5.0f, 5, 3, seed) - 0.5f) * 0.12f;
+            const float r = glm::clamp(glm::mix(centerR, rimR, rim) + smudge, 0.02f, 1.0f);
+            putPixel(img, x, y, glm::vec3(r));
+        }
+    }
+    return img;
+}
+
+// ── Flat noise-driven surfaces (plaster, grout, stone) ──
+inline ImageRGBA8 noisyAlbedo(glm::vec3 base, float variation, int period, uint32_t seed,
+                              uint32_t size = 256) {
+    ImageRGBA8 img = makeImage(size);
+    for (uint32_t y = 0; y < size; ++y) {
+        for (uint32_t x = 0; x < size; ++x) {
+            const float u = float(x) / size, v = float(y) / size;
+            const float n = fbm(u * period, v * period, period, 4, seed) - 0.5f;
+            putPixel(img, x, y, base * (1.0f + variation * n));
+        }
+    }
+    return img;
+}
+
+inline ImageRGBA8 noisyNormal(float strength, int period, uint32_t seed, uint32_t size = 256) {
+    ImageRGBA8 img = makeImage(size);
+    auto h = [&](float u, float v) { return fbm(u * period, v * period, period, 4, seed); };
+    const float d = 1.0f / size;
+    for (uint32_t y = 0; y < size; ++y) {
+        for (uint32_t x = 0; x < size; ++x) {
+            const float u = float(x) / size, v = float(y) / size;
+            const glm::vec3 n = glm::normalize(glm::vec3(
+                -(h(u + d, v) - h(u - d, v)) / (2.0f * d) * strength,
+                -(h(u, v + d) - h(u, v - d)) / (2.0f * d) * strength, 1.0f));
+            putPixel(img, x, y, n * 0.5f + 0.5f);
+        }
+    }
+    return img;
+}
+
+// ── Brushed metal ── horizontal streaks in albedo + roughness.
+inline ImageRGBA8 brushedMetalAlbedo(glm::vec3 base, uint32_t seed, uint32_t size = 256) {
+    ImageRGBA8 img = makeImage(size);
+    for (uint32_t y = 0; y < size; ++y) {
+        for (uint32_t x = 0; x < size; ++x) {
+            const float u = float(x) / size, v = float(y) / size;
+            const float streak = fbm(u * 2.0f, v * 48.0f, 48, 2, seed) - 0.5f;
+            putPixel(img, x, y, base * (1.0f + 0.08f * streak));
+        }
+    }
+    return img;
+}
+
+inline ImageRGBA8 brushedMetalRoughness(float base, uint32_t seed, uint32_t size = 256) {
+    ImageRGBA8 img = makeImage(size);
+    for (uint32_t y = 0; y < size; ++y) {
+        for (uint32_t x = 0; x < size; ++x) {
+            const float u = float(x) / size, v = float(y) / size;
+            const float streak = fbm(u * 2.0f, v * 48.0f, 48, 2, seed + 5u) - 0.5f;
+            putPixel(img, x, y, glm::vec3(glm::clamp(base + 0.10f * streak, 0.05f, 1.0f)));
+        }
+    }
+    return img;
+}
+
+}  // namespace pooltex
