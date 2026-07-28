@@ -539,6 +539,10 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
     const int entityBase = static_cast<int>(dst.entities.size());
     const int meshBase = static_cast<int>(dst.meshes.size());
     const int lightBase = static_cast<int>(dst.lights.size());
+    // sub.materials is concatenated onto dst.materials below, so primitive
+    // material indices need rebasing exactly like meshes and lights — without
+    // it a spliced prefab's primitives silently adopt the host's materials.
+    const int materialBase = static_cast<int>(dst.materials.size());
 
     for (auto& e : sub.entities) {
         e.parent = e.parent < 0 ? parentIndex : e.parent + entityBase;
@@ -546,6 +550,7 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
             m += meshBase;
         for (int& l : e.lights)
             l += lightBase;
+        if (e.primitive.material >= 0) e.primitive.material += materialBase;
         dst.entities.push_back(std::move(e));
     }
     std::move(sub.meshes.begin(), sub.meshes.end(), std::back_inserter(dst.meshes));

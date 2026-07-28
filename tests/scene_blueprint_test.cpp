@@ -134,6 +134,33 @@ TEST_CASE("appendBlueprint rebases entity, mesh and light indices", "[scene_blue
     REQUIRE(dst.sources.size() == 1);
 }
 
+TEST_CASE("appendBlueprint rebases primitive material indices", "[scene_blueprint]") {
+    // The host already owns a material, so the spliced prefab's material lands
+    // at index 1; its primitive must follow it rather than keep pointing at 0.
+    SceneBlueprint dst = parseSceneBlueprint(R"({
+        "materials": [ { "name": "hostMat" } ],
+        "entities": [ { "name": "Mount" } ]
+    })");
+    REQUIRE(dst.materials.size() == 1);
+
+    SceneBlueprint sub = parseSceneBlueprint(R"({
+        "materials": [ { "name": "prefabMat" } ],
+        "entities": [
+            { "name": "Prop", "primitive": { "shape": "cube", "material": "prefabMat" } }
+        ]
+    })");
+    REQUIRE(sub.ok);
+    REQUIRE(sub.entities.size() == 1);
+    REQUIRE(sub.entities[0].primitive.material == 0);
+
+    appendBlueprint(dst, std::move(sub), 0);
+
+    REQUIRE(dst.entities.size() == 2);
+    REQUIRE(dst.materials.size() == 2);
+    CHECK(dst.entities[1].primitive.material == 1);
+    CHECK(dst.materials[static_cast<size_t>(dst.entities[1].primitive.material)]->name == "prefabMat");
+}
+
 // ── decomposeTransform ──────────────────────────────────────────────────────
 
 TEST_CASE("decomposeTransform round-trips TRS", "[scene_blueprint]") {
