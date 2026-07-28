@@ -112,6 +112,9 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<SkyComponent>("sky");
         r.registerComponent<TimeOfDayComponent>("timeOfDay");
         r.registerComponent<VolumetricFogComponent>("volumetricFog");
+        // water: nested grid/look/caustics/spectrum groups, which the PFR path
+        // walks as aggregates. WaterSystem pushes it to the renderer.
+        r.registerComponent<WaterComponent>("water");
         // weather: hand-written for the string-authored state (the PFR path
         // only reads enums as integers). Runtime blend fields stay at their
         // defaults — a loaded scene starts settled in its authored state.
