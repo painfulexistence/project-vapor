@@ -217,12 +217,7 @@ BlueprintComponents& BlueprintComponents::instance() {
             def.initialState = def.getStateIndex(j.value("initial", def.stateNames.front()));
             if (j.contains("transitions") && j.at("transitions").is_array()) {
                 for (const auto& t : j.at("transitions")) {
-                    if (!t.is_object()) {
-                    fmt::print(stderr,
-                               "parseSceneBlueprint: \"textures\" entries must be objects ({})\n",
-                               bp.name);
-                    continue;
-                }
+                    if (!t.is_object()) continue;
                     def.eventTransitions.emplace_back(
                         def.getStateIndex(t.value("from", "")), def.getStateIndex(t.value("to", "")),
                         t.value("event", ""), t.value("minTime", 0.0f)
@@ -231,12 +226,7 @@ BlueprintComponents& BlueprintComponents::instance() {
             }
             if (j.contains("timed") && j.at("timed").is_array()) {
                 for (const auto& t : j.at("timed")) {
-                    if (!t.is_object()) {
-                    fmt::print(stderr,
-                               "parseSceneBlueprint: \"textures\" entries must be objects ({})\n",
-                               bp.name);
-                    continue;
-                }
+                    if (!t.is_object()) continue;
                     def.timedTransitions.emplace_back(
                         def.getStateIndex(t.value("from", "")), def.getStateIndex(t.value("to", "")),
                         t.value("duration", 0.0f)
