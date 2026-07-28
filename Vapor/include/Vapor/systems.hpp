@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <utility>  // std::pair — PhysicsBodySystem's placement helper
 #include <vector>
 
 namespace Vapor {
@@ -859,6 +860,71 @@ namespace Vapor {
                 volumes.push_back(v);
             }
             renderer->setVolumetricFogVolumes(volumes);
+        }
+    };
+
+    // ============================================================================
+    // 剛體建立系統 - realizes authored colliders as live Jolt bodies
+    // ============================================================================
+    // The blueprint layer deliberately emplaces physics components as pure data:
+    // a Rigidbody arrives with an invalid BodyHandle and this closes the loop,
+    // creating the body on the first update after the entity appears. That split
+    // is what lets parseSceneBlueprint stay I/O- and engine-free — and it is why
+    // an authored "boxCollider" does nothing until an app runs this.
+    //
+    // Idempotent: an entity whose handle is already valid is skipped, so calling
+    // it every frame costs one view iteration and picks up entities spawned
+    // since the last one.
+    //
+    // Run AFTER TransformSystem. A collider parented to something (procMesh
+    // emits its colliders as children) needs the world transform to be current,
+    // or the body lands at the parent's origin.
+    class PhysicsBodySystem {
+    public:
+        static void update(entt::registry& reg, Physics3D* physics) {
+            if (!physics) return;
+
+            // Where the body goes. Unparented entities use the local transform
+            // verbatim; parented ones decompose the world matrix, since that is
+            // the only place the accumulated parent transform exists.
+            auto placement = [](const TransformComponent& t) {
+                if (t.parent == entt::null) return std::pair{ t.position, t.rotation };
+                const glm::mat4& m = t.worldTransform;
+                const glm::vec3 position(m[3]);
+                // Normalize the basis before extracting the rotation, or a
+                // scaled parent tilts the collider.
+                glm::mat3 basis(m);
+                for (int axis = 0; axis < 3; ++axis) {
+                    const float length = glm::length(basis[axis]);
+                    basis[axis] = length > 1e-6f ? basis[axis] / length : glm::vec3(0.0f);
+                    if (length <= 1e-6f) basis[axis][axis] = 1.0f;
+                }
+                return std::pair{ position, glm::normalize(glm::quat_cast(basis)) };
+            };
+
+            auto boxes = reg.view<RigidbodyComponent, TransformComponent, BoxColliderComponent>();
+            for (auto entity : boxes) {
+                auto& rb = boxes.get<RigidbodyComponent>(entity);
+                if (rb.body.valid()) continue;
+                const auto& transform = boxes.get<TransformComponent>(entity);
+                const auto& collider = boxes.get<BoxColliderComponent>(entity);
+                const auto [position, rotation] = placement(transform);
+                rb.body = physics->createBoxBody(collider.halfSize, position, rotation, rb.motionType);
+                // Activating a static body is meaningless; only movable ones
+                // need to start awake.
+                physics->addBody(rb.body, rb.motionType != BodyMotionType::Static);
+            }
+
+            auto spheres = reg.view<RigidbodyComponent, TransformComponent, SphereColliderComponent>();
+            for (auto entity : spheres) {
+                auto& rb = spheres.get<RigidbodyComponent>(entity);
+                if (rb.body.valid()) continue;
+                const auto& transform = spheres.get<TransformComponent>(entity);
+                const auto& collider = spheres.get<SphereColliderComponent>(entity);
+                const auto [position, rotation] = placement(transform);
+                rb.body = physics->createSphereBody(collider.radius, position, rotation, rb.motionType);
+                physics->addBody(rb.body, rb.motionType != BodyMotionType::Static);
+            }
         }
     };
 

@@ -10,3 +10,4 @@
 - 2026/07/28 - Vapor::proctex + scene-JSON `textures` block: procedural textures declared by generator name and referenced from material slots as `@name`, content-addressed into the renderer's texture cache
 - 2026/07/28 - Scene-JSON `procMesh` block: entities name a mesh generator and its params, geometry comes back as per-material buckets with colliders co-emitted, rebuilt per load rather than stored
 - 2026/07/28 - Scene-JSON `water` component + WaterSystem: the FFT surface declared as data, grouped by update cost so the look stays live-tunable while the grid and spectrum are pushed only when they change
+- 2026/07/28 - procMesh colliders reach physics: generated boxes become child entities, and the new engine-side PhysicsBodySystem turns any authored collider into a Jolt body (thin boxes now shrink their convex radius instead of throwing)

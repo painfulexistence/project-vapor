@@ -1138,6 +1138,43 @@ entt::entity instantiate(
                     registry.get_or_emplace<MeshRendererComponent>(ent).meshes.push_back(
                         std::move(procMesh));
                 }
+
+                // Colliders the generator emitted alongside the geometry become
+                // child entities carrying the same data-only physics triple a
+                // hand-authored "boxCollider" produces, so PhysicsBodySystem
+                // realizes them exactly like any other collider — instantiate
+                // stays free of a live physics world, which is what keeps the
+                // blueprint layer testable without one.
+                //
+                // Children rather than components on `ent`: a generator emits
+                // many boxes, an entity holds one BoxColliderComponent, and as
+                // children they inherit the entity's transform and die with it.
+                for (size_t ci = 0; ci < content.colliders.size(); ++ci) {
+                    const procgen::CollisionBox& box = content.colliders[ci];
+                    const entt::entity colliderEnt = registry.create();
+                    registry.emplace<NameComponent>(
+                        colliderEnt,
+                        NameComponent{ fmt::format("{}_collider_{}",
+                                                   e.name.empty() ? e.procMesh.generator : e.name, ci) });
+                    auto& ct = registry.emplace<TransformComponent>(colliderEnt);
+                    ct.position = box.center;
+                    ct.parent = ent;
+                    ct.isDirty = true;
+                    registry.emplace<BoxColliderComponent>(colliderEnt,
+                                                           BoxColliderComponent{ box.halfExtents });
+                    // Generated geometry is level structure: static unless an
+                    // app decides otherwise, and never synced back from physics
+                    // (a static body would fight the authored transform).
+                    RigidbodyComponent rb;
+                    rb.motionType = BodyMotionType::Static;
+                    rb.syncToPhysics = false;
+                    rb.syncFromPhysics = false;
+                    registry.emplace<RigidbodyComponent>(colliderEnt, rb);
+                    // Reported like any other entity this call created: entt
+                    // does not cascade destruction, so a caller tearing the
+                    // scene down by outEntities would otherwise leak these.
+                    if (outEntities) outEntities->push_back(colliderEnt);
+                }
             }
         }
 

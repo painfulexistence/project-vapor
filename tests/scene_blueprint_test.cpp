@@ -9,6 +9,8 @@
 #include "Vapor/fsm.hpp"
 #include "Vapor/render_scene.hpp"
 #include "Vapor/scene_blueprint.hpp"
+#include <algorithm>  // std::find
+#include <cmath>
 
 using Catch::Approx;
 using namespace Vapor;
@@ -905,6 +907,99 @@ TEST_CASE("mesh generators emit valid geometry and drop what they cannot",
         { "subtract", { { { "min", { -7, -1, -3 } }, { "max", { 7, 1, 3 } } } } } });
     CHECK(blockout.colliders.size() == 4);
     CHECK(procgen::validate(blockout.buckets["surface"]).ok());
+}
+
+TEST_CASE("procMesh colliders become child entities the physics layer can realize",
+          "[scene_blueprint][procmesh]") {
+    // A generator knows where its walls are, so it emits colliders alongside
+    // the geometry. instantiate() turns those into the same data-only physics
+    // triple a hand-authored "boxCollider" produces — it must NOT need a live
+    // physics world, which is what keeps this layer testable without one.
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Deck",
+              "position": [2, 0, 0],
+              "procMesh": {
+                  "generator": "boxes",
+                  "params": {
+                      "add": [ { "min": [-12, -0.5, -5], "max": [12, 0, 5] } ],
+                      "subtract": [ { "min": [-7, -1, -3], "max": [7, 1, 3] } ]
+                  }
+              } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene;
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+
+    // The CSG leaves four slabs around the cut-out.
+    auto colliders = registry.view<BoxColliderComponent, RigidbodyComponent>();
+    REQUIRE(colliders.size_hint() == 4);
+
+    entt::entity deck = entt::null;
+    for (auto e : registry.view<NameComponent>())
+        if (registry.get<NameComponent>(e).name == "Deck") deck = e;
+    REQUIRE(deck != entt::null);
+
+    float totalVolume = 0.0f;
+    for (auto e : colliders) {
+        INFO("collider " << registry.get<NameComponent>(e).name);
+        const auto& rb = colliders.get<RigidbodyComponent>(e);
+        // Level structure: static, and never synced back — a static body would
+        // otherwise fight the authored transform.
+        CHECK(rb.motionType == BodyMotionType::Static);
+        CHECK_FALSE(rb.syncFromPhysics);
+        // Data only. Realizing the body is PhysicsBodySystem's job, and it
+        // keys off exactly this invalid handle.
+        CHECK_FALSE(rb.body.valid());
+
+        // Parented to the mesh entity, so the colliders move and die with it.
+        const auto& t = registry.get<TransformComponent>(e);
+        CHECK(t.parent == deck);
+
+        const glm::vec3 half = colliders.get<BoxColliderComponent>(e).halfSize;
+        CHECK(half.x > 0.0f);
+        CHECK(half.y > 0.0f);
+        CHECK(half.z > 0.0f);
+        totalVolume += 8.0f * half.x * half.y * half.z;
+        // Offsets are the generator's local coordinates; the parent supplies
+        // the world placement, so they must NOT already include position.x = 2.
+        CHECK(std::abs(t.position.x) <= 12.0f);
+    }
+    // 24 x 0.5 x 10 slab minus the 14 x 0.5 x 6 cut-out.
+    CHECK(totalVolume == Approx(24.0f * 0.5f * 10.0f - 14.0f * 0.5f * 6.0f));
+
+    // Reported to the caller: entt does not cascade destruction, so a scene
+    // torn down through `created` would otherwise leak every collider.
+    for (auto e : colliders) {
+        INFO("collider " << registry.get<NameComponent>(e).name);
+        CHECK(std::find(created.begin(), created.end(), e) != created.end());
+    }
+}
+
+TEST_CASE("a procMesh generator that emits no colliders creates no child entities",
+          "[scene_blueprint][procmesh]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Wall",
+              "procMesh": { "generator": "tilePanel", "params": { "width": 2, "height": 1.2 } } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene;
+    instantiate(registry, scene, bp);
+
+    CHECK(registry.view<BoxColliderComponent>().size() == 0);
+    CHECK(registry.view<RigidbodyComponent>().size() == 0);
+    // ...but the geometry still arrived.
+    auto meshes = registry.view<MeshRendererComponent>();
+    REQUIRE(meshes.size() == 1);
+    CHECK(meshes.get<MeshRendererComponent>(meshes.front()).meshes.size() == 2);
 }
 
 TEST_CASE("blueprint cook round-trips procMesh (format v5)", "[scene_blueprint][procmesh][cook]") {
