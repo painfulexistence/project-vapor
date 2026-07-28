@@ -904,9 +904,16 @@ private:
     PipelineHandle cloudTemporalPipeline;
     PipelineHandle cloudCompositePipeline;
     PipelineHandle cloudShadowPipeline;
-    TextureHandle cloudRT;          // quarter-res current raymarch
+    TextureHandle cloudRT;          // reduced-res current raymarch
     TextureHandle cloudHistoryRT;   // previous resolved frame
     TextureHandle cloudResolvedRT;  // temporal output (swapped with history)
+    // Cloud RT resolution divisor (2 = half res, 4 = quarter). Half by
+    // default: quarter was the fly-through sharpness ceiling — inside the
+    // layer every pixel is a close-range cloud edge. Panel-switchable;
+    // createCloudRenderTargets() rebuilds the trio (safe mid-frame, the RHIs
+    // defer destruction past in-flight frames).
+    Uint32 m_cloudResDivisor = 2;
+    void createCloudRenderTargets();
     // Top-down sun transmittance over a camera-centered region (CloudShadow
     // pass); the PBR passes multiply the sun term by it.
     TextureHandle cloudShadowRT;

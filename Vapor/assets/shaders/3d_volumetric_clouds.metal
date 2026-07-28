@@ -392,7 +392,7 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     float baseFine = min(data.cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
     uint maxIters = data.primarySteps * 2u;
 
-    float t = tRange.x + blueNoise * baseFine * 4.0;  // dither the layer entry
+    float t = tRange.x + blueNoise * baseFine;  // one-fine-step entry dither
     float tIntegrated = tRange.x;  // never integrate behind this (no double count)
     bool inCloud = false;
     int emptyRun = 0;
@@ -629,8 +629,11 @@ fragment float4 cloudTemporalResolve(
     // far plane: exact under pure rotation but parallax-free, so translation
     // reprojected nearby billows from the wrong place and smeared them. Use
     // the mid-cloud distance along the view ray instead; geometry pixels
-    // keep the depth-buffer position.
+    // keep the depth-buffer position. parallaxTexels = divergence between
+    // reprojecting the near and far end of the in-layer segment: exactly
+    // zero under pure rotation, grows only with translation.
     float4 worldPos;
+    float parallaxTexels = 0.0;
     if (depth >= 0.9999) {
         float tBottom = (data.cloudLayerBottom - data.cameraPosition.y) / rayDir.y;
         float tTop = (data.cloudLayerTop - data.cameraPosition.y) / rayDir.y;
@@ -638,10 +641,15 @@ fragment float4 cloudTemporalResolve(
         float tMax = max(tBottom, tTop);
         if (data.cameraPosition.y >= data.cloudLayerBottom &&
             data.cameraPosition.y <= data.cloudLayerTop) tMin = 0.0;
+        float tNear = clamp(max(tMin, 0.0), 200.0, 60000.0);
         float tRep = (tMax <= 0.0)
             ? 30000.0  // layer fully behind the ray: distance is moot, any works
-            : max(tMin, 0.0) + 0.5 * min(tMax - max(tMin, 0.0), 8000.0);
+            : tNear + 0.5 * min(max(tMax - tNear, 0.0), 8000.0);
         worldPos = float4(data.cameraPosition + rayDir * clamp(tRep, 200.0, 60000.0), 1.0);
+        float4 pcN = data.prevViewProj * float4(data.cameraPosition + rayDir * tNear, 1.0);
+        float4 pcF = data.prevViewProj * float4(data.cameraPosition + rayDir * (tNear + 8000.0), 1.0);
+        float2 uvN = pcN.xy / pcN.w, uvF = pcF.xy / pcF.w;
+        parallaxTexels = length((uvN - uvF) * 0.5 * data.screenSize);
     } else {
         worldPos = data.invViewProj * float4(ndc, depth, 1.0);
         worldPos /= worldPos.w;
@@ -672,13 +680,13 @@ fragment float4 cloudTemporalResolve(
     }
     history = clamp(history, minBound, maxBound);
 
-    // Motion-adaptive blend (twin of CloudTemporal.frag): 0.05 at rest for
-    // deep accumulation; fold in more current the faster the reprojection
-    // moves, so fast rotation shows crisp grain instead of the shuddering
-    // fight between a stale clamped history and the noisy current frame.
-    float texelsMoved = length((in.uv - prevUV) * data.screenSize);
+    // Parallax-adaptive blend (twin of CloudTemporal.frag): base rate at rest
+    // AND under pure rotation — history is exact there, and dumping it on
+    // rotation was the shudder (per-frame raymarch grain pulsing through
+    // bloom). Extra current only where translation makes the reprojection
+    // depth-ambiguous.
     float blend = validHistory
-        ? clamp(data.temporalBlend + texelsMoved * 0.08, data.temporalBlend, 0.65)
+        ? clamp(data.temporalBlend + parallaxTexels * 0.05, data.temporalBlend, 0.5)
         : 1.0;
     return mix(history, current, blend);
 }

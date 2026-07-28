@@ -89,6 +89,12 @@ vec4 sampleHistoryCatmullRom(vec2 uv) {
     return max(result, vec4(0.0));
 }
 
+vec2 reprojectUV(vec3 wp) {
+    vec4 pc = prevViewProj * vec4(wp, 1.0);
+    vec2 nd = pc.xy / pc.w;
+    return vec2(nd.x * 0.5 + 0.5, 1.0 - (nd.y * 0.5 + 0.5));
+}
+
 void main() {
     vec4 current = texture(currentCloud, tex_uv);
 
@@ -103,17 +109,31 @@ void main() {
     // billows from the wrong place and smeared them. Use the mid-cloud
     // distance along the view ray instead — parallax-correct where the
     // clouds actually are. Geometry pixels keep the depth-buffer position.
+    //
+    // parallaxTexels measures how DEPTH-UNCERTAIN that reprojection is: the
+    // divergence, in history texels, between reprojecting the near and the
+    // far end of the in-layer segment. Under pure rotation every distance
+    // along the ray reprojects to the SAME point, so it is exactly zero —
+    // and rotation therefore keeps the full accumulation (dumping history on
+    // rotation was the previous shudder: per-frame raymarch grain, amplified
+    // by bloom, pulsing at high blend). Only translation opens the
+    // divergence, and only translation pays extra blend for it.
     vec4 worldPos;
+    float parallaxTexels = 0.0;
     if (depth >= 0.9999) {
         float tBottom = (cloudLayerBottom - cameraPosition.y) / rayDir.y;
         float tTop = (cloudLayerTop - cameraPosition.y) / rayDir.y;
         float tMin = min(tBottom, tTop);
         float tMax = max(tBottom, tTop);
         if (cameraPosition.y >= cloudLayerBottom && cameraPosition.y <= cloudLayerTop) tMin = 0.0;
+        float tNear = clamp(max(tMin, 0.0), 200.0, 60000.0);
         float tRep = (tMax <= 0.0)
             ? 30000.0  // layer fully behind the ray: distance is moot, any works
-            : max(tMin, 0.0) + 0.5 * min(tMax - max(tMin, 0.0), 8000.0);
+            : tNear + 0.5 * min(max(tMax - tNear, 0.0), 8000.0);
         worldPos = vec4(cameraPosition + rayDir * clamp(tRep, 200.0, 60000.0), 1.0);
+        vec2 uvNear = reprojectUV(cameraPosition + rayDir * tNear);
+        vec2 uvFar = reprojectUV(cameraPosition + rayDir * (tNear + 8000.0));
+        parallaxTexels = length((uvNear - uvFar) * screenSize);
     } else {
         worldPos = invViewProj * vec4(ndc, depth, 1.0);
         worldPos /= worldPos.w;
@@ -141,15 +161,11 @@ void main() {
     }
     history = clamp(history, minBound, maxBound);
 
-    // Motion-adaptive blend. At the fixed 0.05 the history dominated 20:1
-    // while rotation kept shifting it, and the per-frame fight between the
-    // stale clamped history and the noisy current read as shudder. Fold in
-    // more current the faster the reprojection moves (in history texels):
-    // still 0.05 at rest (deep accumulation), mostly-current under fast
-    // rotation — grainier for a moment, but crisp and stable.
-    float texelsMoved = length((tex_uv - prevUV) * screenSize);
+    // Parallax-adaptive blend: base rate at rest AND under pure rotation
+    // (history is exact there — Catmull-Rom keeps it sharp); extra current
+    // only where translation makes the reprojection depth-ambiguous.
     float blend = validHistory
-        ? clamp(temporalBlend + texelsMoved * 0.08, temporalBlend, 0.65)
+        ? clamp(temporalBlend + parallaxTexels * 0.05, temporalBlend, 0.5)
         : 1.0;
     outCloud = mix(history, current, blend);
 }

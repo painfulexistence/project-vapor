@@ -5665,6 +5665,23 @@ void Renderer::cloudShadowPass() {
     rhi->endRenderPass();
 }
 
+void Renderer::createCloudRenderTargets() {
+    if (cloudRT.isValid()) rhi->destroyTexture(cloudRT);
+    if (cloudHistoryRT.isValid()) rhi->destroyTexture(cloudHistoryRT);
+    if (cloudResolvedRT.isValid()) rhi->destroyTexture(cloudResolvedRT);
+    TextureDesc desc;
+    desc.width = std::max(1u, rhi->getSwapchainWidth() / m_cloudResDivisor);
+    desc.height = std::max(1u, rhi->getSwapchainHeight() / m_cloudResDivisor);
+    desc.format = PixelFormat::RGBA16_FLOAT;
+    desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
+    desc.sampleCount = 1;
+    cloudRT = rhi->createTexture(desc);
+    cloudHistoryRT = rhi->createTexture(desc);
+    cloudResolvedRT = rhi->createTexture(desc);
+    // Fresh history is uninitialized — restart accumulation.
+    cloudPrevViewProjValid = false;
+}
+
 void Renderer::volumetricCloudPass() {
     if (!volumetricCloudsEnabled) return;
     if (!cloudRaymarchPipeline.isValid() || !cloudTemporalPipeline.isValid() ||
@@ -5698,8 +5715,8 @@ void Renderer::volumetricCloudPass() {
     cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
     cloudSettings.time += 1.0f / 60.0f;
     cloudSettings.frameIndex = frameCounter;
-    cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / 4),
-                                         std::max(1u, rhi->getSwapchainHeight() / 4));
+    cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / m_cloudResDivisor),
+                                         std::max(1u, rhi->getSwapchainHeight() / m_cloudResDivisor));
     cloudSettings.cloudLayerThickness = cloudSettings.cloudLayerTop - cloudSettings.cloudLayerBottom;
     // Upload a copy with the weather cloud-dim folded in — the panel's
     // sunLightScale stays authoritative in cloudSettings itself.
@@ -6682,21 +6699,14 @@ void Renderer::createRenderTargets() {
         velocityRT = rhi->createTexture(desc);
     }
 
-    // Volumetric cloud targets (quarter resolution, matching Metal): current
-    // raymarch, previous resolved frame (history), and the temporal output.
-    // Three RTs instead of Metal's two because Vulkan cannot sample the
-    // attachment being rendered (Metal read+wrote history in one pass).
-    {
-        TextureDesc desc;
-        desc.width = std::max(1u, width / 4);
-        desc.height = std::max(1u, height / 4);
-        desc.format = PixelFormat::RGBA16_FLOAT;
-        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;
-        desc.sampleCount = 1;
-        cloudRT = rhi->createTexture(desc);
-        cloudHistoryRT = rhi->createTexture(desc);
-        cloudResolvedRT = rhi->createTexture(desc);
-    }
+    // Volumetric cloud targets: current raymarch, previous resolved frame
+    // (history), and the temporal output. Three RTs instead of Metal's two
+    // because Vulkan cannot sample the attachment being rendered (Metal
+    // read+wrote history in one pass). Resolution is panel-selectable
+    // (default half): quarter res was the fly-through ceiling — inside the
+    // layer every screen pixel is a close-range cloud edge, and no temporal
+    // filter can add back spatial resolution the RT never had.
+    createCloudRenderTargets();
 
     // Cloud shadow map: fixed 256^2 R16F over a camera-centered world region
     // (16 m texels across 4 km — soft drifting shadows, resolution-independent).
@@ -9305,6 +9315,13 @@ void Renderer::drawGraphicsImGui() {
         int steps = static_cast<int>(cloudSettings.primarySteps);
         if (ImGui::SliderInt("Primary steps", &steps, 8, 128))
             cloudSettings.primarySteps = static_cast<Uint32>(steps);
+        // Half res is the fly-through default; drop to quarter if the march
+        // is too heavy. RT destruction is deferred, so mid-frame is safe.
+        int resIdx = (m_cloudResDivisor == 2) ? 0 : 1;
+        if (ImGui::Combo("Resolution", &resIdx, "Half\0Quarter\0")) {
+            m_cloudResDivisor = (resIdx == 0) ? 2u : 4u;
+            createCloudRenderTargets();
+        }
         ImGui::TreePop();
     }
 

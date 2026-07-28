@@ -381,7 +381,7 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     float baseFine = min(cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
     uint maxIters = primarySteps * 2u;
 
-    float t = tRange.x + blueNoise * baseFine * 4.0;  // dither the layer entry
+    float t = tRange.x + blueNoise * baseFine;  // one-fine-step entry dither
     float tIntegrated = tRange.x;  // never integrate behind this (no double count)
     bool inCloud = false;
     int emptyRun = 0;
