@@ -392,7 +392,11 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     float baseFine = min(data.cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
     uint maxIters = data.primarySteps * 2u;
 
-    float t = tRange.x + blueNoise * baseFine;  // one-fine-step entry dither
+    // Undithered ladder + STRATIFIED sample inside each segment (twin of
+    // CloudRaymarch.frag). A single entry dither could not span fineStep once
+    // it grows 4x past ~20 km, and the coarse back-up's clamp to tIntegrated
+    // erased it outright whenever the first probe hit — the in-layer case.
+    float t = tRange.x;
     float tIntegrated = tRange.x;  // never integrate behind this (no double count)
     bool inCloud = false;
     int emptyRun = 0;
@@ -402,13 +406,13 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
         // 10 km base shape survives, 4x coarser is still ~40 samples/feature.
         float fineStep = baseFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
         float coarseStep = fineStep * 4.0;
-        float3 pos = rayOrigin + rayDir * t;
 
         if (!inCloud) {
             // Empty-space skip on the cheap density. Detail only ever erodes,
             // so the cheap value is an upper bound — this cannot step over a
             // cloud the full-quality path would have found.
-            if (sampleCloudDensity(pos, data, true, shapeTex, detailTex, weatherTex) > 0.0) {
+            float3 probePos = rayOrigin + rayDir * (t + blueNoise * coarseStep);
+            if (sampleCloudDensity(probePos, data, true, shapeTex, detailTex, weatherTex) > 0.0) {
                 // Back up one coarse step so the lit leading edge isn't clipped.
                 t = max(t - coarseStep, tIntegrated);
                 inCloud = true;
@@ -419,6 +423,8 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
             continue;
         }
 
+        // Stratified sample inside [t, t + fineStep]; dt stays fineStep.
+        float3 pos = rayOrigin + rayDir * (t + blueNoise * fineStep);
         float density = sampleCloudDensity(pos, data, false, shapeTex, detailTex, weatherTex);
 
         if (density > 0.001) {

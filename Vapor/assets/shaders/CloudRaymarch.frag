@@ -381,7 +381,14 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     float baseFine = min(cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
     uint maxIters = primarySteps * 2u;
 
-    float t = tRange.x + blueNoise * baseFine;  // one-fine-step entry dither
+    // The ladder itself is undithered; each segment is instead sampled at a
+    // STRATIFIED point inside it (t + blueNoise * step). Two bugs this avoids:
+    // a single entry dither could not span fineStep once it grows up to 4x
+    // past ~20 km (it covered a quarter of the step, leaving the phase
+    // correlated across frames), and the coarse back-up below clamps to
+    // tIntegrated, which erased an entry dither outright whenever the FIRST
+    // probe hit — precisely the camera-inside-the-layer case (tRange.x == 0).
+    float t = tRange.x;
     float tIntegrated = tRange.x;  // never integrate behind this (no double count)
     bool inCloud = false;
     int emptyRun = 0;
@@ -392,12 +399,12 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
         // samples per feature.
         float fineStep = baseFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
         float coarseStep = fineStep * 4.0;
-        vec3 pos = rayOrigin + rayDir * t;
 
         if (!inCloud) {
             // Empty-space skip on the cheap density. Detail only ever erodes,
             // so the cheap value is an upper bound — this cannot step over a
             // cloud that the full-quality path would have found.
+            vec3 pos = rayOrigin + rayDir * (t + blueNoise * coarseStep);
             if (sampleCloudDensity(pos, true) > 0.0) {
                 // Back up one coarse step so the lit leading edge isn't clipped.
                 t = max(t - coarseStep, tIntegrated);
@@ -409,6 +416,9 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
             continue;
         }
 
+        // Stratified sample inside [t, t + fineStep]; dt stays fineStep, so
+        // the Beer-Lambert integral over the segment is unchanged.
+        vec3 pos = rayOrigin + rayDir * (t + blueNoise * fineStep);
         float density = sampleCloudDensity(pos, false);
         if (density > 0.001) {
             vec3 luminance = cloudLighting(pos, rayDir);

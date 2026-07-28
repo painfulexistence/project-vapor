@@ -5714,7 +5714,12 @@ void Renderer::volumetricCloudPass() {
     // strength scales it so the WindFieldComponent drives the scroll rate.
     cloudSettings.windOffset += cloudSettings.windDirection * (cloudSettings.windSpeed * m_windStrength) * 0.016f;
     cloudSettings.time += 1.0f / 60.0f;
-    cloudSettings.frameIndex = frameCounter;
+    // frameNumber, not frameCounter: the latter only advances inside
+    // lightScatteringPass, so it freezes whenever god rays are toggled off —
+    // which would freeze the raymarch's blue-noise dither into a FIXED
+    // screen-space pattern, exactly the thing the temporal pass needs to vary.
+    // Same landmine already documented for ReSTIR (see restirShadowPass).
+    cloudSettings.frameIndex = frameNumber;
     cloudSettings.screenSize = glm::vec2(std::max(1u, rhi->getSwapchainWidth() / m_cloudResDivisor),
                                          std::max(1u, rhi->getSwapchainHeight() / m_cloudResDivisor));
     cloudSettings.cloudLayerThickness = cloudSettings.cloudLayerTop - cloudSettings.cloudLayerBottom;
