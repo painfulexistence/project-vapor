@@ -812,3 +812,143 @@ TEST_CASE("integer texture params accept the float spelling of an integer",
         CHECK(img->byteArray == gens.generate("noisyAlbedo", nlohmann::json{ { "size", 16 } })->byteArray);
     }
 }
+
+// ── Procedural meshes ("procMesh" block) ────────────────────────────────────
+
+TEST_CASE("parse records a procMesh generator, params and bucket materials",
+          "[scene_blueprint][procmesh]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [ { "name": "wallTile" }, { "name": "groutMat" } ],
+        "entities": [
+            { "name": "WestWall",
+              "procMesh": {
+                  "generator": "tilePanel",
+                  "params": { "width": 24, "height": 4.6, "tileW": 0.2 },
+                  "materials": { "tiles": "wallTile", "grout": "groutMat" }
+              } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.entities.size() == 1);
+    const auto& pm = bp.entities[0].procMesh;
+    CHECK_FALSE(pm.empty());
+    CHECK(pm.generator == "tilePanel");
+    // Params are kept as text so the blueprint stays independent of any one
+    // generator's parameter struct.
+    CHECK(pm.paramsJson.find("\"width\"") != std::string::npos);
+    REQUIRE(pm.bucketMaterials.size() == 2);
+    for (const auto& [bucket, index] : pm.bucketMaterials) {
+        INFO("bucket " << bucket);
+        REQUIRE(index >= 0);
+        const std::string want = (bucket == "tiles") ? "wallTile" : "groutMat";
+        CHECK(bp.materials[static_cast<size_t>(index)]->name == want);
+    }
+}
+
+TEST_CASE("appendBlueprint rebases procMesh bucket materials", "[scene_blueprint][procmesh]") {
+    SceneBlueprint dst = parseSceneBlueprint(R"({
+        "materials": [ { "name": "hostMat" } ],
+        "entities": [ { "name": "Mount" } ]
+    })");
+    SceneBlueprint sub = parseSceneBlueprint(R"({
+        "materials": [ { "name": "prefabMat" } ],
+        "entities": [
+            { "name": "Panel",
+              "procMesh": { "generator": "tilePanel", "materials": { "tiles": "prefabMat" } } }
+        ]
+    })");
+    REQUIRE(dst.ok);
+    REQUIRE(sub.ok);
+    REQUIRE(sub.entities.size() == 1);
+    REQUIRE(sub.entities[0].procMesh.bucketMaterials.size() == 1);
+    REQUIRE(sub.entities[0].procMesh.bucketMaterials[0].second == 0);
+
+    appendBlueprint(dst, std::move(sub), 0);
+
+    REQUIRE(dst.entities.size() == 2);
+    REQUIRE(dst.materials.size() == 2);
+    const auto& bm = dst.entities[1].procMesh.bucketMaterials;
+    REQUIRE(bm.size() == 1);
+    CHECK(bm[0].second == 1);
+    CHECK(dst.materials[static_cast<size_t>(bm[0].second)]->name == "prefabMat");
+}
+
+TEST_CASE("mesh generators emit valid geometry and drop what they cannot",
+          "[scene_blueprint][procmesh]") {
+    const auto& gens = MeshGenerators::instance();
+    for (const char* name : { "tilePanel", "lathe", "tube", "extrude", "boxes" }) {
+        INFO("generator " << name);
+        CHECK(gens.has(name));
+        CHECK(gens.version(name) >= 1);
+        // Empty params must fall back to defaults, never throw or emit
+        // geometry that Mesh::initialize()'s MikkTSpace pass would reject.
+        for (const auto& [bucket, data] : gens.generate(name, nlohmann::json::object()).buckets) {
+            INFO("bucket " << bucket);
+            CHECK(procgen::validate(data).ok());
+        }
+    }
+    CHECK_FALSE(gens.has("noSuchGenerator"));
+    CHECK(gens.version("noSuchGenerator") == -1);
+    CHECK(gens.generate("noSuchGenerator", nlohmann::json::object()).buckets.empty());
+
+    // A tiled panel splits into its two material buckets.
+    auto panel = gens.generate("tilePanel",
+                               nlohmann::json{ { "width", 2.0 }, { "height", 1.2 } });
+    CHECK(panel.buckets.count("tiles") == 1);
+    CHECK(panel.buckets.count("grout") == 1);
+    CHECK(panel.triangleCount() > 100);
+
+    // Box CSG hands back colliders alongside the render geometry, so the
+    // physics shape never has to be re-derived from the mesh.
+    auto blockout = gens.generate("boxes", nlohmann::json{
+        { "add", { { { "min", { -12, -0.5, -5 } }, { "max", { 12, 0, 5 } } } } },
+        { "subtract", { { { "min", { -7, -1, -3 } }, { "max", { 7, 1, 3 } } } } } });
+    CHECK(blockout.colliders.size() == 4);
+    CHECK(procgen::validate(blockout.buckets["surface"]).ok());
+}
+
+TEST_CASE("blueprint cook round-trips procMesh (format v5)", "[scene_blueprint][procmesh][cook]") {
+    // The cook is a cache hit away from being the only copy of the scene, and
+    // it stores entities field by field. A procMesh that didn't survive the
+    // round trip would leave a cooked scene silently missing its geometry —
+    // and since the entity record grew, a stale v4 cook has to be rejected
+    // rather than read with every later field shifted.
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [ { "name": "wallTile" }, { "name": "groutMat" } ],
+        "entities": [
+            { "name": "WestWall",
+              "procMesh": {
+                  "generator": "tilePanel",
+                  "params": { "width": 24, "height": 4.6 },
+                  "materials": { "tiles": "wallTile", "grout": "groutMat" }
+              } },
+            { "name": "Plain" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+    {
+        cereal::BinaryOutputArchive out(stream);
+        AssetSerializer::serializeBlueprint(out, bp);
+    }
+    stream.seekg(0);
+    SceneBlueprint back;
+    {
+        cereal::BinaryInputArchive in(stream);
+        back = AssetSerializer::deserializeBlueprint(in);
+    }
+
+    REQUIRE(back.ok);
+    REQUIRE(back.entities.size() == 2);
+    const auto& pm = back.entities[0].procMesh;
+    CHECK(pm.generator == "tilePanel");
+    CHECK(pm.paramsJson == bp.entities[0].procMesh.paramsJson);
+    CHECK(pm.bucketMaterials == bp.entities[0].procMesh.bucketMaterials);
+    // The generator has to be runnable straight off the cook, params and all.
+    const nlohmann::json params = nlohmann::json::parse(pm.paramsJson, nullptr, false);
+    REQUIRE_FALSE(params.is_discarded());
+    CHECK(MeshGenerators::instance().generate(pm.generator, params).triangleCount() > 100);
+    // An entity with no procMesh stays empty rather than inheriting a neighbour's.
+    CHECK(back.entities[1].procMesh.empty());
+}

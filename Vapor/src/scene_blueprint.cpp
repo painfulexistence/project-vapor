@@ -7,6 +7,7 @@
 #include "fsm.hpp"
 #include "mesh_builder.hpp"
 #include "meshlet_builder.hpp"
+#include "procgen_patterns.hpp"  // TilePanelDesc/buildTilePanel for the "tilePanel" generator
 #include "render_scene.hpp"
 
 #include <algorithm>
@@ -276,6 +277,41 @@ static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) 
                 fmt::print(stderr, "parseSceneBlueprint: primitive material '{}' not declared\n", matName);
         }
     }
+    if (j.contains("procMesh") && j.at("procMesh").is_object()) {
+        const auto& pm = j.at("procMesh");
+        // Type-checked rather than pm.value(): that throws type_error.302 on a
+        // wrong-typed field, and parse promises ok=false over a throw.
+        const auto genIt = pm.find("generator");
+        if (genIt != pm.end() && genIt->is_string()) e.procMesh.generator = genIt->get<std::string>();
+        if (e.procMesh.generator.empty()) {
+            fmt::print(stderr, "parseSceneBlueprint: procMesh needs a \"generator\"\n");
+        } else {
+            // Params ride as text so the blueprint (and its cook) stay
+            // independent of any particular generator's parameter struct.
+            if (pm.contains("params") && pm.at("params").is_object())
+                e.procMesh.paramsJson = pm.at("params").dump();
+            // Bucket name -> material, resolved by declared name like
+            // primitives are (materials[] parses before entities[]).
+            if (pm.contains("materials") && pm.at("materials").is_object()) {
+                for (const auto& [bucket, value] : pm.at("materials").items()) {
+                    if (!value.is_string()) continue;
+                    const std::string matName = value.get<std::string>();
+                    int index = -1;
+                    for (size_t m = 0; m < out.materials.size(); ++m) {
+                        if (out.materials[m] && out.materials[m]->name == matName) {
+                            index = static_cast<int>(m);
+                            break;
+                        }
+                    }
+                    if (index < 0)
+                        fmt::print(stderr,
+                                   "parseSceneBlueprint: procMesh material '{}' (bucket '{}') "
+                                   "not declared\n", matName, bucket);
+                    e.procMesh.bucketMaterials.emplace_back(bucket, index);
+                }
+            }
+        }
+    }
     if (j.contains("light")) {
         out.lights.push_back(parseLight(j.at("light")));
         e.lights.push_back(static_cast<int>(out.lights.size()) - 1);
@@ -328,6 +364,12 @@ uint32_t pu(const json& j, const char* key, uint32_t fallback) {
     const double d = it->get<double>();
     if (!(d >= 0.0 && d <= double(UINT32_MAX))) return fallback;
     return uint32_t(d);
+}
+bool pb(const json& j, const char* key, bool fallback) {
+    // json::value() would be shorter but throws type_error.302 on a
+    // wrong-typed field, and these params come straight off disk.
+    const auto it = j.find(key);
+    return (it != j.end() && it->is_boolean()) ? it->get<bool>() : fallback;
 }
 glm::vec3 pv3(const json& j, const char* key, glm::vec3 fallback) {
     const auto it = j.find(key);
@@ -428,6 +470,150 @@ std::shared_ptr<Image> TextureGenerators::generate(const std::string& name,
     img->uri = fmt::format("proc://{}#v{}-{}", name, it->second.version,
                            contentDigest(img->byteArray));
     return img;
+}
+
+// ── Procedural mesh generators ──────────────────────────────────────────────
+
+MeshGenerators& MeshGenerators::instance() {
+    static MeshGenerators registry = [] {
+        MeshGenerators r;
+        using namespace Vapor::procgen;
+
+        // Thin wrappers over the procgen primitives. Anything more structural
+        // than these (a whole room, a staircase) belongs in an app-registered
+        // composite generator, where the cross-element decisions live.
+        r.add("tilePanel", 1, [](const json& p) {
+            GeneratedContent out;
+            TilePanelDesc d;
+            d.width = pf(p, "width", 1.0f);
+            d.height = pf(p, "height", 1.0f);
+            d.tileW = pf(p, "tileW", 0.20f);
+            d.tileH = pf(p, "tileH", 0.20f);
+            d.groutWidth = pf(p, "groutWidth", 0.010f);
+            d.groutDepth = pf(p, "groutDepth", 0.005f);
+            d.bevel = pf(p, "bevel", 0.007f);
+            d.uPhase = pf(p, "uPhase", 0.0f);
+            d.vPhase = pf(p, "vPhase", 0.0f);
+            buildTilePanel(pv3(p, "origin", glm::vec3(0.0f)),
+                           pv3(p, "u", glm::vec3(1, 0, 0)), pv3(p, "v", glm::vec3(0, 1, 0)),
+                           d, out.bucket("tiles"), out.bucket("grout"));
+            return out;
+        });
+        r.add("lathe", 1, [](const json& p) {
+            GeneratedContent out;
+            std::vector<glm::vec2> profile;
+            const auto it = p.find("profile");
+            if (it != p.end() && it->is_array()) {
+                for (const auto& pt : *it)
+                    if (pt.is_array() && pt.size() >= 2 && pt[0].is_number() && pt[1].is_number())
+                        profile.push_back({ pt[0].get<float>(), pt[1].get<float>() });
+            }
+            lathe(profile, pi(p, "segments", 24), out.bucket("surface"));
+            return out;
+        });
+        r.add("tube", 1, [](const json& p) {
+            GeneratedContent out;
+            std::vector<glm::vec3> path;
+            const auto it = p.find("path");
+            if (it != p.end() && it->is_array()) {
+                for (const auto& pt : *it)
+                    if (pt.is_array() && pt.size() >= 3 && pt[0].is_number() && pt[1].is_number() &&
+                        pt[2].is_number())
+                        path.push_back({ pt[0].get<float>(), pt[1].get<float>(), pt[2].get<float>() });
+            }
+            sweepTube(path, pf(p, "radius", 0.05f), pi(p, "sides", 12), pf(p, "vTile", 0.25f),
+                      out.bucket("surface"), pb(p, "capEnds", true));
+            return out;
+        });
+        r.add("extrude", 1, [](const json& p) {
+            GeneratedContent out;
+            auto readRing = [](const json& arr) {
+                std::vector<glm::vec2> ring;
+                if (!arr.is_array()) return ring;
+                for (const auto& pt : arr)
+                    if (pt.is_array() && pt.size() >= 2 && pt[0].is_number() && pt[1].is_number())
+                        ring.push_back({ pt[0].get<float>(), pt[1].get<float>() });
+                return ring;
+            };
+            std::vector<glm::vec2> outer;
+            std::vector<std::vector<glm::vec2>> holes;
+            const auto o = p.find("outline");
+            if (o != p.end()) outer = readRing(*o);
+            const auto h = p.find("holes");
+            if (h != p.end() && h->is_array())
+                for (const auto& ring : *h) holes.push_back(readRing(ring));
+            const float depth = pf(p, "depth", 0.1f);
+            if (depth > 0.0f)
+                extrudePolygon(pv3(p, "origin", glm::vec3(0.0f)),
+                               pv3(p, "u", glm::vec3(1, 0, 0)), pv3(p, "v", glm::vec3(0, 1, 0)),
+                               outer, holes, depth, pf(p, "uvScale", 1.0f), out.bucket("surface"));
+            else  // a flat cap: the same outline without the walls
+                polygonCap(pv3(p, "origin", glm::vec3(0.0f)),
+                           pv3(p, "u", glm::vec3(1, 0, 0)), pv3(p, "v", glm::vec3(0, 1, 0)),
+                           outer, holes, pf(p, "uvScale", 1.0f), out.bucket("surface"));
+            return out;
+        });
+        r.add("boxes", 1, [](const json& p) {
+            GeneratedContent out;
+            std::vector<Box3> solid;
+            auto readBoxes = [&](const json& arr, std::vector<Box3>& dst) {
+                if (!arr.is_array()) return;
+                for (const auto& b : arr) {
+                    if (!b.is_object()) continue;
+                    const glm::vec3 lo = pv3(b, "min", glm::vec3(0.0f));
+                    const glm::vec3 hi = pv3(b, "max", glm::vec3(0.0f));
+                    dst.push_back({ glm::min(lo, hi), glm::max(lo, hi) });
+                }
+            };
+            const auto add = p.find("add");
+            if (add != p.end()) readBoxes(*add, solid);
+            const auto sub = p.find("subtract");
+            if (sub != p.end() && sub->is_array()) {
+                std::vector<Box3> cutters;
+                readBoxes(*sub, cutters);
+                for (const Box3& c : cutters) subtractBox(solid, c);
+            }
+            emitBoxes(solid, pf(p, "uvScale", 1.0f), out.bucket("surface"));
+            boxesToColliders(solid, out.colliders);
+            return out;
+        });
+        return r;
+    }();
+    return registry;
+}
+
+GeneratedContent MeshGenerators::generate(const std::string& name,
+                                          const nlohmann::json& params) const {
+    GeneratedContent out;
+    const auto it = m_generators.find(name);
+    if (it == m_generators.end()) return out;
+
+    static const json kNoParams = json::object();
+    out = it->second.fn(params.is_object() ? params : kNoParams);
+
+    // Drop geometry that would throw out of Mesh::initialize() (MikkTSpace
+    // rejects degenerate UV triangles) or render inside-out. A generator bug
+    // must cost its own bucket, not the whole scene load.
+    for (auto bucketIt = out.buckets.begin(); bucketIt != out.buckets.end();) {
+        if (bucketIt->second.empty()) {
+            bucketIt = out.buckets.erase(bucketIt);
+            continue;
+        }
+        const procgen::ValidationReport report = procgen::validate(bucketIt->second);
+        if (!report.ok()) {
+            fmt::print(stderr,
+                       "MeshGenerators: '{}' bucket '{}' failed validation "
+                       "({} tris: {} OOB, {} non-finite, {} degenerate, {} bad UV, {} inverted) "
+                       "— dropped\n",
+                       name, bucketIt->first, report.triangles, report.outOfBoundsIndices,
+                       report.nonFinite, report.degenerateGeo, report.degenerateUV,
+                       report.windingMismatch);
+            bucketIt = out.buckets.erase(bucketIt);
+            continue;
+        }
+        ++bucketIt;
+    }
+    return out;
 }
 
 // One declared material. A texture field holds either "@name" (a texture from
@@ -589,6 +775,8 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
         for (int& l : e.lights)
             l += lightBase;
         if (e.primitive.material >= 0) e.primitive.material += materialBase;
+        for (auto& bm : e.procMesh.bucketMaterials)
+            if (bm.second >= 0) bm.second += materialBase;
         dst.entities.push_back(std::move(e));
     }
     std::move(sub.meshes.begin(), sub.meshes.end(), std::back_inserter(dst.meshes));
@@ -897,6 +1085,56 @@ entt::entity instantiate(
                 scene.stagedMeshes.push_back(mesh);
                 scene.stagedMeshTransforms.push_back(glm::mat4(1.0f));
                 registry.get_or_emplace<MeshRendererComponent>(ent).meshes.push_back(std::move(mesh));
+            }
+        }
+
+        // Procedural mesh: run the registered generator and hand each bucket
+        // to the renderer as its own mesh, so one entity can carry several
+        // materials (tiles + grout) without inventing child entities.
+        if (!e.procMesh.empty()) {
+            json params = json::object();
+            if (!e.procMesh.paramsJson.empty()) {
+                params = json::parse(e.procMesh.paramsJson, nullptr, /*allow_exceptions=*/false);
+                if (params.is_discarded()) params = json::object();
+            }
+            if (!MeshGenerators::instance().has(e.procMesh.generator)) {
+                std::string known;
+                for (const auto& n : MeshGenerators::instance().names())
+                    known += (known.empty() ? "" : ", ") + n;
+                fmt::print(stderr, "instantiate: unknown mesh generator '{}'; registered: {}\n",
+                           e.procMesh.generator, known);
+            } else {
+                GeneratedContent content =
+                    MeshGenerators::instance().generate(e.procMesh.generator, params);
+                for (auto& [bucketName, data] : content.buckets) {
+                    std::shared_ptr<Material> mat;
+                    for (const auto& [name, index] : e.procMesh.bucketMaterials) {
+                        if (name != bucketName) continue;
+                        if (index >= 0 && size_t(index) < blueprint.materials.size())
+                            mat = blueprint.materials[static_cast<size_t>(index)];
+                        break;
+                    }
+                    std::vector<VertexData> verts(data.positions.size());
+                    for (size_t vi = 0; vi < data.positions.size(); ++vi) {
+                        verts[vi].position = data.positions[vi];
+                        verts[vi].uv = data.uvs[vi];
+                        verts[vi].normal = data.normals[vi];
+                        // MikkTSpace overwrites this during initialize().
+                        verts[vi].tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                    }
+                    auto procMesh = std::make_shared<Mesh>();
+                    procMesh->hasPosition = true;
+                    procMesh->hasUV0 = true;
+                    procMesh->hasNormal = true;
+                    procMesh->hasTangent = true;
+                    procMesh->primitiveMode = PrimitiveMode::TRIANGLES;
+                    procMesh->initialize(verts, data.indices);
+                    procMesh->material = std::move(mat);
+                    scene.stagedMeshes.push_back(procMesh);
+                    scene.stagedMeshTransforms.push_back(glm::mat4(1.0f));
+                    registry.get_or_emplace<MeshRendererComponent>(ent).meshes.push_back(
+                        std::move(procMesh));
+                }
             }
         }
 
