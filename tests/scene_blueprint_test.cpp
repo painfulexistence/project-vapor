@@ -942,7 +942,9 @@ TEST_CASE("procMesh colliders become child entities the physics layer can realiz
     entt::entity deck = entt::null;
     for (auto e : registry.view<NameComponent>())
         if (registry.get<NameComponent>(e).name == "Deck") deck = e;
-    REQUIRE(deck != entt::null);
+    // Extra parens: Catch2's expression decomposition cannot pick between
+    // entt's comparison overloads for entity vs null_t (see line 210).
+    REQUIRE((deck != entt::null));
 
     float totalVolume = 0.0f;
     for (auto e : colliders) {
@@ -976,7 +978,8 @@ TEST_CASE("procMesh colliders become child entities the physics layer can realiz
     // torn down through `created` would otherwise leak every collider.
     for (auto e : colliders) {
         INFO("collider " << registry.get<NameComponent>(e).name);
-        CHECK(std::find(created.begin(), created.end(), e) != created.end());
+        const bool reported = std::find(created.begin(), created.end(), e) != created.end();
+        CHECK(reported);
     }
 }
 
