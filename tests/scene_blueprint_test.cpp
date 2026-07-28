@@ -778,18 +778,37 @@ TEST_CASE("malformed texture entries are reported and never throw",
     CHECK(bp.images.size() == 2);
 }
 
-TEST_CASE("integer texture params reject non-integral spellings",
+TEST_CASE("integer texture params accept the float spelling of an integer",
           "[scene_blueprint][textures]") {
     const auto& gens = TextureGenerators::instance();
-    // "seed": 4.0 is a JSON float, so it is NOT an integer field and falls back
-    // to the default — the same rule detail::readField applies to component
-    // integers. Pinned here because the resulting image differs silently.
-    auto asInt = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4 }, { "size", 16 } });
-    auto asFloat = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4.0 }, { "size", 16 } });
-    auto asDefault = gens.generate("noisyAlbedo", nlohmann::json{ { "size", 16 } });
+    // JSON does not distinguish 4 from 4.0, so both must mean the same seed.
+    // Rejecting the float spelling would silently substitute the generator's
+    // default — and a mistyped "size": 32.0 would bake a 256px image.
+    auto asInt = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4 }, { "size", 32 } });
+    auto asFloat = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4.0 }, { "size", 32 } });
+    auto asDefault = gens.generate("noisyAlbedo", nlohmann::json{ { "size", 32 } });
     REQUIRE(asInt);
     REQUIRE(asFloat);
     REQUIRE(asDefault);
-    CHECK(asFloat->byteArray == asDefault->byteArray);
-    CHECK(asInt->byteArray != asDefault->byteArray);
+    CHECK(asFloat->byteArray == asInt->byteArray);
+    CHECK(asFloat->uri == asInt->uri);
+    CHECK(asFloat->byteArray != asDefault->byteArray);
+
+    auto sizeFloat = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 1 }, { "size", 32.0 } });
+    REQUIRE(sizeFloat);
+    CHECK(sizeFloat->width == 32);
+
+    // A non-numeric value still falls back, and an out-of-range float must not
+    // reach an undefined int64 conversion on the way there.
+    auto asString = gens.generate("noisyAlbedo",
+                                  nlohmann::json{ { "period", "eight" }, { "seed", 7 }, { "size", 16 } });
+    auto periodDefault = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 7 }, { "size", 16 } });
+    REQUIRE(asString);
+    REQUIRE(periodDefault);
+    CHECK(asString->byteArray == periodDefault->byteArray);
+    for (double hostile : { 1e300, -1e300, -3.5 }) {
+        auto img = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", hostile }, { "size", 16 } });
+        REQUIRE(img);
+        CHECK(img->byteArray == gens.generate("noisyAlbedo", nlohmann::json{ { "size", 16 } })->byteArray);
+    }
 }

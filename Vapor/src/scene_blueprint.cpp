@@ -299,19 +299,35 @@ float pf(const json& j, const char* key, float fallback) {
     const auto it = j.find(key);
     return (it != j.end() && it->is_number()) ? it->get<float>() : fallback;
 }
+// JSON draws no line between 4 and 4.0, so an integer field must accept both:
+// rejecting the float spelling substitutes the generator's default without a
+// word, and a mistyped "size": 32.0 would then bake a 256px image instead of a
+// 32px one. Exact integers keep their exact path; a float is range-checked as
+// a double FIRST, because get<int64_t>() on something like 1e300 is undefined.
 int pi(const json& j, const char* key, int fallback) {
     const auto it = j.find(key);
-    return (it != j.end() && it->is_number_integer()) ? it->get<int>() : fallback;
+    if (it == j.end() || !it->is_number()) return fallback;
+    if (it->is_number_integer()) {
+        const int64_t v = it->get<int64_t>();
+        return (v < INT32_MIN || v > INT32_MAX) ? fallback : int(v);
+    }
+    const double d = it->get<double>();
+    if (!(d >= double(INT32_MIN) && d <= double(INT32_MAX))) return fallback;
+    return int(d);
 }
 uint32_t pu(const json& j, const char* key, uint32_t fallback) {
-    // Read the full unsigned range: seeds are naturally uint32 and routing them
-    // through int would silently drop everything at or above 2^31 back onto the
+    // Reads the full unsigned range: seeds are naturally uint32, and routing
+    // them through int would drop everything at or above 2^31 onto the
     // fallback. Negatives and out-of-range values keep the fallback.
     const auto it = j.find(key);
-    if (it == j.end() || !it->is_number_integer()) return fallback;
-    const int64_t v = it->get<int64_t>();
-    if (v < 0 || v > int64_t(UINT32_MAX)) return fallback;
-    return uint32_t(v);
+    if (it == j.end() || !it->is_number()) return fallback;
+    if (it->is_number_integer()) {
+        const int64_t v = it->get<int64_t>();
+        return (v < 0 || v > int64_t(UINT32_MAX)) ? fallback : uint32_t(v);
+    }
+    const double d = it->get<double>();
+    if (!(d >= 0.0 && d <= double(UINT32_MAX))) return fallback;
+    return uint32_t(d);
 }
 glm::vec3 pv3(const json& j, const char* key, glm::vec3 fallback) {
     const auto it = j.find(key);
