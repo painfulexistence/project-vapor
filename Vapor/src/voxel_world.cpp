@@ -880,7 +880,7 @@ bool VoxelWorld::raycast(const glm::vec3& localRo, const glm::vec3& localRd, flo
     if (pageTable.empty()) return false;
     const glm::vec3 bmax = extent();
     const glm::vec3 rd = localRd;
-    const glm::vec3 invD = 1.0f / rd;  // view rays are never exactly axis-aligned
+    const glm::vec3 invD = 1.0f / rd;  // inf on axis-aligned components; guarded below
 
     const glm::vec3 t0 = (glm::vec3(0.0f) - localRo) * invD;
     const glm::vec3 t1 = (bmax - localRo) * invD;
@@ -899,9 +899,22 @@ bool VoxelWorld::raycast(const glm::vec3& localRo, const glm::vec3& localRd, flo
     glm::ivec3 bcell = glm::clamp(glm::ivec3(glm::floor((localRo + rd * t) / brickSize)), glm::ivec3(0), bg - 1);
 
     const glm::ivec3 step = glm::ivec3(glm::sign(rd));
-    const glm::vec3 tDelta = glm::abs(glm::vec3(brickSize) * invD);
+    glm::vec3 tDelta = glm::abs(glm::vec3(brickSize) * invD);
     const glm::vec3 stepPos = glm::vec3(glm::greaterThan(rd, glm::vec3(0.0f)));
     glm::vec3 tMax = ((glm::vec3(bcell) + stepPos) * brickSize - localRo) * invD;
+    // An axis the ray does not travel along is never crossed, so its next
+    // crossing is at infinity. Computing it gives 0 * inf = NaN — the boundary
+    // offset is exactly zero there — and since every comparison against NaN is
+    // false, the walk below would pick that axis every iteration, advance by
+    // step = 0 and spin on one cell until the budget ran out. A perfectly
+    // vertical probe ray (0, -1, 0) hits this exactly and reported a miss
+    // straight through solid ground.
+    for (int k = 0; k < 3; k++) {
+        if (rd[k] == 0.0f) {
+            tMax[k] = std::numeric_limits<float>::infinity();
+            tDelta[k] = std::numeric_limits<float>::infinity();
+        }
+    }
 
     // Fine walk of one occupied brick's bitmask, starting at ray parameter tIn.
     auto walkBrick = [&](const glm::ivec3& brickCell, const Brick& b, float tIn, float& tHit,
@@ -909,8 +922,14 @@ bool VoxelWorld::raycast(const glm::vec3& localRo, const glm::vec3& localRd, flo
         const glm::ivec3 lo = brickCell * BRICK_DIM;
         glm::ivec3 cell =
             glm::clamp(glm::ivec3(glm::floor((localRo + rd * (tIn + eps)) / voxelSize)), lo, lo + (BRICK_DIM - 1));
-        const glm::vec3 vDelta = glm::abs(glm::vec3(voxelSize) * invD);
+        glm::vec3 vDelta = glm::abs(glm::vec3(voxelSize) * invD);
         glm::vec3 vMax = ((glm::vec3(cell) + stepPos) * voxelSize - localRo) * invD;
+        for (int k = 0; k < 3; k++) {  // same NaN guard as the brick walk above
+            if (rd[k] == 0.0f) {
+                vMax[k] = std::numeric_limits<float>::infinity();
+                vDelta[k] = std::numeric_limits<float>::infinity();
+            }
+        }
         float tv = tIn;
         for (int i = 0; i < 3 * BRICK_DIM + 1; i++) {
             const int vi = voxelIndexInBrick(cell - lo);
