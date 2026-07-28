@@ -145,6 +145,16 @@ public:
         BodyMotionType motionType
     );
 
+    // Replace a body's shape in place, keeping the body itself — and with it
+    // its velocity, its contacts and its place in the world. This is what a
+    // collider rebuilt from carved voxels needs: destroying and recreating the
+    // body instead restarts it from rest, so a prop carved mid-flight would
+    // freeze in mid-air. Jolt recomputes mass, inertia and the centre of mass
+    // from the new shape, and tracks that centre separately from the body
+    // position, so a prop whose balance shifts does not jump. Returns false if
+    // the handle is unknown or the hull is degenerate.
+    bool setConvexHullShape(BodyHandle body, const std::vector<glm::vec3>& points);
+
     void addBody(BodyHandle body, bool activate = false);
     void removeBody(BodyHandle body);
     void destroyBody(BodyHandle body);

@@ -447,6 +447,30 @@ namespace Vapor {
         }
     };
 
+    // Queue a rebuild of just the chunks of a static voxel collider that
+    // overlap a voxel-space box — what a carve calls, so a dug hole becomes
+    // something you can walk into rather than a purely visual one. Marks made
+    // while a rebuild is already pending simply coalesce. Free-standing rather
+    // than a VoxelColliderSystem member because VoxelVolumeSystem::dig, which
+    // is declared first, needs it.
+    inline void markColliderDirtyRegion(VoxelColliderComponent& vc, const glm::ivec3& voxelMin,
+                                        const glm::ivec3& voxelMax) {
+        for (size_t i = 0; i < vc.chunkMin.size(); i++) {
+            // Grow the test by one voxel: removing a voxel at a chunk's edge
+            // uncovers a face on the far side of the boundary, which belongs to
+            // the neighbour. Missing that would leave a one-voxel wall standing
+            // where the dig went through.
+            if (voxelMax.x < vc.chunkMin[i].x - 1 || voxelMin.x > vc.chunkMax[i].x + 1) continue;
+            if (voxelMax.y < vc.chunkMin[i].y - 1 || voxelMin.y > vc.chunkMax[i].y + 1) continue;
+            if (voxelMax.z < vc.chunkMin[i].z - 1 || voxelMin.z > vc.chunkMax[i].z + 1) continue;
+            const int idx = static_cast<int>(i);
+            if (std::find(vc.dirtyChunks.begin(), vc.dirtyChunks.end(), idx) == vc.dirtyChunks.end()) {
+                vc.dirtyChunks.push_back(idx);
+            }
+        }
+    }
+
+
     // ============================================================================
     // MicroVoxel volumes — owns each VoxelVolumeComponent's VoxelWorld and
     // pushes the live volume list to the renderer (setVoxelVolumes) per frame.
@@ -489,6 +513,7 @@ namespace Vapor {
                         float maxDist, float radius) {
             float best = std::numeric_limits<float>::max();
             VoxelWorld* bestWorld = nullptr;
+            entt::entity bestEntity = entt::null;
             glm::vec3 bestLocalHit(0.0f);
             auto view = reg.view<VoxelVolumeComponent>();
             for (auto entity : view) {
@@ -517,12 +542,21 @@ namespace Vapor {
                     if (d < best) {
                         best = d;
                         bestWorld = vv.world.value.get();
+                        bestEntity = entity;
                         bestLocalHit = localHit;
                     }
                 }
             }
             if (!bestWorld) return false;
-            return bestWorld->carveSphere(bestLocalHit, radius);
+            glm::ivec3 carvedMin, carvedMax;
+            if (!bestWorld->carveSphere(bestLocalHit, radius, carvedMin, carvedMax)) return false;
+            // Tell the collider what changed, so the hole is something you can
+            // walk into rather than a purely visual one. Only the chunks the
+            // carve overlapped get re-meshed.
+            if (auto* vc = reg.try_get<VoxelColliderComponent>(bestEntity)) {
+                markColliderDirtyRegion(*vc, carvedMin, carvedMax);
+            }
+            return true;
         }
 
     private:
@@ -576,14 +610,37 @@ namespace Vapor {
                 auto& vc = view.get<VoxelColliderComponent>(entity);
                 auto& rb = view.get<RigidbodyComponent>(entity);
 
-                if (vc.rebuild && rb.body.valid()) {
-                    physics->destroyBody(rb.body);
-                    rb.body = BodyHandle {};
+                if (vc.rebuild) {
+                    if (rb.body.valid()) {
+                        physics->destroyBody(rb.body);
+                        rb.body = BodyHandle {};
+                    }
+                    for (auto& h : vc.chunkBodies) {
+                        if (h.valid()) physics->destroyBody(h);
+                        h = BodyHandle {};
+                    }
+                    // Re-mesh every chunk from scratch.
+                    vc.dirtyChunks.clear();
+                    for (size_t i = 0; i < vc.chunkMin.size(); i++) vc.dirtyChunks.push_back(static_cast<int>(i));
                 }
                 vc.rebuild = false;
-                if (rb.body.valid()) continue;
 
                 auto& vv = view.get<VoxelVolumeComponent>(entity);
+                // A chunked static collider is already up: service its dirty
+                // list and move on.
+                if (!vc.chunkMin.empty()) {
+                    if (!vc.dirtyChunks.empty() && vv.world.value) {
+                        _rebuildChunks(*physics, vc, *vv.world.value, view.get<TransformComponent>(entity));
+                    }
+                    continue;
+                }
+                if (rb.body.valid()) {
+                    // A live dynamic prop: erode it, then break it.
+                    if (rb.motionType != BodyMotionType::Static && vv.world.value) {
+                        _updateProp(*physics, vc, *vv.world.value, rb.body);
+                    }
+                    continue;
+                }
                 // Wait for every chunk: a half-generated world would mesh to a
                 // collider full of holes that never gets corrected.
                 if (!vv.world.value || !vv.world.value->generationComplete()) continue;
@@ -594,10 +651,21 @@ namespace Vapor {
                 const glm::vec3 ext = world.extent();
                 const glm::vec3 pivotOffset(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
 
+                // Baseline for the destruction thresholds, fixed at the first
+                // build so a prop spawned already partly carved is judged
+                // against how it spawned, not a full grid it never had.
+                if (vc.initialSolidVoxels == 0) vc.initialSolidVoxels = world.solidVoxels();
+                vc.solidAtLastBuild = world.solidVoxels();
+
                 if (rb.motionType == BodyMotionType::Static) {
                     const glm::ivec3 d = world.dim();
                     const auto voxels = static_cast<Uint64>(d.x) * static_cast<Uint64>(d.y) * static_cast<Uint64>(d.z);
                     if (vc.maxMeshVoxels != 0 && voxels > static_cast<Uint64>(vc.maxMeshVoxels)) continue;
+                    if (vc.chunkVoxels > 0) {
+                        _initChunks(vc, d);
+                        _rebuildChunks(*physics, vc, world, tf);
+                        continue;  // chunked colliders do not use rb.body
+                    }
                     std::vector<glm::vec3> verts;
                     std::vector<Uint32> indices;
                     world.buildSurfaceMesh(verts, indices);
@@ -612,6 +680,79 @@ namespace Vapor {
                     rb.body = physics->createConvexHullBody(points, tf.position, tf.rotation, rb.motionType);
                 }
                 if (rb.body.valid()) physics->addBody(rb.body, rb.motionType != BodyMotionType::Static);
+            }
+        }
+
+    private:
+        // Lay out the chunk grid. Rounded to whole bricks so a chunk never
+        // splits one — the mesher's page-table fast path assumes that.
+        static void _initChunks(VoxelColliderComponent& vc, const glm::ivec3& dim) {
+            constexpr int kBrick = 8;
+            const int cv = std::max(kBrick, (vc.chunkVoxels / kBrick) * kBrick);
+            vc.chunkMin.clear();
+            vc.chunkMax.clear();
+            for (int z = 0; z < dim.z; z += cv)
+                for (int y = 0; y < dim.y; y += cv)
+                    for (int x = 0; x < dim.x; x += cv) {
+                        vc.chunkMin.push_back(glm::ivec3(x, y, z));
+                        vc.chunkMax.push_back(glm::min(glm::ivec3(x + cv - 1, y + cv - 1, z + cv - 1), dim - 1));
+                    }
+            vc.chunkBodies.assign(vc.chunkMin.size(), BodyHandle{});
+            vc.dirtyChunks.clear();
+            for (size_t i = 0; i < vc.chunkMin.size(); i++) vc.dirtyChunks.push_back(static_cast<int>(i));
+        }
+
+        // Re-mesh the queued chunks and swap each one's body. Static bodies
+        // have no velocity worth preserving, so they are simply replaced —
+        // which also keeps the geometry and the body reading it in step.
+        static void _rebuildChunks(Physics3D& physics, VoxelColliderComponent& vc, const VoxelWorld& world,
+                                   const TransformComponent& tf) {
+            const glm::vec3 ext = world.extent();
+            const glm::vec3 pivotOffset(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+            std::vector<glm::vec3> verts;
+            std::vector<Uint32> indices;
+            for (int idx : vc.dirtyChunks) {
+                if (idx < 0 || static_cast<size_t>(idx) >= vc.chunkMin.size()) continue;
+                world.buildSurfaceMeshRegion(verts, indices, vc.chunkMin[idx], vc.chunkMax[idx]);
+                if (vc.chunkBodies[idx].valid()) {
+                    physics.destroyBody(vc.chunkBodies[idx]);
+                    vc.chunkBodies[idx] = BodyHandle{};
+                }
+                if (indices.empty()) continue;  // chunk holds no surface now
+                for (auto& p : verts) p -= pivotOffset;
+                vc.chunkBodies[idx] =
+                    physics.createMeshBody(verts, indices, tf.position, tf.rotation, BodyMotionType::Static);
+                if (vc.chunkBodies[idx].valid()) physics.addBody(vc.chunkBodies[idx], false);
+            }
+            vc.dirtyChunks.clear();
+            vc.solidAtLastBuild = world.solidVoxels();
+        }
+
+        // A live dynamic prop: re-hull as its silhouette erodes, and report it
+        // destroyed once too little of it is left to be worth simulating.
+        static void _updateProp(Physics3D& physics, VoxelColliderComponent& vc, const VoxelWorld& world,
+                                BodyHandle body) {
+            if (vc.destroyed || vc.initialSolidVoxels == 0) return;
+            const Uint64 solid = world.solidVoxels();
+            const float remaining = static_cast<float>(solid) / static_cast<float>(vc.initialSolidVoxels);
+            if (vc.destroyBelowSolidFraction > 0.0f && remaining < vc.destroyBelowSolidFraction) {
+                vc.destroyed = true;
+                return;
+            }
+            if (vc.rehullAfterSolidFraction <= 0.0f || solid >= vc.solidAtLastBuild) return;
+            const float carved =
+                static_cast<float>(vc.solidAtLastBuild - solid) / static_cast<float>(vc.initialSolidVoxels);
+            if (carved < vc.rehullAfterSolidFraction) return;
+
+            std::vector<glm::vec3> points;
+            world.buildConvexHullPoints(points, vc.hullDirections);
+            if (points.size() < 4) return;
+            const glm::vec3 ext = world.extent();
+            const glm::vec3 pivotOffset(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+            for (auto& p : points) p -= pivotOffset;
+            // In place, so the prop keeps whatever motion it had.
+            if (physics.setConvexHullShape(body, points)) {
+                vc.solidAtLastBuild = solid;
             }
         }
     };

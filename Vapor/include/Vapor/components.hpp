@@ -81,6 +81,44 @@ namespace Vapor {
         // Set true to drop the body and rebuild it from the current voxels
         // (e.g. after a large edit); cleared once the rebuild is queued.
         bool rebuild = false;
+        // Split a static collider into a grid of chunks this many voxels on a
+        // side, each its own body (0 = one body for the whole world). This is
+        // what makes digging affordable: a carve re-meshes only the chunks it
+        // touched, around a millisecond, instead of the whole world — tens of
+        // milliseconds at 256^3, every frame the dig key is held. Costs a few
+        // percent more triangles, since greedy runs cannot span chunk
+        // boundaries. Should be a multiple of the 8-voxel brick.
+        int chunkVoxels = 0;
+        // Carving a prop away: once its remaining solid voxels fall below this
+        // fraction of what it was built with, `destroyed` is set (0 disables).
+        // Deliberately NOT "re-hull and carry on" — a convex hull is the
+        // object's outer envelope, so hollowing a crate out does not change it
+        // at all, and no amount of rebuilding lets you fall through the hole.
+        // Erode the silhouette, then break the thing. Dynamic bodies only.
+        float destroyBelowSolidFraction = 0.4f;
+        // Above that threshold, re-hull once this much of the ORIGINAL volume
+        // has been carved away since the last rebuild, so the silhouette
+        // follows corners being knocked off without re-hulling every dig frame
+        // (0 disables). Dynamic bodies only.
+        float rehullAfterSolidFraction = 0.08f;
+
+        // ---- Runtime state, owned by VoxelColliderSystem ------------------
+        // One entry per chunk of the static collider; an invalid handle means
+        // that chunk holds no surface. Empty for an unchunked collider, which
+        // uses RigidbodyComponent::body as before.
+        std::vector<BodyHandle> chunkBodies;
+        std::vector<glm::ivec3> chunkMin;
+        std::vector<glm::ivec3> chunkMax;
+        // Chunks queued for re-meshing.
+        std::vector<int> dirtyChunks;
+        // Solid voxels when the collider was first built, and at the last
+        // rebuild. The ratio against the first is what the thresholds test.
+        Uint64 initialSolidVoxels = 0;
+        Uint64 solidAtLastBuild = 0;
+        // Set once the prop drops below destroyBelowSolidFraction. The system
+        // only reports it; what destruction means (despawn, spawn debris, swap
+        // in a broken variant) is the game's call.
+        bool destroyed = false;
     };
 
     struct SphereColliderComponent {

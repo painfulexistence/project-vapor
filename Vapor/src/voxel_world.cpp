@@ -517,12 +517,26 @@ Uint32 VoxelWorld::residentBricks() const {
 // ============================================================================
 
 void VoxelWorld::buildSurfaceMesh(std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices) const {
+    buildSurfaceMeshRegion(outVertices, outIndices, glm::ivec3(0), gridDim - 1);
+}
+
+void VoxelWorld::buildSurfaceMeshRegion(
+    std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices, const glm::ivec3& regionMin,
+    const glm::ivec3& regionMax
+) const {
     outVertices.clear();
     outIndices.clear();
     if (pageTable.empty() || solidCount.load(std::memory_order_relaxed) == 0) return;
 
-    glm::ivec3 lo, hi;
-    occupiedVoxelBounds(lo, hi);
+    glm::ivec3 solidLo, solidHi;
+    occupiedVoxelBounds(solidLo, solidHi);
+    // Sweep only where the region and the occupied bounds overlap. voxelAt
+    // below still reads the whole grid, so faces on the region boundary are
+    // judged against the neighbours outside it — that is what keeps chunks
+    // seamless.
+    const glm::ivec3 lo = glm::max(regionMin, solidLo);
+    const glm::ivec3 hi = glm::min(regionMax, solidHi);
+    if (lo.x > hi.x || lo.y > hi.y || lo.z > hi.z) return;
     const glm::ivec3 bg = brickGrid();
 
     auto brickEmpty = [&](const glm::ivec3& b) {
@@ -541,7 +555,13 @@ void VoxelWorld::buildSurfaceMesh(std::vector<glm::vec3>& outVertices, std::vect
         if (du <= 0 || dv <= 0) continue;
         mask.assign(static_cast<size_t>(du) * dv, 0);
 
-        for (int s = lo[d]; s <= hi[d] + 1; s++) {
+        // A face lives on the plane between voxels s-1 and s, so the plane at
+        // hi+1 is shared with the region above: both would emit it and the
+        // surface would be doubled there. Give each plane one owner — the
+        // region whose voxels start at it — and let only the topmost region
+        // close off the far side, since nothing above it will.
+        const int sEnd = (hi[d] >= solidHi[d]) ? hi[d] + 1 : hi[d];
+        for (int s = lo[d]; s <= sEnd; s++) {
             std::fill(mask.begin(), mask.end(), static_cast<int8_t>(0));
             const bool aInside = (s - 1 >= 0);
             const bool bInside = (s < gridDim[d]);
@@ -770,11 +790,20 @@ Uint32 VoxelWorld::resolveForEdit(const glm::ivec3& brickCell) {
 }
 
 bool VoxelWorld::carveSphere(const glm::vec3& localCenter, float radius) {
+    glm::ivec3 ignoredMin, ignoredMax;
+    return carveSphere(localCenter, radius, ignoredMin, ignoredMax);
+}
+
+bool VoxelWorld::carveSphere(const glm::vec3& localCenter, float radius, glm::ivec3& outMin, glm::ivec3& outMax) {
+    outMin = glm::ivec3(0);
+    outMax = glm::ivec3(-1);  // empty box until we know better
     if (pageTable.empty() || radius <= 0.0f) return false;
     const glm::vec3 c = localCenter / voxelSize;  // sphere center in voxels
     const float rv = radius / voxelSize;
     const glm::ivec3 lo = glm::clamp(glm::ivec3(glm::floor(c - rv)), glm::ivec3(0), gridDim - 1);
     const glm::ivec3 hi = glm::clamp(glm::ivec3(glm::ceil(c + rv)), glm::ivec3(0), gridDim - 1);
+    outMin = lo;
+    outMax = hi;
     const float rv2 = rv * rv;
 
     bool changed = false;

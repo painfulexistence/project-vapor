@@ -131,6 +131,13 @@ public:
     // emptied bricks and materializing carved uniform bricks. Affected slots
     // land in the dirty batch. Returns true if anything changed.
     bool carveSphere(const glm::vec3& localCenter, float radius);
+    // As above, additionally reporting the voxel box the carve could have
+    // touched (inclusive, clamped to the grid) — what an incremental collider
+    // needs in order to re-mesh only the chunks that changed. Filled even when
+    // nothing was actually removed, so callers can rely on it after a true
+    // return. Returned by the carve itself rather than recomputed by callers,
+    // so the two can never disagree about which voxels were in range.
+    bool carveSphere(const glm::vec3& localCenter, float radius, glm::ivec3& outMin, glm::ivec3& outMax);
 
     // First solid voxel along a local-space ray (three-level DDA: empty brick
     // cells are skipped in one step, occupied bricks walk their bitmask).
@@ -151,6 +158,18 @@ public:
     // to a single rectangle). Empty bricks are skipped a whole 8-voxel block at
     // a time, so cost tracks surface area, not volume.
     void buildSurfaceMesh(std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices) const;
+
+    // As above, but restricted to voxels inside [regionMin, regionMax]
+    // (inclusive, voxel coordinates, clamped to the occupied bounds). Whether a
+    // face on the region's own boundary is emitted is still decided against the
+    // voxels OUTSIDE it, so meshing a grid in pieces yields exactly the same
+    // surface as meshing it whole: no seams, and no internal walls where two
+    // pieces meet. That is what lets a collider be rebuilt one chunk at a time
+    // after a carve instead of re-meshing the whole world.
+    void buildSurfaceMeshRegion(
+        std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices, const glm::ivec3& regionMin,
+        const glm::ivec3& regionMax
+    ) const;
 
     // Support points of the solid voxels sampled over `directions` roughly even
     // directions — a bounded point set whose convex hull approximates (and is

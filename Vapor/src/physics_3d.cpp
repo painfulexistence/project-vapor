@@ -669,6 +669,28 @@ auto Physics3D::createBoxBody(
     return BodyHandle{ nextBodyID++ };
 }
 
+bool Physics3D::setConvexHullShape(BodyHandle handle, const std::vector<glm::vec3>& points) {
+    auto it = bodies.find(handle.rid);
+    if (it == bodies.end() || points.size() < 4) return false;
+
+    JPH::Array<JPH::Vec3> joltPoints;
+    joltPoints.reserve(points.size());
+    for (const auto& p : points) {
+        joltPoints.push_back(JPH::Vec3(p.x, p.y, p.z));
+    }
+    JPH::ConvexHullShapeSettings shapeSettings(joltPoints);
+    shapeSettings.SetEmbedded();
+    JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
+    if (shapeResult.HasError()) return false;
+
+    // inUpdateMassProperties: a carved prop is lighter and differently
+    // balanced, so mass and inertia are re-derived rather than carried over.
+    // Activate too — a sleeping body would sit on stale contacts and never
+    // notice that its shape moved out from under them.
+    bodyInterface->SetShape(it->second, shapeResult.Get(), /*inUpdateMassProperties=*/true, JPH::EActivation::Activate);
+    return true;
+}
+
 void Physics3D::addBody(BodyHandle handle, bool activate) {
     auto id = bodies.at(handle.rid);
     bodyInterface->AddBody(id, activate ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
