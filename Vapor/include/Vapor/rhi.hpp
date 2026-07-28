@@ -708,7 +708,16 @@ public:
     virtual void bindComputeICB(Uint32 /*binding*/, IndirectCommandBufferHandle /*handle*/) {}
     // Replay commands [0, commandCount) of the ICB on the current render pass.
     // The bound pipeline must have been created with supportsICB.
-    virtual void executeICB(IndirectCommandBufferHandle /*handle*/, Uint32 /*commandCount*/) {}
+    // `indexBuffer`: any buffer the ICB's commands reference INDIRECTLY (baked
+    // in by the encode kernel — e.g. the merged index buffer regions of
+    // draw_indexed_primitives). Metal neither declares residency for nor
+    // retains indirect references, so the caller must pass it here: useResource
+    // makes it resident for this pass AND the command buffer's retain keeps it
+    // alive through frame completion even if it is destroyed mid-flight (a
+    // streamed-geometry rebuild destroying the old merged buffers otherwise
+    // leaves in-flight frames replaying commands into freed memory).
+    virtual void executeICB(IndirectCommandBufferHandle /*handle*/, Uint32 /*commandCount*/,
+                            BufferHandle /*indexBuffer*/ = {}) {}
 
     // Bindless texture table (the Bindless MDI draw mode; gated on
     // capabilities.bindlessTextures). Holds entryCount structs of

@@ -1917,9 +1917,25 @@ void RHI_Metal::bindComputeICB(Uint32 binding, IndirectCommandBufferHandle handl
     currentComputeEncoder->useResource(res.icb.get(), MTL::ResourceUsageWrite);
 }
 
-void RHI_Metal::executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount) {
+void RHI_Metal::executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount,
+                           BufferHandle indexBuffer) {
     auto it = icbs.find(handle.id);
     if (it == icbs.end() || !currentRenderEncoder || commandCount == 0) return;
+    // The ICB's draw commands reference their index-buffer regions INDIRECTLY
+    // (the encode kernel baked device addresses into each command), so the
+    // encoder neither declares residency for that buffer nor retains it —
+    // executeCommandsInBuffer alone reads undeclared memory, and once a
+    // streamed-geometry rebuild destroys the old merged index buffer while
+    // earlier frames are still in flight, those frames replay draws into freed
+    // memory (the command buffer only retains DIRECTLY bound resources).
+    // useResource fixes both: residency for this pass, and an encoder
+    // reference that keeps the buffer alive until the frame completes.
+    if (indexBuffer.isValid()) {
+        auto bit = buffers.find(indexBuffer.id);
+        if (bit != buffers.end()) {
+            currentRenderEncoder->useResource(bit->second.buffer.get(), MTL::ResourceUsageRead);
+        }
+    }
     Uint32 count = std::min(commandCount, it->second.maxCommands);
     currentRenderEncoder->executeCommandsInBuffer(it->second.icb.get(),
                                                   NS::Range::Make(0, count));

@@ -126,7 +126,8 @@ public:
     IndirectCommandBufferHandle createIndirectCommandBuffer(Uint32 maxCommands) override;
     void destroyIndirectCommandBuffer(IndirectCommandBufferHandle handle) override;
     void bindComputeICB(Uint32 binding, IndirectCommandBufferHandle handle) override;
-    void executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount) override;
+    void executeICB(IndirectCommandBufferHandle handle, Uint32 commandCount,
+                    BufferHandle indexBuffer = {}) override;
     BufferHandle createTextureArgumentTable(ShaderHandle fragmentShader, Uint32 bufferIndex,
                                             Uint32 entryCount, Uint32 texturesPerEntry) override;
     void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,

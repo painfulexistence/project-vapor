@@ -950,6 +950,46 @@ bool Renderer::updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData
     std::copy(indices.begin(), indices.end(), m_mergedIndices.begin() + mesh.indexOffset);
     m_mergedGeometryDirty = true;
 
+    // Refit this mesh's meshlet cluster bounds to the rewritten geometry.
+    // Streamed tiles bake WORLD coordinates into their vertices (identity
+    // transforms), so a rewrite MOVES the mesh — but the cull spheres baked at
+    // registration still sit at the placeholder tile's position, and the task
+    // shader frustum-culls every cluster the moment the camera looks at the
+    // real tile: streamed terrain simply vanishes on the meshlet path. The
+    // meshlet topology (same grid) stays valid; only the bounds move. The cone
+    // is disabled rather than refit — its axis is equally stale, and per-
+    // triangle normal work isn't worth stream-time cost for a terrain tile.
+    if (mesh.meshletCount > 0 && capabilities.meshShaders) {
+        for (Uint32 m = 0; m < mesh.meshletCount; ++m) {
+            const Vapor::Meshlet& ml = m_globalMeshlets[mesh.meshletOffset + m];
+            glm::vec3 mn(1e30f), mx(-1e30f);
+            for (Uint32 v = 0; v < ml.vertexCount; ++v) {
+                const glm::vec3& p =
+                    m_mergedVertices[m_globalMeshletVertices[ml.vertexOffset + v]].position;
+                mn = glm::min(mn, p);
+                mx = glm::max(mx, p);
+            }
+            const glm::vec3 c = (mn + mx) * 0.5f;
+            const float r = glm::length(mx - c);
+            Vapor::MeshletBounds& b = m_globalMeshletBounds[mesh.meshletOffset + m];
+            b.cullSphere = glm::vec4(c, r);
+            b.coneApex = glm::vec4(c, 0.0f);
+            b.coneAxisCutoff = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);  // w >= 1 => cone cull off
+            b.lodSphere = glm::vec4(c, r);
+            b.parentSphere = glm::vec4(c, r);
+        }
+        // Patch the live GPU array in place; if it isn't built yet (mesh
+        // registered this frame) the dirty full-rebuild covers it.
+        if (meshletBoundsBuffer.isValid() && !m_meshletsDirty) {
+            rhi->updateBuffer(meshletBoundsBuffer,
+                              &m_globalMeshletBounds[mesh.meshletOffset],
+                              static_cast<size_t>(mesh.meshletOffset) * sizeof(Vapor::MeshletBounds),
+                              static_cast<size_t>(mesh.meshletCount) * sizeof(Vapor::MeshletBounds));
+        } else {
+            m_meshletsDirty = true;
+        }
+    }
+
     // Refit the BLAS on RT backends so rays see the new surface.
     if (id < meshBLAS.size() && meshBLAS[id].isValid()) {
         rhi->buildAccelerationStructure(meshBLAS[id]);
@@ -2419,9 +2459,12 @@ void Renderer::mainRenderPass() {
                 glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
                 rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
             }
-            // Replay the GPU-encoded command buffer (commands carry their own
-            // index-buffer regions).
-            rhi->executeICB(sceneICB, totalInstanceCount);
+            // Replay the GPU-encoded command buffer. The commands carry their
+            // own index-buffer regions — an INDIRECT reference, so the merged
+            // index buffer must ride along for useResource/lifetime (see
+            // executeICB); without it, terrain streaming's merged-buffer
+            // rebuilds leave in-flight frames drawing from a freed buffer.
+            rhi->executeICB(sceneICB, totalInstanceCount, mergedIndexBuffer);
         } else {
             // One native multi-draw over the cull-written args, all materials.
             rhi->bindIndexBuffer(mergedIndexBuffer, 0);
@@ -3129,15 +3172,11 @@ void Renderer::ensureMergedGeometry() {
     if (mergedVertexBuffer.isValid()) rhi->destroyBuffer(mergedVertexBuffer);
     if (mergedIndexBuffer.isValid()) rhi->destroyBuffer(mergedIndexBuffer);
 
-    // The Metal scene ICB inherits residency for the merged buffers it encodes
-    // draws against; those handles just died, so drop the ICB too — gpuCullPass
-    // lazily recreates it and re-encodes against the fresh buffers. Without
-    // this, Bindless MDI keeps replaying commands that reference the destroyed
-    // buffers after a terrain regenerate / streamed-mesh rebuild.
-    if (sceneICB.isValid()) {
-        rhi->destroyIndirectCommandBuffer(sceneICB);
-        sceneICB = {};
-    }
+    // The scene ICB survives this rebuild on purpose: its commands are fully
+    // re-encoded by gpuCullPass every frame (against whatever merged buffers
+    // exist by then), and in-flight frames replaying commands that reference
+    // the buffers destroyed above are kept safe by executeICB's useResource
+    // (the encoder reference retains the old buffer until those frames end).
 
     BufferDesc vbDesc;
     vbDesc.size = m_mergedVertices.size() * sizeof(Vapor::VertexData);
