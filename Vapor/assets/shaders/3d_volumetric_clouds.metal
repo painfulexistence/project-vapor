@@ -120,16 +120,22 @@ constexpr sampler cloudNoiseSampler(address::repeat, filter::linear);
 // average erosion — fading to zero would have made them fatter with distance.
 constant float CLOUD_DETAIL_MEAN = 0.5;
 
-// Sample base cloud shape (128^3 Perlin-Worley volume)
+// Triangle-wave mirrored repeat (de-tiling; twin of CloudRaymarch.frag).
+float2 cloudMirrorRepeat(float2 u) { return abs(2.0 * fract(u * 0.5) - 1.0); }
+
+// Sample base cloud shape (128^3 Perlin-Worley volume). The baked volume
+// tiles every 10 km — visibly, at low coverage (the remap keeps ~one peak
+// per tile: the same blob on a 10 km grid). De-tiling stack, twin of
+// CloudRaymarch.frag: the weather map's BA warp (+-2.5 km, ~13.3 km
+// wavelength, coprime with tile and mirror), mirrored-repeat sampling, and
+// an aperiodic break-up octave added in sampleCloudDensity.
 float sampleCloudShape(float3 worldPos, constant VolumetricCloudData& data,
                        texture3d<float, access::sample> shapeTex, float2 warp) {
-    // `warp`: low-frequency displacement from the weather map's BA channels
-    // (~20 km wavelength, +-1.5 km). The 128^3 volume tiles every 10 km of
-    // world space, which from the ground repeats 4-10x before the horizon on a
-    // regular grid; sliding each region differently breaks the alignment.
     float3 samplePos = worldPos + data.windOffset;
     samplePos.xz += warp;
-    return shapeTex.sample(cloudNoiseSampler, samplePos * (data.shapeNoiseScale * 0.0001)).r;
+    float3 uvw = samplePos * (data.shapeNoiseScale * 0.0001);
+    uvw.xz = cloudMirrorRepeat(uvw.xz);
+    return shapeTex.sample(cloudNoiseSampler, uvw).r;
 }
 
 // Curl-ish vector noise: three decorrelated gradient noises. Not a true
@@ -184,7 +190,7 @@ float4 sampleWeather(float3 worldPos, constant VolumetricCloudData& data,
                      texture2d<float, access::sample> weatherTex) {
     float2 weatherUV = (worldPos.xz + data.windOffset.xz * 0.6) * 0.00005 + data.time * 0.0002;
     float4 w = weatherTex.sample(cloudNoiseSampler, weatherUV * 0.5);  // 40 km tile
-    return float4(w.r * data.cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 1500.0);
+    return float4(w.r * data.cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 2500.0);
 }
 
 // Main cloud density function. The cheap path never samples detailTex, so
@@ -212,6 +218,10 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
 
     // Base shape
     float baseShape = sampleCloudShape(worldPos, data, shapeTex, weather.zw);
+    // Aperiodic break-up octave (de-tiling; twin of CloudRaymarch.frag): the
+    // unbounded-lattice gradient noise never repeats, so which peaks survive
+    // the coverage remap varies region to region instead of per 10 km tile.
+    baseShape += gradientNoise3D((worldPos + data.windOffset) * (1.0 / 6000.0)) * 0.15;
 
     // Apply coverage (remapping creates hard edges)
     float baseCloud = remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0);
@@ -304,7 +314,11 @@ float3 cloudLighting(float3 worldPos, float3 rayDir, constant VolumetricCloudDat
     float sunPower = data.sunIntensity * data.sunLightScale;
     float dayFactor = smoothstep(-0.12, 0.08, data.sunDirection.y);  // 1 day, 0 night
 
-    float3 lum = data.ambientColor * data.ambientIntensity * mix(0.3, 1.0, dayFactor);
+    // Sky ambient absorbs downward through the deck: dark bases, bright tops
+    // (twin of CloudRaymarch.frag) — without it the in-cloud view and any
+    // sun-shadowed face collapsed to one flat constant.
+    float hf = saturate((worldPos.y - data.cloudLayerBottom) / data.cloudLayerThickness);
+    float3 lum = data.ambientColor * data.ambientIntensity * (0.35 + 0.65 * hf) * mix(0.3, 1.0, dayFactor);
 
     if (dayFactor > 0.01) {
         float tr = lightMarch(worldPos, data.sunDirection, data, shapeTex, detailTex, weatherTex);
@@ -561,6 +575,38 @@ fragment float4 cloudFragmentLowRes(
 // Temporal Reprojection Pass
 // ============================================================================
 
+// Catmull-Rom history sampling (9-tap, bilinear-fetch optimized) — twin of
+// CloudTemporal.frag. Plain bilinear re-resampled the history every frame; at
+// temporalBlend 0.05 the accumulator survives ~20 resamples, and 20 stacked
+// bilinear tents are a huge low-pass — mush whenever the camera rotated.
+static float4 sampleHistoryCatmullRom(texture2d<float, access::sample> tex,
+                                      float2 uv, float2 screenSize) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float2 samplePos = uv * screenSize;
+    float2 texPos1 = floor(samplePos - 0.5) + 0.5;
+    float2 f = samplePos - texPos1;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 offset12 = w2 / w12;
+    float2 texPos0 = (texPos1 - 1.0) / screenSize;
+    float2 texPos3 = (texPos1 + 2.0) / screenSize;
+    float2 texPos12 = (texPos1 + offset12) / screenSize;
+    float4 result =
+        tex.sample(s, float2(texPos0.x,  texPos0.y))  * w0.x  * w0.y +
+        tex.sample(s, float2(texPos12.x, texPos0.y))  * w12.x * w0.y +
+        tex.sample(s, float2(texPos3.x,  texPos0.y))  * w3.x  * w0.y +
+        tex.sample(s, float2(texPos0.x,  texPos12.y)) * w0.x  * w12.y +
+        tex.sample(s, float2(texPos12.x, texPos12.y)) * w12.x * w12.y +
+        tex.sample(s, float2(texPos3.x,  texPos12.y)) * w3.x  * w12.y +
+        tex.sample(s, float2(texPos0.x,  texPos3.y))  * w0.x  * w3.y +
+        tex.sample(s, float2(texPos12.x, texPos3.y))  * w12.x * w3.y +
+        tex.sample(s, float2(texPos3.x,  texPos3.y))  * w3.x  * w3.y;
+    return max(result, float4(0.0));
+}
+
 fragment float4 cloudTemporalResolve(
     CloudVertexOut in [[stage_in]],
     texture2d<float, access::sample> currentCloud [[texture(0)]],
@@ -573,32 +619,49 @@ fragment float4 cloudTemporalResolve(
 
     float4 current = currentCloud.sample(linearSampler, in.uv);
 
-    // Simple motion vectors from depth reprojection
     float depth = sceneDepth.sample(linearSampler, in.uv).r;
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
-    float4 clipPos = float4(ndc, depth, 1.0);
-    float4 worldPos = data.invViewProj * clipPos;
-    worldPos /= worldPos.w;
+    float4 farPos = data.invViewProj * float4(ndc, 1.0, 1.0);
+    float3 rayDir = normalize(farPos.xyz / farPos.w - data.cameraPosition);
+
+    // Reprojection point (twin of CloudTemporal.frag). Sky pixels used the
+    // far plane: exact under pure rotation but parallax-free, so translation
+    // reprojected nearby billows from the wrong place and smeared them. Use
+    // the mid-cloud distance along the view ray instead; geometry pixels
+    // keep the depth-buffer position.
+    float4 worldPos;
+    if (depth >= 0.9999) {
+        float tBottom = (data.cloudLayerBottom - data.cameraPosition.y) / rayDir.y;
+        float tTop = (data.cloudLayerTop - data.cameraPosition.y) / rayDir.y;
+        float tMin = min(tBottom, tTop);
+        float tMax = max(tBottom, tTop);
+        if (data.cameraPosition.y >= data.cloudLayerBottom &&
+            data.cameraPosition.y <= data.cloudLayerTop) tMin = 0.0;
+        float tRep = (tMax <= 0.0)
+            ? 30000.0  // layer fully behind the ray: distance is moot, any works
+            : max(tMin, 0.0) + 0.5 * min(tMax - max(tMin, 0.0), 8000.0);
+        worldPos = float4(data.cameraPosition + rayDir * clamp(tRep, 200.0, 60000.0), 1.0);
+    } else {
+        worldPos = data.invViewProj * float4(ndc, depth, 1.0);
+        worldPos /= worldPos.w;
+    }
 
     // Reproject to previous frame
     float4 prevClip = data.prevViewProj * worldPos;
     float2 prevUV = prevClip.xy / prevClip.w * 0.5 + 0.5;
     prevUV.y = 1.0 - prevUV.y;
 
-    // Sample history
-    float4 history = historyCloud.sample(linearSampler, prevUV);
-
     // Validity check (prevClip.w > 0 rejects behind-camera reprojections —
     // parity with CloudTemporal.frag).
     bool validHistory = prevUV.x >= 0.0 && prevUV.x <= 1.0 &&
                         prevUV.y >= 0.0 && prevUV.y <= 1.0 && prevClip.w > 0.0;
 
+    float4 history = sampleHistoryCatmullRom(historyCloud, prevUV, data.screenSize);
+
     // Neighborhood clamping for anti-ghosting
     float4 minBound = current;
     float4 maxBound = current;
-
-    // Sample neighbors (simplified - full implementation would use 3x3)
     float2 texelSize = 1.0 / data.screenSize;
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
@@ -607,12 +670,16 @@ fragment float4 cloudTemporalResolve(
             maxBound = max(maxBound, neighbor);
         }
     }
-
-    // Clamp history to neighborhood
     history = clamp(history, minBound, maxBound);
 
-    // Blend
-    float blend = validHistory ? data.temporalBlend : 1.0;
+    // Motion-adaptive blend (twin of CloudTemporal.frag): 0.05 at rest for
+    // deep accumulation; fold in more current the faster the reprojection
+    // moves, so fast rotation shows crisp grain instead of the shuddering
+    // fight between a stale clamped history and the noisy current frame.
+    float texelsMoved = length((in.uv - prevUV) * data.screenSize);
+    float blend = validHistory
+        ? clamp(data.temporalBlend + texelsMoved * 0.08, data.temporalBlend, 0.65)
+        : 1.0;
     return mix(history, current, blend);
 }
 

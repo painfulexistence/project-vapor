@@ -161,16 +161,33 @@ float cloudHeightGradient(float heightFraction, float type) {
 // its average erosion — fading to zero would have made far clouds fatter.
 const float DETAIL_MEAN = 0.5;
 
-// Base shape lookup. The 128^3 volume tiles every 10 km of world space
-// (shapeNoiseScale 1 -> x0.0001), so from the ground the same blobs reappear
-// 4-10x before the horizon on a regular grid — the repetition the eye locks
-// onto. `warp` is a low-frequency displacement carried in the weather map's
-// BA channels (~20 km wavelength, +-1.5 km): adjacent shape tiles land on
-// opposite phases of it and get offsets ~3 km apart, so they stop matching.
+// Triangle-wave mirrored repeat: continuous, doubles the effective period and
+// yields 4 orientation variants per axis pair, which the eye does not match
+// up the way it matches translated copies.
+vec2 mirrorRepeat(vec2 u) { return abs(2.0 * fract(u * 0.5) - 1.0); }
+
+// Base shape lookup. The baked 128^3 volume tiles every 10 km of world space
+// (shapeNoiseScale 1 -> x0.0001). The pre-bake PROCEDURAL noise never tiled —
+// its lattice hash ran over unbounded integers — so the visible repetition is
+// a regression the bake introduced, and at low coverage it is maximally
+// obvious: the coverage remap keeps only the field's extreme peaks, about one
+// per tile, i.e. the same blob stamped on a 10 km grid to the horizon.
+// Three stacked measures kill it (validated in an offline density sim,
+// 10/30 km autocorrelation +0.88 -> ~0.00):
+//   1. `warp`: +-2.5 km displacement from the weather map's BA channels at a
+//      ~13.3 km wavelength — coprime with both the tile and its mirror, so no
+//      lag lines the pattern back up.
+//   2. Mirrored-repeat sampling (per axis) — translated copies become
+//      mirrored ones.
+//   3. An APERIODIC procedural break-up octave added onto the baked value
+//      (see sampleCloudDensity) — restores true non-repetition by shifting
+//      which peaks survive the coverage remap, region by region.
 float sampleCloudShape(vec3 worldPos, vec2 warp) {
     vec3 samplePos = worldPos + windOffset;
     samplePos.xz += warp;
-    return texture(shapeNoiseTex, samplePos * (shapeNoiseScale * 0.0001)).r;
+    vec3 uvw = samplePos * (shapeNoiseScale * 0.0001);
+    uvw.xz = mirrorRepeat(uvw.xz);
+    return texture(shapeNoiseTex, uvw).r;
 }
 
 // Curl-ish vector noise: three decorrelated gradient noises. Not a true
@@ -226,7 +243,7 @@ vec4 sampleWeather(vec3 worldPos) {
     // Half frequency (40 km tile): the 20 km tile repeated 3-5x to the
     // horizon and the eye locked onto the pattern.
     vec4 w = texture(weatherMapTex, weatherUV * 0.5);
-    return vec4(w.r * cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 1500.0);
+    return vec4(w.r * cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 2500.0);
 }
 
 float sampleCloudDensity(vec3 worldPos, bool useCheap) {
@@ -239,6 +256,13 @@ float sampleCloudDensity(vec3 worldPos, bool useCheap) {
 
     float heightGradient = cloudHeightGradient(heightFraction, type);
     float baseShape = sampleCloudShape(worldPos, weather.zw);
+    // Aperiodic break-up (de-tiling measure 3): a single unbounded-lattice
+    // gradient-noise octave (~6 km wavelength) added onto the baked value.
+    // The coverage remap slices the field near its maxima, so +-0.15 is
+    // enough to reshuffle which peaks survive — and their cut size — from
+    // region to region, with no repeat anywhere. Advects with the wind like
+    // the baked shape so the deck drifts as one field.
+    baseShape += gradientNoise3D((worldPos + windOffset) * (1.0 / 6000.0)) * 0.15;
     float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0));
 
     if (useCheap || baseCloud <= 0.0) return baseCloud * cloudDensity;
@@ -301,7 +325,12 @@ vec3 cloudLighting(vec3 worldPos, vec3 rayDir) {
     float sunPower = sunIntensity * sunLightScale;
     float dayFactor = smoothstep(-0.12, 0.08, sunDirection.y);  // 1 day, 0 night
 
-    vec3 lum = ambientColor * ambientIntensity * mix(0.3, 1.0, dayFactor);
+    // Sky ambient reaches the cloud top and is absorbed on the way down, so
+    // billows read dark-bottomed/bright-topped even where the sun term is
+    // fully self-shadowed. Without the gradient the in-cloud view (and any
+    // sun-occluded face) collapsed to one flat constant — a featureless blob.
+    float hf = saturate((worldPos.y - cloudLayerBottom) / cloudLayerThickness);
+    vec3 lum = ambientColor * ambientIntensity * (0.35 + 0.65 * hf) * mix(0.3, 1.0, dayFactor);
 
     if (dayFactor > 0.01) {
         float tr = lightMarch(worldPos, sunDirection);

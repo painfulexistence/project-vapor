@@ -89,6 +89,24 @@ vec3 hash33(vec3 p3) {
     return fract((p3.xxy + p3.yxx) * p3.zyx);
 }
 
+// Unbounded-lattice gradient noise — CloudRaymarch.frag twin, needed for the
+// aperiodic break-up octave in the density function below.
+float gradientNoise3D(vec3 p) {
+    vec3 pi = floor(p);
+    vec3 pf = fract(p);
+    vec3 w = pf * pf * pf * (pf * (pf * 6.0 - 15.0) + 10.0);
+    float n000 = dot(hash33(pi + vec3(0,0,0)) * 2.0 - 1.0, pf - vec3(0,0,0));
+    float n100 = dot(hash33(pi + vec3(1,0,0)) * 2.0 - 1.0, pf - vec3(1,0,0));
+    float n010 = dot(hash33(pi + vec3(0,1,0)) * 2.0 - 1.0, pf - vec3(0,1,0));
+    float n110 = dot(hash33(pi + vec3(1,1,0)) * 2.0 - 1.0, pf - vec3(1,1,0));
+    float n001 = dot(hash33(pi + vec3(0,0,1)) * 2.0 - 1.0, pf - vec3(0,0,1));
+    float n101 = dot(hash33(pi + vec3(1,0,1)) * 2.0 - 1.0, pf - vec3(1,0,1));
+    float n011 = dot(hash33(pi + vec3(0,1,1)) * 2.0 - 1.0, pf - vec3(0,1,1));
+    float n111 = dot(hash33(pi + vec3(1,1,1)) * 2.0 - 1.0, pf - vec3(1,1,1));
+    return mix(mix(mix(n000, n100, w.x), mix(n010, n110, w.x), w.y),
+               mix(mix(n001, n101, w.x), mix(n011, n111, w.x), w.y), w.z);
+}
+
 float valueNoise3D(vec3 p) {
     vec3 pi = floor(p);
     vec3 pf = fract(p);
@@ -115,18 +133,22 @@ float cloudHeightGradient(float heightFraction, float type) {
     return saturate(gradient);
 }
 
-// Shape lookup with the weather map's de-tiling warp — MUST match
+// Shape lookup with the de-tiling stack (mirror + warp) — MUST match
 // CloudRaymarch.frag exactly, or the shadows land where the clouds aren't.
+vec2 mirrorRepeat(vec2 u) { return abs(2.0 * fract(u * 0.5) - 1.0); }
+
 float sampleCloudShape(vec3 worldPos, vec2 warp) {
     vec3 samplePos = worldPos + windOffset;
     samplePos.xz += warp;
-    return texture(shapeNoiseTex, samplePos * (shapeNoiseScale * 0.0001)).r;
+    vec3 uvw = samplePos * (shapeNoiseScale * 0.0001);
+    uvw.xz = mirrorRepeat(uvw.xz);
+    return texture(shapeNoiseTex, uvw).r;
 }
 
 vec4 sampleWeather(vec3 worldPos) {
     vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
     vec4 w = texture(weatherMapTex, weatherUV * 0.5);  // 40 km tile (raymarch twin)
-    return vec4(w.r * cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 1500.0);
+    return vec4(w.r * cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 2500.0);
 }
 
 float sampleCloudDensityCheap(vec3 worldPos) {
@@ -136,6 +158,8 @@ float sampleCloudDensityCheap(vec3 worldPos) {
     float type = mix(weather.y, cloudType, 0.5);
     float heightGradient = cloudHeightGradient(heightFraction, type);
     float baseShape = sampleCloudShape(worldPos, weather.zw);
+    // Aperiodic break-up octave — raymarch twin (de-tiling measure 3).
+    baseShape += gradientNoise3D((worldPos + windOffset) * (1.0 / 6000.0)) * 0.15;
     float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - weather.x, 1.0, 0.0, 1.0));
     return baseCloud * cloudDensity;
 }

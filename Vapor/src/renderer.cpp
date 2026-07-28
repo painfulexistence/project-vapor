@@ -6075,16 +6075,16 @@ void Renderer::createCloudNoiseTextures() {
             float type = glm::clamp(
                 tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.53f) + glm::vec3(100.0f, 100.0f, 0.0f), 2, 0x55u)
                     * 0.5f + 0.5f, 0.0f, 1.0f);
-            // De-tiling warp: 2 cells per tile, i.e. a ~20 km wavelength. That
-            // is deliberately close to the 10 km shape period — adjacent shape
-            // tiles then land on opposite phases of the warp and get offsets
-            // differing by up to ~3 km, which is what actually breaks the
-            // repeat. (Period 1 degenerates to a single gradient per tile and
-            // barely de-tiles; much higher would shear the blobs rather than
-            // displace them.) Periodic, so the map still tiles exactly.
+            // De-tiling warp: 3 cells per tile — a ~13.3 km wavelength, chosen
+            // because it shares no common period with the 10 km shape tile OR
+            // its 20 km mirrored repeat (a 20 km wavelength warp satisfied
+            // warp(x+20km) == warp(x) exactly and did nothing at the lag that
+            // matters). Verified against the offline density sim: period 3 +
+            // mirroring drops the 10/30 km autocorrelation of the density
+            // field to ~0. Periodic, so the map still tiles exactly.
             glm::vec2 detile(
-                tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.19f), 2, 0x66u),
-                tileablePerlin(glm::vec3(uv.x * 2.0f, uv.y * 2.0f, 0.83f), 2, 0x77u));
+                tileablePerlin(glm::vec3(uv.x * 3.0f, uv.y * 3.0f, 0.19f), 3, 0x66u),
+                tileablePerlin(glm::vec3(uv.x * 3.0f, uv.y * 3.0f, 0.83f), 3, 0x77u));
             detile = glm::clamp(detile * 0.5f + 0.5f, 0.0f, 1.0f);
 
             data[i + 0] = uint8_t(coverage * 255.0f + 0.5f);
