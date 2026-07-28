@@ -217,7 +217,12 @@ BlueprintComponents& BlueprintComponents::instance() {
             def.initialState = def.getStateIndex(j.value("initial", def.stateNames.front()));
             if (j.contains("transitions") && j.at("transitions").is_array()) {
                 for (const auto& t : j.at("transitions")) {
-                    if (!t.is_object()) continue;
+                    if (!t.is_object()) {
+                    fmt::print(stderr,
+                               "parseSceneBlueprint: \"textures\" entries must be objects ({})\n",
+                               bp.name);
+                    continue;
+                }
                     def.eventTransitions.emplace_back(
                         def.getStateIndex(t.value("from", "")), def.getStateIndex(t.value("to", "")),
                         t.value("event", ""), t.value("minTime", 0.0f)
@@ -226,7 +231,12 @@ BlueprintComponents& BlueprintComponents::instance() {
             }
             if (j.contains("timed") && j.at("timed").is_array()) {
                 for (const auto& t : j.at("timed")) {
-                    if (!t.is_object()) continue;
+                    if (!t.is_object()) {
+                    fmt::print(stderr,
+                               "parseSceneBlueprint: \"textures\" entries must be objects ({})\n",
+                               bp.name);
+                    continue;
+                }
                     def.timedTransitions.emplace_back(
                         def.getStateIndex(t.value("from", "")), def.getStateIndex(t.value("to", "")),
                         t.value("duration", 0.0f)
@@ -315,10 +325,17 @@ uint32_t pu(const json& j, const char* key, uint32_t fallback) {
 }
 glm::vec3 pv3(const json& j, const char* key, glm::vec3 fallback) {
     const auto it = j.find(key);
-    if (it != j.end() && it->is_array() && it->size() >= 3)
-        return { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
+    if (it == j.end()) return fallback;
+    // Elements must be type-checked before get<float>(): parseSceneBlueprint
+    // parses with allow_exceptions=false and promises ok=false rather than a
+    // throw, but get<float>() on a non-number raises nlohmann::type_error.
+    if (it->is_array() && it->size() >= 3) {
+        const json& a = *it;
+        if (!a[0].is_number() || !a[1].is_number() || !a[2].is_number()) return fallback;
+        return { a[0].get<float>(), a[1].get<float>(), a[2].get<float>() };
+    }
     // A scalar is accepted as a grey triple — "rimTint": 0.86 reads naturally.
-    if (it != j.end() && it->is_number()) return glm::vec3(it->get<float>());
+    if (it->is_number()) return glm::vec3(it->get<float>());
     return fallback;
 }
 
@@ -483,7 +500,12 @@ SceneBlueprint parseSceneBlueprint(const std::string& jsonText, const std::strin
             fmt::print(stderr, "parseSceneBlueprint: \"textures\" must be an array ({})\n", bp.name);
         } else {
             for (const auto& t : arr) {
-                if (!t.is_object()) continue;
+                if (!t.is_object()) {
+                    fmt::print(stderr,
+                               "parseSceneBlueprint: \"textures\" entries must be objects ({})\n",
+                               bp.name);
+                    continue;
+                }
                 const std::string name = t.value("name", "");
                 const std::string gen = t.value("generator", "");
                 if (name.empty() || gen.empty()) {
@@ -500,9 +522,19 @@ SceneBlueprint parseSceneBlueprint(const std::string& jsonText, const std::strin
                 const json params = t.contains("params") ? t.at("params") : json::object();
                 auto img = TextureGenerators::instance().generate(gen, params);
                 if (!img) {
-                    fmt::print(stderr,
-                               "parseSceneBlueprint: unknown texture generator '{}' for '{}' ({})\n",
-                               gen, name, bp.name);
+                    // Distinguish "no such generator" from "the generator ran
+                    // and produced nothing" — generate() already reported the
+                    // latter, and conflating them sends the author hunting for
+                    // a registration bug that isn't there.
+                    if (!TextureGenerators::instance().has(gen)) {
+                        std::string known;
+                        for (const auto& n : TextureGenerators::instance().names())
+                            known += (known.empty() ? "" : ", ") + n;
+                        fmt::print(stderr,
+                                   "parseSceneBlueprint: unknown texture generator '{}' for '{}' "
+                                   "({}); registered: {}\n",
+                                   gen, name, bp.name, known);
+                    }
                     continue;
                 }
                 // The uri is the pixel hash, so an entry that bakes to an

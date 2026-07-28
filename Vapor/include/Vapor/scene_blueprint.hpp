@@ -245,13 +245,24 @@ namespace detail {
 // real photograph is therefore a one-token edit, with no code change.
 //
 // Generators must be PURE functions of their params (Vapor::proctex uses only
-// seeded hashes, never a global RNG). The parse layer hashes the BAKED PIXELS
-// into the Image's synthetic uri, which is exactly what the renderer's texture
-// cache dedupes on: entries that bake the same image share one GPU upload
-// however their params were spelled, and any change that moves a texel yields
-// a new key on its own — no version bump required. `version` is provenance,
-// carried in the uri so a generated texture can be traced back to the
-// generator revision that produced it.
+// seeded hashes, never a global RNG). The parse layer bakes each entry and
+// hashes the RESULTING PIXELS into a synthetic uri of the form
+// "proc://<generator>#v<version>-<pixel hash>". The renderer's texture cache
+// keys on that whole string, so two entries collapse to one upload when they
+// share a generator, a version AND a bake — which is what makes the params'
+// spelling irrelevant ("4" vs "4.0", a default left implicit vs written out).
+// Entries whose bakes are identical also share a single Image object, so the
+// payload is not duplicated through the scene image list or the cook.
+//
+// Two consequences worth knowing:
+//  * A scene cook (.vscene) stores the baked pixels and does not re-run
+//    generators on a cache hit, so computeSourceHash folds in the registry's
+//    (name, version) pairs. Bump a generator's `version` when you change what
+//    it produces, or already-cooked scenes keep serving the old image.
+//  * The registry is a plain global with no synchronisation, and
+//    parseSceneBlueprint runs on worker threads for async scene loads. Register
+//    every generator during startup, before the first load — concurrent add()
+//    against an in-flight parse is a data race.
 class TextureGenerators {
 public:
     using Generator = std::function<proctex::TextureData(const nlohmann::json& params)>;

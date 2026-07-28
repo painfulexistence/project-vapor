@@ -555,8 +555,7 @@ TEST_CASE("blueprint cook round-trips primitives (format v3)", "[scene_blueprint
 }
 
 // ── Procedural textures ("textures" block) ──────────────────────────────────
-
-#include "Vapor/proctex.hpp"
+// (Vapor::proctex arrives via scene_blueprint.hpp.)
 
 TEST_CASE("parse bakes declared textures and resolves @refs in material slots",
           "[scene_blueprint][textures]") {
@@ -622,10 +621,13 @@ TEST_CASE("identical texture params share a uri so the texture cache dedupes",
     REQUIRE(mat->normalMap);
     REQUIRE(mat->roughnessMap);
 
-    // The renderer keys its texture cache on uri: same params must collide,
-    // different params must not.
-    CHECK(mat->albedoMap->uri == mat->normalMap->uri);
-    CHECK(mat->albedoMap->byteArray == mat->normalMap->byteArray);
+    // Identical params collapse to one Image, so assert the sharing itself —
+    // comparing the two slots' uris would compare an object with itself.
+    CHECK(mat->albedoMap == mat->normalMap);
+    CHECK(bp.images.size() == 2);
+    // Different params stay distinct in both identity and content, and the
+    // renderer keys its texture cache on the uri.
+    CHECK(mat->albedoMap != mat->roughnessMap);
     CHECK(mat->albedoMap->uri != mat->roughnessMap->uri);
     CHECK(mat->albedoMap->byteArray != mat->roughnessMap->byteArray);
 }
@@ -750,4 +752,44 @@ TEST_CASE("texture params survive hostile values from a data file",
     REQUIRE(lo);
     REQUIRE(hi);
     CHECK(hi->byteArray != lo->byteArray);
+}
+
+TEST_CASE("malformed texture entries are reported and never throw",
+          "[scene_blueprint][textures]") {
+    // parseSceneBlueprint parses with allow_exceptions=false and promises
+    // ok == false rather than a throw, so every reachable param shape has to
+    // be type-checked before it is read.
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            "not an object",
+            { "name": "noGenerator" },
+            { "generator": "noisyAlbedo" },
+            { "name": "dup", "generator": "noisyAlbedo", "params": { "seed": 1, "size": 16 } },
+            { "name": "dup", "generator": "noisyAlbedo", "params": { "seed": 2, "size": 16 } },
+            { "name": "badVec", "generator": "tileAlbedo",
+              "params": { "base": ["a", "b", "c"], "size": 16 } },
+            { "name": "badArity", "generator": "tileAlbedo", "params": { "base": [1, 2], "size": 16 } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    // "dup" bakes once (the second is rejected by name), plus the two entries
+    // whose bad "base" falls back to the default colour — which are identical
+    // to each other and therefore share one Image.
+    CHECK(bp.images.size() == 2);
+}
+
+TEST_CASE("integer texture params reject non-integral spellings",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+    // "seed": 4.0 is a JSON float, so it is NOT an integer field and falls back
+    // to the default — the same rule detail::readField applies to component
+    // integers. Pinned here because the resulting image differs silently.
+    auto asInt = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4 }, { "size", 16 } });
+    auto asFloat = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4.0 }, { "size", 16 } });
+    auto asDefault = gens.generate("noisyAlbedo", nlohmann::json{ { "size", 16 } });
+    REQUIRE(asInt);
+    REQUIRE(asFloat);
+    REQUIRE(asDefault);
+    CHECK(asFloat->byteArray == asDefault->byteArray);
+    CHECK(asInt->byteArray != asDefault->byteArray);
 }

@@ -9,11 +9,17 @@
 // block can share one vocabulary.
 //
 // Conventions:
-//  * Every generator returns a square, TILEABLE RGBA8 image; the noise lattice
-//    wraps, so adjacent copies meet seamlessly.
-//  * Tile generators author ONE tile face into the UV cell [0,1]^2 — the panel
-//    geometry repeats it (see Vapor::procgen::buildTilePanel). Don't paint
-//    grout lines: those are real geometry.
+//  * The noise lattice wraps, so SURFACE generators (noisyAlbedo/noisyNormal,
+//    brushedMetal*) tile seamlessly when repeated across a wall or a rail.
+//  * TILE FACE generators (tileAlbedo/tileNormal/tileRoughness) are a
+//    different thing: they author ONE tile face into the UV cell [0,1]^2 and
+//    their borders are real tile edges, not seams to hide — tileNormal's
+//    pillow deliberately reverses slope there. The panel geometry repeats the
+//    face and puts grout between copies (Vapor::procgen::buildTilePanel), so
+//    don't paint grout lines into the texture.
+//  * Tiling on an axis requires the sampled span to be an exact multiple of
+//    that axis's lattice period; fbm takes periodX/periodY for the anisotropic
+//    case (brushed metal: a long span in y, a short one in x).
 //  * Normal maps are tangent-space, +Z out (OpenGL / MikkTSpace convention).
 //  * Roughness is written to RGB as grayscale; the shader reads one channel.
 //  * Generators are pure functions of their arguments and a uint32 seed — no
@@ -45,29 +51,41 @@ inline float hash2(int x, int y, uint32_t seed) {
     return float((h ^ (h >> 16)) & 0xFFFFFFu) / float(0xFFFFFFu);
 }
 
-// `period` is the lattice wrap length in cells and MUST be >= 1: the wrap below
-// is a modulo by it, so a caller passing 0 (easy to do from a data file) would
-// divide by zero and take the process down with SIGFPE.
-inline float fbm(float x, float y, int period, int octaves, uint32_t seed) {
-    period = period < 1 ? 1 : period;
+// Anisotropic fBm: the lattice wraps every `periodX` cells across and
+// `periodY` down. The result tiles only if the sampled span is an exact
+// multiple of the period on that axis — e.g. sampling x over [0, 2) needs
+// periodX == 2, not 48, or u=0 and u=1 land on unrelated lattice cells and
+// leave a seam. Both periods MUST be >= 1: the wrap is a modulo by them, so a
+// caller passing 0 (easy from a data file) would divide by zero and take the
+// process down with SIGFPE.
+inline float fbm(float x, float y, int periodX, int periodY, int octaves, uint32_t seed) {
+    periodX = periodX < 1 ? 1 : periodX;
+    periodY = periodY < 1 ? 1 : periodY;
     float sum = 0.0f, amp = 0.5f, freq = 1.0f;
     for (int o = 0; o < octaves; ++o) {
-        const int p = period * int(freq);
+        const int px = periodX * int(freq);
+        const int py = periodY * int(freq);
         const float fx = x * freq, fy = y * freq;
         int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
         float tx = fx - float(x0), ty = fy - float(y0);
         tx = tx * tx * (3.0f - 2.0f * tx);
         ty = ty * ty * (3.0f - 2.0f * ty);
-        auto wrap = [p](int v) { return ((v % p) + p) % p; };
-        const float c00 = hash2(wrap(x0), wrap(y0), seed + uint32_t(o) * 101u);
-        const float c10 = hash2(wrap(x0 + 1), wrap(y0), seed + uint32_t(o) * 101u);
-        const float c01 = hash2(wrap(x0), wrap(y0 + 1), seed + uint32_t(o) * 101u);
-        const float c11 = hash2(wrap(x0 + 1), wrap(y0 + 1), seed + uint32_t(o) * 101u);
+        auto wrapX = [px](int v) { return ((v % px) + px) % px; };
+        auto wrapY = [py](int v) { return ((v % py) + py) % py; };
+        const float c00 = hash2(wrapX(x0), wrapY(y0), seed + uint32_t(o) * 101u);
+        const float c10 = hash2(wrapX(x0 + 1), wrapY(y0), seed + uint32_t(o) * 101u);
+        const float c01 = hash2(wrapX(x0), wrapY(y0 + 1), seed + uint32_t(o) * 101u);
+        const float c11 = hash2(wrapX(x0 + 1), wrapY(y0 + 1), seed + uint32_t(o) * 101u);
         sum += ((c00 * (1 - tx) + c10 * tx) * (1 - ty) + (c01 * (1 - tx) + c11 * tx) * ty) * amp;
         amp *= 0.5f;
         freq *= 2.0f;
     }
     return sum;
+}
+
+// Square lattice (the common case).
+inline float fbm(float x, float y, int period, int octaves, uint32_t seed) {
+    return fbm(x, y, period, period, octaves, seed);
 }
 
 // Largest edge a generator will bake. These are CPU-side bake-time images that
@@ -205,7 +223,8 @@ inline TextureData brushedMetalAlbedo(glm::vec3 base, uint32_t seed, uint32_t si
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
             const float u = float(x) / size, v = float(y) / size;
-            const float streak = fbm(u * 2.0f, v * 48.0f, 48, 2, seed) - 0.5f;
+            // periodX must match the x span (2), or the wrap leaves a seam.
+        const float streak = fbm(u * 2.0f, v * 48.0f, 2, 48, 2, seed) - 0.5f;
             putPixel(img, x, y, base * (1.0f + 0.08f * streak));
         }
     }
@@ -218,7 +237,7 @@ inline TextureData brushedMetalRoughness(float base, uint32_t seed, uint32_t siz
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
             const float u = float(x) / size, v = float(y) / size;
-            const float streak = fbm(u * 2.0f, v * 48.0f, 48, 2, seed + 5u) - 0.5f;
+            const float streak = fbm(u * 2.0f, v * 48.0f, 2, 48, 2, seed + 5u) - 0.5f;
             putPixel(img, x, y, glm::vec3(glm::clamp(base + 0.10f * streak, 0.05f, 1.0f)));
         }
     }
