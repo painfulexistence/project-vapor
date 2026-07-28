@@ -329,22 +329,7 @@ struct WindRenderData {
 struct GrassCellDraw {
     Uint32 slot = 0;
     Uint32 count = 0;
-    // World AABB of the cell's blades (base positions padded by tip height +
-    // sway), computed when the cell build lands — feeds the GrassCull kernel.
-    glm::vec3 aabbMin = glm::vec3(0.0f);
-    glm::vec3 aabbMax = glm::vec3(0.0f);
 };
-
-// GPU mirror for the GrassCull kernel (std430, 32 bytes): a resident cell's
-// world AABB and its slot range in the shared blade instance pool. The kernel
-// writes one non-indexed indirect command per cell (instanceCount 0 = culled).
-struct GrassCullInfoGpu {
-    glm::vec3 aabbMin = glm::vec3(0.0f);
-    Uint32 firstInstance = 0;
-    glm::vec3 aabbMax = glm::vec3(0.0f);
-    Uint32 count = 0;
-};
-static_assert(sizeof(GrassCullInfoGpu) == 32, "must match GrassCull.comp / 3d_grass.metal");
 
 // Per-frame grass look/wind settings, resolved from StreamingTerrainComponent
 // by TerrainSystem. Defaults match the original demo's tuned values.
