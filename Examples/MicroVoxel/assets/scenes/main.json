@@ -8,7 +8,7 @@
       "components": {
         "voxelVolume": { "gridDim": [256, 256, 256], "voxelSize": 0.05, "seed": 1337, "brickCapacity": 65536 },
         "rigidbody": { "motionType": "static" },
-        "voxelCollider": {}
+        "voxelCollider": { "chunkVoxels": 16 }
       }
     },
 

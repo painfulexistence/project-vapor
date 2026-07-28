@@ -556,9 +556,13 @@ auto main(int argc, char* args[]) -> int {
         entt::entity activeCam = getActiveCamera(registry);
         if (activeCam != entt::null && input.isHeld(Vapor::InputAction::Interact)) {
             const auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCam);
+            // A 25 cm bite. The terrain collider is voxel-exact, so the hole
+            // in physics is exactly this size — small enough that holding the
+            // key digs progressively rather than in big jumps, and small enough
+            // that one carve re-meshes only a couple of collider chunks.
             Vapor::VoxelVolumeSystem::dig(registry, cam.position,
                                           cam.rotation * glm::vec3(0.0f, 0.0f, -1.0f),
-                                          /*maxDist=*/60.0f, /*radius=*/0.45f);
+                                          /*maxDist=*/60.0f, /*radius=*/0.25f);
         }
 
         // ---- Engine + ECS systems ------------------------------------------
