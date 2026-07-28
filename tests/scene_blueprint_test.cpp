@@ -526,3 +526,153 @@ TEST_CASE("blueprint cook round-trips primitives (format v3)", "[scene_blueprint
     CHECK(back.entities[0].primitive.height == Catch::Approx(1.8f));
     CHECK(back.entities[0].primitive.material == 0);
 }
+
+// ── Procedural textures ("textures" block) ──────────────────────────────────
+
+#include "Vapor/proctex.hpp"
+
+TEST_CASE("parse bakes declared textures and resolves @refs in material slots",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "deckAlbedo", "generator": "tileAlbedo",
+              "params": { "base": [0.78, 0.76, 0.73], "rimTint": 0.86, "seed": 11 } },
+            { "name": "deckNormal", "generator": "tileNormal",
+              "params": { "pillow": 0.35, "waviness": 0.1, "seed": 12, "size": 64 } }
+        ],
+        "materials": [
+            { "name": "deckTile",
+              "albedoMap": "@deckAlbedo",
+              "normalMap": "@deckNormal",
+              "roughnessMap": "textures/deck_r.png" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.materials.size() == 1);
+
+    // Two generated images plus one uri stub for the file-path slot.
+    REQUIRE(bp.images.size() == 3);
+
+    const auto& mat = bp.materials[0];
+    REQUIRE(mat->albedoMap);
+    REQUIRE(mat->normalMap);
+    REQUIRE(mat->roughnessMap);
+
+    // Generated slots arrive with pixels already baked, so the disk-loading
+    // pass in loadSceneBlueprint skips them and never opens their uri.
+    CHECK(mat->albedoMap->byteArray.size() == 256u * 256u * 4u);
+    CHECK(mat->albedoMap->width == 256);
+    CHECK(mat->albedoMap->channelCount == 4);
+    CHECK(mat->normalMap->byteArray.size() == 64u * 64u * 4u);  // "size" honoured
+    CHECK(mat->normalMap->width == 64);
+
+    // The file-path slot stays an empty stub keyed by its path.
+    CHECK(mat->roughnessMap->uri == "textures/deck_r.png");
+    CHECK(mat->roughnessMap->byteArray.empty());
+
+    // Generated uris are synthetic and content-addressed, never file paths.
+    CHECK(mat->albedoMap->uri.rfind("proc://tileAlbedo#v", 0) == 0);
+    CHECK(mat->normalMap->uri.rfind("proc://tileNormal#v", 0) == 0);
+    CHECK(mat->albedoMap->uri != mat->normalMap->uri);
+}
+
+TEST_CASE("identical texture params share a uri so the texture cache dedupes",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "a", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "b", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "c", "generator": "noisyAlbedo", "params": { "seed": 5, "size": 32 } }
+        ],
+        "materials": [
+            { "name": "m", "albedoMap": "@a", "normalMap": "@b", "roughnessMap": "@c" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.materials.size() == 1);
+    const auto& mat = bp.materials[0];
+    REQUIRE(mat->albedoMap);
+    REQUIRE(mat->normalMap);
+    REQUIRE(mat->roughnessMap);
+
+    // The renderer keys its texture cache on uri: same params must collide,
+    // different params must not.
+    CHECK(mat->albedoMap->uri == mat->normalMap->uri);
+    CHECK(mat->albedoMap->byteArray == mat->normalMap->byteArray);
+    CHECK(mat->albedoMap->uri != mat->roughnessMap->uri);
+    CHECK(mat->albedoMap->byteArray != mat->roughnessMap->byteArray);
+}
+
+TEST_CASE("an unknown generator or @ref leaves the slot empty instead of black",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "good", "generator": "noisyAlbedo", "params": { "seed": 1, "size": 32 } },
+            { "name": "bad", "generator": "noSuchGenerator" },
+            { "generator": "noisyAlbedo" }
+        ],
+        "materials": [
+            { "name": "m", "albedoMap": "@good", "normalMap": "@bad", "emissiveMap": "@neverDeclared" }
+        ]
+    })");
+    REQUIRE(bp.ok);           // malformed entries are reported, not fatal
+    REQUIRE(bp.images.size() == 1);   // only the good one baked
+    REQUIRE(bp.materials.size() == 1);
+
+    const auto& mat = bp.materials[0];
+    REQUIRE(mat->albedoMap);
+    CHECK(mat->albedoMap->byteArray.size() == 32u * 32u * 4u);
+    // Unresolvable references clear the slot so the renderer falls back to its
+    // defaults — shipping an empty Image would upload a black texture.
+    CHECK(mat->normalMap == nullptr);
+    CHECK(mat->emissiveMap == nullptr);
+}
+
+TEST_CASE("texture generators are registered with versions and bake real pixels",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+    for (const char* name : { "tileAlbedo", "tileNormal", "tileRoughness", "noisyAlbedo",
+                              "noisyNormal", "brushedMetalAlbedo", "brushedMetalRoughness" }) {
+        INFO("generator " << name);
+        CHECK(gens.has(name));
+        CHECK(gens.version(name) >= 1);
+    }
+    CHECK_FALSE(gens.has("noSuchGenerator"));
+    CHECK(gens.version("noSuchGenerator") == -1);
+    CHECK(gens.generate("noSuchGenerator", nlohmann::json::object()) == nullptr);
+
+    // The registry must hand back exactly what proctex produces — no rescaling
+    // or channel juggling in between.
+    auto img = gens.generate("brushedMetalRoughness",
+                             nlohmann::json{ { "base", 0.28 }, { "seed", 103 }, { "size", 32 } });
+    REQUIRE(img);
+    const auto direct = proctex::brushedMetalRoughness(0.28f, 103u, 32u);
+    CHECK(img->byteArray == direct.pixels);
+}
+
+TEST_CASE("texture params tolerate wrong types and accept a scalar as a grey triple",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+
+    // A scalar rimTint is the same authoring shorthand as [v, v, v].
+    auto scalar = gens.generate("tileAlbedo",
+                                nlohmann::json{ { "rimTint", 0.5 }, { "seed", 6 }, { "size", 32 } });
+    auto triple = gens.generate("tileAlbedo",
+                                nlohmann::json{ { "rimTint", { 0.5, 0.5, 0.5 } }, { "seed", 6 },
+                                                { "size", 32 } });
+    REQUIRE(scalar);
+    REQUIRE(triple);
+    CHECK(scalar->byteArray == triple->byteArray);
+
+    // Hand-authored JSON gets types wrong; a bad field falls back to the
+    // generator's default rather than throwing mid-parse.
+    auto bad = gens.generate("noisyAlbedo",
+                             nlohmann::json{ { "period", "eight" }, { "seed", 7 }, { "size", 32 } });
+    auto def = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 7 }, { "size", 32 } });
+    REQUIRE(bad);
+    REQUIRE(def);
+    CHECK(bad->byteArray == def->byteArray);
+
+    // Missing "params" entirely is legal — every generator has defaults.
+    CHECK(gens.generate("tileNormal", nlohmann::json()) != nullptr);
+}

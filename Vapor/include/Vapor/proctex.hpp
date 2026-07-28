@@ -1,14 +1,24 @@
 #pragma once
 // ============================================================================
-// Poolrooms — procedural placeholder textures (engine-agnostic: glm + std).
+// Vapor::proctex — procedural texture toolkit (engine-agnostic: glm + std).
 //
-// Every material slot renders with these until real textures are dropped into
-// Res/textures/poolrooms/ (see assets/textures/poolrooms/README.md and the
-// loader in main.cpp). All images are RGBA8 and tileable.
+// Bake-time RGBA8 image generators: tileable value-noise fBm, glazed ceramic
+// tile faces (albedo / normal / roughness), noise-driven flat surfaces
+// (plaster, grout, stone) and brushed metal. Grown out of Examples/Poolrooms
+// and promoted engine-side so scenes, tools and the scene-JSON `textures`
+// block can share one vocabulary.
 //
-// Tile albedos are authored per-tile: the UV cell [0,1]² is one tile face, so
-// a texture describes a single tile (glaze gradient, edge tint, speckle) and
-// the panel geometry repeats it. Normal/roughness maps follow the same idea.
+// Conventions:
+//  * Every generator returns a square, TILEABLE RGBA8 image; the noise lattice
+//    wraps, so adjacent copies meet seamlessly.
+//  * Tile generators author ONE tile face into the UV cell [0,1]^2 — the panel
+//    geometry repeats it (see Vapor::procgen::buildTilePanel). Don't paint
+//    grout lines: those are real geometry.
+//  * Normal maps are tangent-space, +Z out (OpenGL / MikkTSpace convention).
+//  * Roughness is written to RGB as grayscale; the shader reads one channel.
+//  * Generators are pure functions of their arguments and a uint32 seed — no
+//    global RNG — so a given (generator, params) pair is reproducible, which
+//    is what lets the scene-JSON layer hash them into a cache key.
 // ============================================================================
 
 #include <glm/glm.hpp>
@@ -16,11 +26,16 @@
 #include <cstdint>
 #include <vector>
 
-namespace pooltex {
+namespace Vapor {
+namespace proctex {
 
-struct ImageRGBA8 {
+// Square RGBA8 image, row-major, 4 bytes per texel.
+struct TextureData {
     uint32_t size = 0;
     std::vector<uint8_t> pixels;  // size*size*4
+
+    bool empty() const { return size == 0 || pixels.empty(); }
+    size_t texelCount() const { return size_t(size) * size; }
 };
 
 // Tileable value noise (wrapped lattice + smooth interpolation + fBm).
@@ -51,14 +66,14 @@ inline float fbm(float x, float y, int period, int octaves, uint32_t seed) {
     return sum;
 }
 
-inline ImageRGBA8 makeImage(uint32_t size) {
-    ImageRGBA8 img;
+inline TextureData makeImage(uint32_t size) {
+    TextureData img;
     img.size = size;
     img.pixels.assign(size_t(size) * size * 4, 255);
     return img;
 }
 
-inline void putPixel(ImageRGBA8& img, uint32_t x, uint32_t y, glm::vec3 c) {
+inline void putPixel(TextureData& img, uint32_t x, uint32_t y, glm::vec3 c) {
     const size_t i = (size_t(y) * img.size + x) * 4;
     img.pixels[i + 0] = uint8_t(glm::clamp(c.r, 0.0f, 1.0f) * 255.0f);
     img.pixels[i + 1] = uint8_t(glm::clamp(c.g, 0.0f, 1.0f) * 255.0f);
@@ -73,8 +88,8 @@ inline float edgeDistance(float u, float v) {
 
 // ── Tile face albedo ── glazed ceramic: soft center gradient, darker rim,
 // speckle, faint diagonal glaze streaks.
-inline ImageRGBA8 tileAlbedo(glm::vec3 base, glm::vec3 rimTint, uint32_t seed, uint32_t size = 256) {
-    ImageRGBA8 img = makeImage(size);
+inline TextureData tileAlbedo(glm::vec3 base, glm::vec3 rimTint, uint32_t seed, uint32_t size = 256) {
+    TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
             const float u = (x + 0.5f) / size, v = (y + 0.5f) / size;
@@ -96,8 +111,8 @@ inline ImageRGBA8 tileAlbedo(glm::vec3 base, glm::vec3 rimTint, uint32_t seed, u
 
 // ── Tile face normal map ── mostly flat glaze with a soft pillow toward the
 // rim and low-amplitude waviness. Tangent-space, +Z out.
-inline ImageRGBA8 tileNormal(float pillow, float waviness, uint32_t seed, uint32_t size = 256) {
-    ImageRGBA8 img = makeImage(size);
+inline TextureData tileNormal(float pillow, float waviness, uint32_t seed, uint32_t size = 256) {
+    TextureData img = makeImage(size);
     auto height = [&](float u, float v) {
         // Pillow: raised center falling toward the edges (last 10%).
         const float e = edgeDistance(u, v);
@@ -119,8 +134,8 @@ inline ImageRGBA8 tileNormal(float pillow, float waviness, uint32_t seed, uint32
 
 // ── Tile roughness ── grayscale in RGB (the shader reads one channel):
 // smooth glaze center, rougher rim, smudges.
-inline ImageRGBA8 tileRoughness(float centerR, float rimR, uint32_t seed, uint32_t size = 256) {
-    ImageRGBA8 img = makeImage(size);
+inline TextureData tileRoughness(float centerR, float rimR, uint32_t seed, uint32_t size = 256) {
+    TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
             const float u = (x + 0.5f) / size, v = (y + 0.5f) / size;
@@ -135,9 +150,9 @@ inline ImageRGBA8 tileRoughness(float centerR, float rimR, uint32_t seed, uint32
 }
 
 // ── Flat noise-driven surfaces (plaster, grout, stone) ──
-inline ImageRGBA8 noisyAlbedo(glm::vec3 base, float variation, int period, uint32_t seed,
+inline TextureData noisyAlbedo(glm::vec3 base, float variation, int period, uint32_t seed,
                               uint32_t size = 256) {
-    ImageRGBA8 img = makeImage(size);
+    TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
             const float u = float(x) / size, v = float(y) / size;
@@ -148,8 +163,8 @@ inline ImageRGBA8 noisyAlbedo(glm::vec3 base, float variation, int period, uint3
     return img;
 }
 
-inline ImageRGBA8 noisyNormal(float strength, int period, uint32_t seed, uint32_t size = 256) {
-    ImageRGBA8 img = makeImage(size);
+inline TextureData noisyNormal(float strength, int period, uint32_t seed, uint32_t size = 256) {
+    TextureData img = makeImage(size);
     auto h = [&](float u, float v) { return fbm(u * period, v * period, period, 4, seed); };
     const float d = 1.0f / size;
     for (uint32_t y = 0; y < size; ++y) {
@@ -165,8 +180,8 @@ inline ImageRGBA8 noisyNormal(float strength, int period, uint32_t seed, uint32_
 }
 
 // ── Brushed metal ── horizontal streaks in albedo + roughness.
-inline ImageRGBA8 brushedMetalAlbedo(glm::vec3 base, uint32_t seed, uint32_t size = 256) {
-    ImageRGBA8 img = makeImage(size);
+inline TextureData brushedMetalAlbedo(glm::vec3 base, uint32_t seed, uint32_t size = 256) {
+    TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
             const float u = float(x) / size, v = float(y) / size;
@@ -177,8 +192,8 @@ inline ImageRGBA8 brushedMetalAlbedo(glm::vec3 base, uint32_t seed, uint32_t siz
     return img;
 }
 
-inline ImageRGBA8 brushedMetalRoughness(float base, uint32_t seed, uint32_t size = 256) {
-    ImageRGBA8 img = makeImage(size);
+inline TextureData brushedMetalRoughness(float base, uint32_t seed, uint32_t size = 256) {
+    TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
             const float u = float(x) / size, v = float(y) / size;
@@ -189,4 +204,5 @@ inline ImageRGBA8 brushedMetalRoughness(float base, uint32_t seed, uint32_t size
     return img;
 }
 
-}  // namespace pooltex
+}  // namespace proctex
+}  // namespace Vapor

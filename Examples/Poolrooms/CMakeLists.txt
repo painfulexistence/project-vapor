@@ -1,8 +1,9 @@
 include(AssetPipeline)
 
 # Poolrooms: procedural liminal pool-hall walking demo and the showcase for
-# the RHI water pass (see main.cpp). Geometry/texture generation lives in the
-# header-only poolgen/pooltex helpers next to main.cpp.
+# the RHI water pass (see main.cpp). Scene assembly lives in the header-only
+# poolgen helper next to main.cpp; the mesh and texture primitives it builds
+# on are the engine's Vapor::procgen / Vapor::proctex toolkits.
 add_executable(poolrooms main.cpp)
 target_link_libraries(poolrooms PRIVATE Vapor)
 

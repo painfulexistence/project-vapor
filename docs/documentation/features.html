@@ -157,6 +157,19 @@
 
     <hr>
 
+    <h2>Procedural Textures (Vapor::proctex)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Tileable Generators</td><td>Header-only RGBA8 bakers on a wrapped value-noise lattice: glazed ceramic tile faces (albedo / normal / roughness), noise-driven plaster/grout/stone, brushed metal. Tile generators author one tile face into the UV cell <code>[0,1]²</code>, matching <code>procgen::buildTilePanel</code>.</td></tr>
+        <tr><td>Scene-JSON <code>textures</code> block</td><td>Declare textures by generator name and params; reference them from any material map slot as <code>"@name"</code>. A slot takes either a generated reference or an ordinary file path, so swapping a placeholder for a real photograph is a one-token edit with no code change.</td></tr>
+        <tr><td>Generator Registry</td><td><code>TextureGenerators</code> — the texture-side sibling of <code>BlueprintComponents</code>. The engine registers its built-ins; an app adds its own with <code>add(name, version, fn)</code> before loading a scene that names them.</td></tr>
+        <tr><td>Content Addressing</td><td>Generators are pure functions of their params (seeded hashes, no global RNG), so the bake is hashed into a synthetic <code>proc://</code> uri — which is exactly the key the renderer's texture cache dedupes on. Pixels are baked at parse time, so the disk loader skips them entirely.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
     <h2>Action System (ActionManager)</h2>
     <table>
       <thead><tr><th>Feature</th><th>Description</th></tr></thead>

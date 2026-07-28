@@ -292,7 +292,120 @@ static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) 
 // One declared material. Texture fields hold the asset path; parse creates a
 // uri-only Image stub per unique path (pure — no I/O), and loadSceneBlueprint
 // fills in the pixels afterwards.
-static void parseMaterial(const json& j, SceneBlueprint& out) {
+// ── Procedural texture generators ───────────────────────────────────────────
+
+namespace {
+
+// Small typed accessors: scene JSON is hand-authored, so a wrong-typed or
+// missing field falls back to the generator's own default rather than throwing.
+float pf(const json& j, const char* key, float fallback) {
+    const auto it = j.find(key);
+    return (it != j.end() && it->is_number()) ? it->get<float>() : fallback;
+}
+int pi(const json& j, const char* key, int fallback) {
+    const auto it = j.find(key);
+    return (it != j.end() && it->is_number_integer()) ? it->get<int>() : fallback;
+}
+uint32_t pu(const json& j, const char* key, uint32_t fallback) {
+    const int v = pi(j, key, int(fallback));
+    return v < 0 ? fallback : uint32_t(v);
+}
+glm::vec3 pv3(const json& j, const char* key, glm::vec3 fallback) {
+    const auto it = j.find(key);
+    if (it != j.end() && it->is_array() && it->size() >= 3)
+        return { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
+    // A scalar is accepted as a grey triple — "rimTint": 0.86 reads naturally.
+    if (it != j.end() && it->is_number()) return glm::vec3(it->get<float>());
+    return fallback;
+}
+
+// FNV-1a over the BAKED PIXELS. Hashing the output rather than the params is
+// what makes the uri a sound texture-cache key: two entries whose params differ
+// only in spelling (`4` vs `4.0`, a field left at its default vs written out) bake
+// identical images and must share one GPU upload, while any params change that
+// actually alters a texel produces a different key.
+std::string contentDigest(const std::vector<Uint8>& pixels) {
+    uint64_t h = 1469598103934665603ull;
+    for (Uint8 c : pixels) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return fmt::format("{:016x}", h);
+}
+
+}  // namespace
+
+TextureGenerators& TextureGenerators::instance() {
+    static TextureGenerators registry = [] {
+        TextureGenerators r;
+        using namespace Vapor::proctex;
+        // The version is provenance only (it rides in the uri); the cache key
+        // is the pixel hash, so a changed generator invalidates on its own.
+        r.add("tileAlbedo", 1, [](const json& p) {
+            return tileAlbedo(pv3(p, "base", glm::vec3(0.8f)), pv3(p, "rimTint", glm::vec3(0.85f)),
+                              pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("tileNormal", 1, [](const json& p) {
+            return tileNormal(pf(p, "pillow", 0.3f), pf(p, "waviness", 0.1f),
+                              pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("tileRoughness", 1, [](const json& p) {
+            return tileRoughness(pf(p, "centerRoughness", 0.1f), pf(p, "rimRoughness", 0.3f),
+                                 pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("noisyAlbedo", 1, [](const json& p) {
+            return noisyAlbedo(pv3(p, "base", glm::vec3(0.7f)), pf(p, "variation", 0.1f),
+                               pi(p, "period", 8), pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("noisyNormal", 1, [](const json& p) {
+            return noisyNormal(pf(p, "strength", 0.3f), pi(p, "period", 8),
+                               pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("brushedMetalAlbedo", 1, [](const json& p) {
+            return brushedMetalAlbedo(pv3(p, "base", glm::vec3(0.75f)), pu(p, "seed", 0u),
+                                      pu(p, "size", 256u));
+        });
+        r.add("brushedMetalRoughness", 1, [](const json& p) {
+            return brushedMetalRoughness(pf(p, "base", 0.3f), pu(p, "seed", 0u),
+                                         pu(p, "size", 256u));
+        });
+        return r;
+    }();
+    return registry;
+}
+
+std::shared_ptr<Image> TextureGenerators::generate(const std::string& name,
+                                                   const nlohmann::json& params) const {
+    const auto it = m_generators.find(name);
+    if (it == m_generators.end()) return nullptr;
+
+    // Both arms must be lvalues: a `json::object()` temporary here would make
+    // the conditional a prvalue, deep-copying `params` on every call (and
+    // leaving the binding's validity resting on lifetime extension).
+    static const json kNoParams = json::object();
+    const json& p = params.is_object() ? params : kNoParams;
+    proctex::TextureData baked = it->second.fn(p);
+    if (baked.empty()) {
+        fmt::print(stderr, "TextureGenerators: '{}' produced an empty image\n", name);
+        return nullptr;
+    }
+
+    auto img = std::make_shared<Image>();
+    img->width = baked.size;
+    img->height = baked.size;
+    img->channelCount = 4;
+    img->byteArray = std::move(baked.pixels);
+    // Synthetic, content-addressed key. Never opened as a file: byteArray is
+    // populated, and the stub-resolution loop skips images that already hold
+    // pixels. The renderer's texture cache dedupes on exactly this string; the
+    // generator name and version ride along as human-readable provenance.
+    img->uri = fmt::format("proc://{}#v{}-{}", name, it->second.version,
+                           contentDigest(img->byteArray));
+    return img;
+}
+
+static void parseMaterial(const json& j, SceneBlueprint& out,
+                          const std::unordered_map<std::string, std::shared_ptr<Image>>& generated) {
     auto material = std::make_shared<Material>();
     material->name = j.value("name", "");
     if (j.contains("baseColorFactor")) {
@@ -319,6 +432,17 @@ static void parseMaterial(const json& j, SceneBlueprint& out) {
     const auto stubFor = [&](const char* key) -> std::shared_ptr<Image> {
         const std::string path = j.value(key, "");
         if (path.empty()) return nullptr;
+        // "@name" refers to a generated texture from the scene's "textures"
+        // block; anything else is a file path resolved from disk later.
+        if (path.front() == '@') {
+            const std::string ref = path.substr(1);
+            const auto found = generated.find(ref);
+            if (found != generated.end()) return found->second;
+            fmt::print(stderr,
+                       "parseSceneBlueprint: material '{}' references unknown texture '@{}'\n",
+                       material->name, ref);
+            return nullptr;
+        }
         for (const auto& img : out.images)// share one stub per unique path
             if (img && img->uri == path && img->byteArray.empty()) return img;
         auto stub = std::make_shared<Image>(Image{ .uri = path });
@@ -342,9 +466,46 @@ SceneBlueprint parseSceneBlueprint(const std::string& jsonText, const std::strin
         return bp;
     }
     bp.name = root.value("name", nameHint);
+    // Procedural textures first — materials reference them by "@name", and a
+    // generated image is baked here (pixels and all) so the disk-loading pass
+    // in loadSceneBlueprint skips right over it.
+    std::unordered_map<std::string, std::shared_ptr<Image>> generatedTextures;
+    if (root.contains("textures")) {
+        const auto& arr = root.at("textures");
+        if (!arr.is_array()) {
+            fmt::print(stderr, "parseSceneBlueprint: \"textures\" must be an array ({})\n", bp.name);
+        } else {
+            for (const auto& t : arr) {
+                if (!t.is_object()) continue;
+                const std::string name = t.value("name", "");
+                const std::string gen = t.value("generator", "");
+                if (name.empty() || gen.empty()) {
+                    fmt::print(stderr,
+                               "parseSceneBlueprint: texture entry needs both \"name\" and "
+                               "\"generator\" ({})\n", bp.name);
+                    continue;
+                }
+                if (generatedTextures.count(name)) {
+                    fmt::print(stderr, "parseSceneBlueprint: duplicate texture name '{}' ({})\n",
+                               name, bp.name);
+                    continue;
+                }
+                const json params = t.contains("params") ? t.at("params") : json::object();
+                auto img = TextureGenerators::instance().generate(gen, params);
+                if (!img) {
+                    fmt::print(stderr,
+                               "parseSceneBlueprint: unknown texture generator '{}' for '{}' ({})\n",
+                               gen, name, bp.name);
+                    continue;
+                }
+                generatedTextures.emplace(name, img);
+                bp.images.push_back(std::move(img));
+            }
+        }
+    }
     if (root.contains("materials")) {
         for (const auto& m : root.at("materials"))
-            parseMaterial(m, bp);
+            parseMaterial(m, bp, generatedTextures);
     }
     if (root.contains("entities")) {
         for (const auto& e : root.at("entities"))

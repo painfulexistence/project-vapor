@@ -1,6 +1,7 @@
 #pragma once
 #include "graphics.hpp"// Image, Material, Mesh
 #include "hidden.hpp"
+#include "proctex.hpp"// procedural texture generators (scene JSON "textures")
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <functional>
@@ -220,6 +221,76 @@ namespace detail {
     }
 #endif
 }// namespace detail
+
+// ── Procedural textures ─────────────────────────────────────────────────────
+// Registry mapping a scene-JSON generator name ("tileAlbedo", ...) to a
+// function that bakes an RGBA8 image from a JSON parameter object — the
+// texture-side sibling of BlueprintComponents. The engine registers the
+// Vapor::proctex generators (see scene_blueprint.cpp); an app registers its own
+// the same way, before loading any scene that names them.
+//
+// Scene JSON:
+//   "textures": [
+//     { "name": "deckAlbedo", "generator": "tileAlbedo",
+//       "params": { "base": [0.78, 0.76, 0.73], "rimTint": [0.86,0.86,0.86],
+//                   "seed": 11, "size": 256 } }
+//   ],
+//   "materials": [
+//     { "name": "deckTile", "albedoMap": "@deckAlbedo" }   // '@' = generated
+//   ]
+//
+// A material map slot takes either a file path (loaded from disk as before) or
+// "@name" referring to an entry above. Swapping a generated placeholder for a
+// real photograph is therefore a one-token edit, with no code change.
+//
+// Generators must be PURE functions of their params (Vapor::proctex uses only
+// seeded hashes, never a global RNG). The parse layer hashes the BAKED PIXELS
+// into the Image's synthetic uri, which is exactly what the renderer's texture
+// cache dedupes on: entries that bake the same image share one GPU upload
+// however their params were spelled, and any change that moves a texel yields
+// a new key on its own — no version bump required. `version` is provenance,
+// carried in the uri so a generated texture can be traced back to the
+// generator revision that produced it.
+class TextureGenerators {
+public:
+    using Generator = std::function<proctex::TextureData(const nlohmann::json& params)>;
+
+    // Engine-default generators are registered on first access.
+    static TextureGenerators& instance();
+
+    void add(const std::string& name, int version, Generator fn) {
+        m_generators[name] = Entry{ version, std::move(fn) };
+    }
+
+    bool has(const std::string& name) const { return m_generators.count(name) != 0; }
+
+    // Bakes the image, or returns nullptr for an unknown generator (the caller
+    // reports it — an unresolvable texture must not silently become black).
+    // The returned Image carries a synthetic, content-addressed uri; nothing
+    // ever opens it as a file because byteArray is already populated (see the
+    // stub-resolution loop in loadSceneBlueprint).
+    std::shared_ptr<Image> generate(const std::string& name, const nlohmann::json& params) const;
+
+    // -1 when unknown.
+    int version(const std::string& name) const {
+        const auto it = m_generators.find(name);
+        return it == m_generators.end() ? -1 : it->second.version;
+    }
+
+    std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        out.reserve(m_generators.size());
+        for (const auto& entry : m_generators) out.push_back(entry.first);
+        return out;
+    }
+
+private:
+    struct Entry {
+        int version = 1;
+        Generator fn;
+    };
+    std::unordered_map<std::string, Entry> m_generators;
+};
 
 class BlueprintComponents {
 public:

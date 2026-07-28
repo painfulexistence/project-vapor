@@ -61,12 +61,18 @@ engine debug panel under **Water Settings**.
 
 ## Using your own tile textures
 
-The scene renders with procedural placeholder textures. To swap in real
+The scene renders with placeholder textures baked at startup by the engine's
+`Vapor::proctex` toolkit (`Vapor/include/Vapor/proctex.hpp`). To swap in real
 ones, drop files into `Res/textures/poolrooms/` next to the built binary
 (source: `Examples/Poolrooms/assets/textures/poolrooms/`) — see the README
 in that folder for slot names and authoring notes. Geometry UVs map one tile
 face per texture, so a single photographed tile works as-is; grout lines and
 tile bevels are real geometry and stay crisp at any angle.
+
+The same generators are reachable from scene JSON, where a `textures` block
+declares them by name and any material map slot takes either `"@name"` or an
+ordinary file path — see the `textures` schema documented on
+`TextureGenerators` in `Vapor/include/Vapor/scene_blueprint.hpp`.
 
 ## How the water passes fit the frame
 
