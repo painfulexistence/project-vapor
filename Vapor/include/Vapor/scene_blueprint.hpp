@@ -2,6 +2,7 @@
 #include "graphics.hpp"// Image, Material, Mesh
 #include "hidden.hpp"
 #include "proctex.hpp"// procedural texture generators (scene JSON "textures")
+#include <algorithm>
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <functional>
@@ -277,10 +278,13 @@ public:
         return it == m_generators.end() ? -1 : it->second.version;
     }
 
+    // Sorted, so callers get a stable order out of the unordered map — the
+    // scene-cook hash folds this list in and would otherwise churn per run.
     std::vector<std::string> names() const {
         std::vector<std::string> out;
         out.reserve(m_generators.size());
         for (const auto& entry : m_generators) out.push_back(entry.first);
+        std::sort(out.begin(), out.end());
         return out;
     }
 

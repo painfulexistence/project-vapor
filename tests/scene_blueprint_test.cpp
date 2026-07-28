@@ -676,3 +676,51 @@ TEST_CASE("texture params tolerate wrong types and accept a scalar as a grey tri
     // Missing "params" entirely is legal — every generator has defaults.
     CHECK(gens.generate("tileNormal", nlohmann::json()) != nullptr);
 }
+
+TEST_CASE("textures that bake the same image share one Image object",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "a", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "b", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "c", "generator": "noisyAlbedo", "params": { "seed": 5, "size": 32 } }
+        ],
+        "materials": [
+            { "name": "m", "albedoMap": "@a", "normalMap": "@b", "roughnessMap": "@c" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    // The uri is the pixel hash, so "a" and "b" are the same texture under two
+    // names — carrying two copies would duplicate the payload through the
+    // scene image list and the cook.
+    CHECK(bp.images.size() == 2);
+    REQUIRE(bp.materials.size() == 1);
+    CHECK(bp.materials[0]->albedoMap == bp.materials[0]->normalMap);
+    CHECK(bp.materials[0]->albedoMap != bp.materials[0]->roughnessMap);
+}
+
+TEST_CASE("texture params survive hostile values from a data file",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+
+    // period 0 reaches a modulo inside the noise lattice; it must be clamped,
+    // not divide by zero and take the process down.
+    CHECK(gens.generate("noisyAlbedo",
+                        nlohmann::json{ { "period", 0 }, { "seed", 1 }, { "size", 16 } }) != nullptr);
+    CHECK(gens.generate("noisyNormal",
+                        nlohmann::json{ { "period", -8 }, { "seed", 1 }, { "size", 16 } }) != nullptr);
+
+    // An oversized edge would otherwise ask for a multi-gigabyte allocation.
+    auto huge = gens.generate("tileAlbedo", nlohmann::json{ { "size", 100000 }, { "seed", 1 } });
+    REQUIRE(huge);
+    CHECK(huge->width == proctex::kMaxTextureSize);
+    CHECK(huge->byteArray.size() == size_t(huge->width) * huge->height * 4);
+
+    // Seeds are uint32: the upper half of the range must be honoured rather
+    // than silently falling back to the generator default.
+    auto lo = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 7 }, { "size", 16 } });
+    auto hi = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 3000000000u }, { "size", 16 } });
+    REQUIRE(lo);
+    REQUIRE(hi);
+    CHECK(hi->byteArray != lo->byteArray);
+}

@@ -45,7 +45,11 @@ inline float hash2(int x, int y, uint32_t seed) {
     return float((h ^ (h >> 16)) & 0xFFFFFFu) / float(0xFFFFFFu);
 }
 
+// `period` is the lattice wrap length in cells and MUST be >= 1: the wrap below
+// is a modulo by it, so a caller passing 0 (easy to do from a data file) would
+// divide by zero and take the process down with SIGFPE.
 inline float fbm(float x, float y, int period, int octaves, uint32_t seed) {
+    period = period < 1 ? 1 : period;
     float sum = 0.0f, amp = 0.5f, freq = 1.0f;
     for (int o = 0; o < octaves; ++o) {
         const int p = period * int(freq);
@@ -66,10 +70,20 @@ inline float fbm(float x, float y, int period, int octaves, uint32_t seed) {
     return sum;
 }
 
+// Largest edge a generator will bake. These are CPU-side bake-time images that
+// end up in a scene cook, so the ceiling exists to keep a mistyped `size` in a
+// data file from requesting a multi-gigabyte allocation: 8192 is already 256 MB
+// of RGBA and far beyond any tile face.
+inline constexpr uint32_t kMaxTextureSize = 8192;
+
+inline constexpr uint32_t clampTextureSize(uint32_t size) {
+    return size > kMaxTextureSize ? kMaxTextureSize : (size < 1u ? 1u : size);
+}
+
 inline TextureData makeImage(uint32_t size) {
     TextureData img;
-    img.size = size;
-    img.pixels.assign(size_t(size) * size * 4, 255);
+    img.size = clampTextureSize(size);
+    img.pixels.assign(size_t(img.size) * img.size * 4, 255);
     return img;
 }
 
@@ -89,6 +103,7 @@ inline float edgeDistance(float u, float v) {
 // ── Tile face albedo ── glazed ceramic: soft center gradient, darker rim,
 // speckle, faint diagonal glaze streaks.
 inline TextureData tileAlbedo(glm::vec3 base, glm::vec3 rimTint, uint32_t seed, uint32_t size = 256) {
+    size = clampTextureSize(size);  // loops below index img.size
     TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
@@ -112,6 +127,7 @@ inline TextureData tileAlbedo(glm::vec3 base, glm::vec3 rimTint, uint32_t seed, 
 // ── Tile face normal map ── mostly flat glaze with a soft pillow toward the
 // rim and low-amplitude waviness. Tangent-space, +Z out.
 inline TextureData tileNormal(float pillow, float waviness, uint32_t seed, uint32_t size = 256) {
+    size = clampTextureSize(size);  // loops below index img.size
     TextureData img = makeImage(size);
     auto height = [&](float u, float v) {
         // Pillow: raised center falling toward the edges (last 10%).
@@ -135,6 +151,7 @@ inline TextureData tileNormal(float pillow, float waviness, uint32_t seed, uint3
 // ── Tile roughness ── grayscale in RGB (the shader reads one channel):
 // smooth glaze center, rougher rim, smudges.
 inline TextureData tileRoughness(float centerR, float rimR, uint32_t seed, uint32_t size = 256) {
+    size = clampTextureSize(size);  // loops below index img.size
     TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
@@ -152,6 +169,7 @@ inline TextureData tileRoughness(float centerR, float rimR, uint32_t seed, uint3
 // ── Flat noise-driven surfaces (plaster, grout, stone) ──
 inline TextureData noisyAlbedo(glm::vec3 base, float variation, int period, uint32_t seed,
                               uint32_t size = 256) {
+    size = clampTextureSize(size);  // loops below index img.size
     TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
@@ -164,6 +182,7 @@ inline TextureData noisyAlbedo(glm::vec3 base, float variation, int period, uint
 }
 
 inline TextureData noisyNormal(float strength, int period, uint32_t seed, uint32_t size = 256) {
+    size = clampTextureSize(size);  // loops below index img.size
     TextureData img = makeImage(size);
     auto h = [&](float u, float v) { return fbm(u * period, v * period, period, 4, seed); };
     const float d = 1.0f / size;
@@ -181,6 +200,7 @@ inline TextureData noisyNormal(float strength, int period, uint32_t seed, uint32
 
 // ── Brushed metal ── horizontal streaks in albedo + roughness.
 inline TextureData brushedMetalAlbedo(glm::vec3 base, uint32_t seed, uint32_t size = 256) {
+    size = clampTextureSize(size);  // loops below index img.size
     TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {
@@ -193,6 +213,7 @@ inline TextureData brushedMetalAlbedo(glm::vec3 base, uint32_t seed, uint32_t si
 }
 
 inline TextureData brushedMetalRoughness(float base, uint32_t seed, uint32_t size = 256) {
+    size = clampTextureSize(size);  // loops below index img.size
     TextureData img = makeImage(size);
     for (uint32_t y = 0; y < size; ++y) {
         for (uint32_t x = 0; x < size; ++x) {

@@ -289,9 +289,6 @@ static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) 
     }
 }
 
-// One declared material. Texture fields hold the asset path; parse creates a
-// uri-only Image stub per unique path (pure — no I/O), and loadSceneBlueprint
-// fills in the pixels afterwards.
 // ── Procedural texture generators ───────────────────────────────────────────
 
 namespace {
@@ -307,8 +304,14 @@ int pi(const json& j, const char* key, int fallback) {
     return (it != j.end() && it->is_number_integer()) ? it->get<int>() : fallback;
 }
 uint32_t pu(const json& j, const char* key, uint32_t fallback) {
-    const int v = pi(j, key, int(fallback));
-    return v < 0 ? fallback : uint32_t(v);
+    // Read the full unsigned range: seeds are naturally uint32 and routing them
+    // through int would silently drop everything at or above 2^31 back onto the
+    // fallback. Negatives and out-of-range values keep the fallback.
+    const auto it = j.find(key);
+    if (it == j.end() || !it->is_number_integer()) return fallback;
+    const int64_t v = it->get<int64_t>();
+    if (v < 0 || v > int64_t(UINT32_MAX)) return fallback;
+    return uint32_t(v);
 }
 glm::vec3 pv3(const json& j, const char* key, glm::vec3 fallback) {
     const auto it = j.find(key);
@@ -404,6 +407,10 @@ std::shared_ptr<Image> TextureGenerators::generate(const std::string& name,
     return img;
 }
 
+// One declared material. A texture field holds either "@name" (a texture from
+// the scene's "textures" block, already baked) or an asset path, for which
+// parse creates a uri-only Image stub per unique path (pure — no I/O) that
+// loadSceneBlueprint fills in afterwards.
 static void parseMaterial(const json& j, SceneBlueprint& out,
                           const std::unordered_map<std::string, std::shared_ptr<Image>>& generated) {
     auto material = std::make_shared<Material>();
@@ -498,8 +505,19 @@ SceneBlueprint parseSceneBlueprint(const std::string& jsonText, const std::strin
                                gen, name, bp.name);
                     continue;
                 }
-                generatedTextures.emplace(name, img);
-                bp.images.push_back(std::move(img));
+                // The uri is the pixel hash, so an entry that bakes to an
+                // image we already hold is the same texture under another
+                // name: share the object rather than duplicating its payload
+                // through the scene list and the cook.
+                for (const auto& existing : bp.images) {
+                    if (existing && existing->uri == img->uri) {
+                        img = existing;
+                        break;
+                    }
+                }
+                if (std::find(bp.images.begin(), bp.images.end(), img) == bp.images.end())
+                    bp.images.push_back(img);
+                generatedTextures.emplace(name, std::move(img));
             }
         }
     }
@@ -563,6 +581,16 @@ namespace {
     uint64_t computeSourceHash(const std::string& jsonText, const std::vector<std::string>& sources) {
         uint64_t h = fnv1a64(jsonText.data(), jsonText.size(), 14695981039346656037ull);
         h = fnv1a64(&kCookVersion, sizeof(kCookVersion), h);
+        // Generated textures are baked into the cook as pixels and never
+        // re-run on a cache hit, so the registry has to participate in the
+        // key: without this, editing a generator (or bumping its version)
+        // would leave every already-cooked scene serving the old image. The
+        // params themselves need no special handling — they live in jsonText.
+        for (const auto& name : TextureGenerators::instance().names()) {
+            h = fnv1a64(name.data(), name.size(), h);
+            const int v = TextureGenerators::instance().version(name);
+            h = fnv1a64(&v, sizeof(v), h);
+        }
         for (const auto& src : sources) {
             h = fnv1a64(src.data(), src.size(), h);
             auto resolved = FileSystem::instance().resolvePath(src);
