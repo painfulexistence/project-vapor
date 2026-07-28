@@ -983,6 +983,74 @@ TEST_CASE("procMesh colliders become child entities the physics layer can realiz
     }
 }
 
+TEST_CASE("a generator can emit entities alongside its geometry", "[scene_blueprint][procmesh]") {
+    // The channel a composite generator needs: a room knows where its lamps
+    // go, and saying so should not require the engine to know what a lamp is.
+    // Components ride as JSON through the ordinary applier registry, so this
+    // registers a generator exactly the way an app would.
+    MeshGenerators::instance().add("testFixture", 1, [](const nlohmann::json& p) {
+        GeneratedContent out;
+        const auto z = p.find("z");
+        const float lampZ = (z != p.end() && z->is_number()) ? z->get<float>() : 0.0f;
+        out.children.push_back({ "FixtureLamp",
+                                 glm::vec3(0.0f, 2.5f, lampZ),
+                                 glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                                 glm::vec3(1.0f),
+                                 R"({"pointLight":{"color":[1,0.5,0.2],"intensity":4.5,"radius":3}})" });
+        // A child with no components is still an entity — a spawn marker the
+        // app looks up by name.
+        out.children.push_back({ "FixtureSpawn", glm::vec3(1.0f, 0.5f, -2.0f),
+                                 glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f), "" });
+        return out;
+    });
+
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Room",
+              "position": [10, 0, 0],
+              "procMesh": { "generator": "testFixture", "params": { "z": 3.0 } } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene;
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+
+    entt::entity room = entt::null, lamp = entt::null, spawn = entt::null;
+    for (auto e : registry.view<NameComponent>()) {
+        const std::string& n = registry.get<NameComponent>(e).name;
+        if (n == "Room") room = e;
+        if (n == "FixtureLamp") lamp = e;
+        if (n == "FixtureSpawn") spawn = e;
+    }
+    REQUIRE((room != entt::null));
+    REQUIRE((lamp != entt::null));
+    REQUIRE((spawn != entt::null));
+
+    // Parented to the generating entity, positioned in ITS local space — the
+    // room's own position must not be baked in twice.
+    const auto& lampTransform = registry.get<TransformComponent>(lamp);
+    CHECK((lampTransform.parent == room));
+    CHECK(lampTransform.position == glm::vec3(0.0f, 2.5f, 3.0f));
+
+    // The component blob went through the ordinary applier registry.
+    REQUIRE(registry.all_of<PointLightComponent>(lamp));
+    const auto& light = registry.get<PointLightComponent>(lamp);
+    CHECK(light.intensity == Approx(4.5f));
+    CHECK(light.radius == Approx(3.0f));
+    CHECK(light.color == glm::vec3(1.0f, 0.5f, 0.2f));
+
+    // A componentless child is still a placed, named, reported entity.
+    CHECK_FALSE(registry.all_of<PointLightComponent>(spawn));
+    CHECK(registry.get<TransformComponent>(spawn).position == glm::vec3(1.0f, 0.5f, -2.0f));
+    for (entt::entity e : { lamp, spawn }) {
+        const bool reported = std::find(created.begin(), created.end(), e) != created.end();
+        CHECK(reported);
+    }
+}
+
 TEST_CASE("a procMesh generator that emits no colliders creates no child entities",
           "[scene_blueprint][procmesh]") {
     SceneBlueprint bp = parseSceneBlueprint(R"({

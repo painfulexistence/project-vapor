@@ -333,11 +333,28 @@ private:
 // material, plus the colliders that geometry implies. Emitting both from one
 // pass is the point — a generator knows where its walls are, so the physics
 // shape never has to be re-derived (or drift) from the render mesh.
+// An entity a generator wants placed alongside its geometry — a lamp, a
+// trigger volume, a spawn marker, the water surface of a pool. `components` is
+// the same JSON an entity's "components" block carries, so a generator can
+// attach anything the applier registry knows without the engine learning what
+// the generator is building.
+//
+// The transform is in the generating entity's local space; instantiate parents
+// each child to it, so the whole assembly moves as one.
+struct GeneratedChild {
+    std::string name;
+    glm::vec3 position{ 0.0f };
+    glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f };
+    glm::vec3 scale{ 1.0f };
+    std::string components;  // JSON object, e.g. R"({"pointLight":{"intensity":4}})"
+};
+
 struct GeneratedContent {
     // Insertion-ordered would be nicer, but a sorted map keeps the emitted
     // mesh order stable across runs, which keeps draw order deterministic.
     std::map<std::string, procgen::MeshData> buckets;
     std::vector<procgen::CollisionBox> colliders;
+    std::vector<GeneratedChild> children;
 
     procgen::MeshData& bucket(const std::string& name) { return buckets[name]; }
     size_t triangleCount() const {

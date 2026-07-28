@@ -1044,6 +1044,14 @@ entt::entity instantiate(
     // is always available by the time a child is created.
     std::vector<entt::entity> created(blueprint.entities.size());
     std::vector<glm::quat> worldRot(blueprint.entities.size());
+    // Entities a mesh generator asked for, held back so their components go
+    // through the same deferred pass as the blueprint's own — a generated lamp
+    // must be able to name-reference an authored entity and vice versa.
+    struct DeferredChild {
+        entt::entity entity;
+        std::string components;
+    };
+    std::vector<DeferredChild> generatedChildren;
     for (size_t i = 0; i < blueprint.entities.size(); ++i) {
         const EntityBlueprint& e = blueprint.entities[i];
         const entt::entity ent = registry.create();
@@ -1175,6 +1183,31 @@ entt::entity instantiate(
                     // scene down by outEntities would otherwise leak these.
                     if (outEntities) outEntities->push_back(colliderEnt);
                 }
+
+                // Entities the generator wants placed with its geometry — a
+                // lamp, a trigger, the water surface of a pool. Their component
+                // blobs go through the ordinary applier registry in the
+                // deferred pass below, so a generator can attach anything the
+                // registry knows without the engine learning what it is
+                // building, and so name references resolve either way.
+                for (size_t chi = 0; chi < content.children.size(); ++chi) {
+                    GeneratedChild& child = content.children[chi];
+                    const entt::entity childEnt = registry.create();
+                    registry.emplace<NameComponent>(
+                        childEnt,
+                        NameComponent{ child.name.empty()
+                                           ? fmt::format("{}_child_{}", e.procMesh.generator, chi)
+                                           : child.name });
+                    auto& childTransform = registry.emplace<TransformComponent>(childEnt);
+                    childTransform.position = child.position;
+                    childTransform.rotation = child.rotation;
+                    childTransform.scale = child.scale;
+                    childTransform.parent = ent;
+                    childTransform.isDirty = true;
+                    if (outEntities) outEntities->push_back(childEnt);
+                    if (!child.components.empty())
+                        generatedChildren.push_back({ childEnt, std::move(child.components) });
+                }
             }
         }
 
@@ -1230,21 +1263,34 @@ entt::entity instantiate(
     // through the scope regardless of declaration order.
     {
         std::unordered_map<std::string, entt::entity> nameScope;
-        nameScope.reserve(blueprint.entities.size());
+        nameScope.reserve(blueprint.entities.size() + generatedChildren.size());
         for (size_t i = 0; i < blueprint.entities.size(); ++i)
             if (!blueprint.entities[i].name.empty()) nameScope.emplace(blueprint.entities[i].name, created[i]);
+        // Generated children are in scope too, so an authored entity can point
+        // at a lamp its generator produced. emplace() keeps the authored name
+        // when both claim one — the scene the user wrote wins.
+        for (const DeferredChild& child : generatedChildren)
+            if (const auto* childName = registry.try_get<NameComponent>(child.entity))
+                if (!childName->name.empty()) nameScope.emplace(childName->name, child.entity);
         const detail::EntityNameScopeGuard scopeGuard(&nameScope);
 
-        for (size_t i = 0; i < blueprint.entities.size(); ++i) {
-            const EntityBlueprint& e = blueprint.entities[i];
-            if (e.componentsJson.empty()) continue;
-            const json components = json::parse(e.componentsJson, /*cb=*/nullptr, /*allow_exceptions=*/false);
-            if (!components.is_object()) continue;
+        auto applyComponents = [&](entt::entity target, const std::string& text,
+                                   const std::string& who) {
+            if (text.empty()) return;
+            const json components = json::parse(text, /*cb=*/nullptr, /*allow_exceptions=*/false);
+            if (!components.is_object()) return;
             for (const auto& [key, value] : components.items()) {
-                if (!BlueprintComponents::instance().apply(key, registry, created[i], value))
+                if (!BlueprintComponents::instance().apply(key, registry, target, value))
                     fmt::print(stderr, "instantiate: no applier registered for component '{}' (entity '{}')\n",
-                               key, e.name);
+                               key, who);
             }
+        };
+
+        for (size_t i = 0; i < blueprint.entities.size(); ++i)
+            applyComponents(created[i], blueprint.entities[i].componentsJson, blueprint.entities[i].name);
+        for (const DeferredChild& child : generatedChildren) {
+            const auto* childName = registry.try_get<NameComponent>(child.entity);
+            applyComponents(child.entity, child.components, childName ? childName->name : std::string{});
         }
     }
 
