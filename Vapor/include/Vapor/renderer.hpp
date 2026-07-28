@@ -1426,7 +1426,7 @@ private:
     // resolved handle changes (cache below) — rewriting every frame would race
     // in-flight replays of the shared table.
     BufferHandle bindlessSystemTable;
-    TextureHandle m_bindlessSysCache[12];  // 10 system textures + RT reflection/refraction
+    TextureHandle m_bindlessSysCache[14];  // 10 system textures + RT refl/refr + terrain detail arrays
     // Note: the single Metal ICB is shared across frames in flight — Metal's
     // automatic hazard tracking serializes the next frame's cull (write)
     // against the previous frame's executeICB (read). Correct, at the cost of

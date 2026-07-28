@@ -44,6 +44,14 @@ struct SystemTexs {
     // take direct texture args, so these join the system table like the rest.
     texture2d<float, access::sample>     texReflection  [[id(10)]];
     texture2d<float, access::sample>     texRefraction  [[id(11)]];
+    // Terrain detail-layer arrays (grass/rock/dirt/snow albedo + tangent-space
+    // normal) for the shaderModel == 1 branch — the ICB path's stand-in for the
+    // bound path's direct texture(18)/texture(19) args. The renderer writes the
+    // staged arrays (or the default white array) every frame like the slots
+    // above, so the bindless terrain shades the full splat instead of falling
+    // back to the palette LUT.
+    texture2d_array<float, access::sample> terrainDetailAlbedo [[id(12)]];
+    texture2d_array<float, access::sample> terrainDetailNormal [[id(13)]];
 };
 
 struct RasterizerData {
@@ -105,95 +113,10 @@ vertex RasterizerData vertexMain(
     return vert;
 }
 
-// ── Terrain surface (shaderModel == 1) — MSL twin of RHIMain.frag's branch ──
-// Faithful port of Atmospheric's terrain.frag 4-layer splat: weights recomputed
-// per fragment from height/slope + world-space FBm breakup (defaultSplat rules,
-// no splat texture), detail layers tiled in world space. Layer order/frequency
-// (repeats per metre): 0 grass 0.25, 1 rock 0.046875, 2 dirt 0.125,
-// 3 snow 0.078125.
-constant float4 kTerrainLayerFreq = float4(0.25, 0.046875, 0.125, 0.078125);
-constant uint kTerrainSplatSeed = 7u;
-
-inline uint trgHash2(int x, int y, uint seed) {
-    uint h = uint(x) * 374761393u + uint(y) * 668265263u + seed * 2654435761u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    return h ^ (h >> 16);
-}
-inline float trgHash01(int x, int y, uint seed) { return float(trgHash2(x, y, seed) >> 8) * (1.0 / 16777216.0); }
-inline float trgSmooth(float t) { return t * t * (3.0 - 2.0 * t); }
-
-static float trgWorldFBm(float2 p, float wavelength, int octaves, uint seed) {
-    float sum = 0.0, amp = 0.5, freq = 1.0 / wavelength;
-    for (int k = 0; k < octaves; ++k) {
-        float u = p.x * freq, v = p.y * freq;
-        int xi = int(floor(u)), yi = int(floor(v));
-        float fx = trgSmooth(u - float(xi)), fy = trgSmooth(v - float(yi));
-        uint sd = seed + uint(k) * 131u;
-        float a = trgHash01(xi, yi, sd),     b = trgHash01(xi + 1, yi, sd);
-        float c = trgHash01(xi, yi + 1, sd), d = trgHash01(xi + 1, yi + 1, sd);
-        sum += amp * mix(mix(a, b, fx), mix(c, d, fx), fy);
-        amp *= 0.5; freq *= 2.0;
-    }
-    return sum;
-}
-
-static float4 trgSplatWeights(float height01, float slope, float2 worldXZ) {
-    float b1 = trgWorldFBm(worldXZ, 180.0, 3, kTerrainSplatSeed);
-    float b2 = trgWorldFBm(worldXZ, 45.0, 3, kTerrainSplatSeed + 101u);
-    float rock = smoothstep(0.55, 1.05, slope + 0.25 * (b1 - 0.5));
-    float snowline = 0.62 + 0.08 * (b2 - 0.5);
-    float snow = smoothstep(snowline, snowline + 0.16, height01) * (1.0 - 0.85 * rock);
-    float dirt = 0.55 * smoothstep(0.5, 0.75, b2) * smoothstep(0.18, 0.45, slope + 0.2 * (b1 - 0.5));
-    dirt += 0.6 * smoothstep(0.10, 0.04, height01);
-    dirt = clamp(dirt, 0.0, 1.0) * (1.0 - rock) * (1.0 - snow);
-    float grass = max(1.0 - rock - snow - dirt, 0.0);
-    float4 w = float4(grass, rock, dirt, snow);
-    return w / max(w.x + w.y + w.z + w.w, 1e-4);
-}
-
-// Terrain height field — the shared MSL FastNoiseLite twin (see the include):
-// trhHeightAt evaluates the SAME OpenSimplex2 FBm field TerrainWorld::heightAt
-// builds the streamed mesh on, letting the fragment stage reconstruct a
-// per-pixel surface normal that restores the octaves the coarse LOD mesh
-// vertices smooth away. Params arrive packed in the terrain material's unused
-// Disney lobe fields.
-#include "Res/shaders/3d_terrain_noise.metal"
-
-static void trgShadeTerrain(float3 worldPos, float noiseFreq, int octaves, uint seed, float heightScale,
-                            float height01,
-                            texture2d_array<float, access::sample> detailAlbedo,
-                            texture2d_array<float, access::sample> detailNormal,
-                            thread float3& outAlbedo, thread float3& outN) {
-    constexpr sampler ts(address::repeat, filter::linear, mip_filter::linear);
-    // Central-difference normal at the pixel's world-space footprint (>= 1 m),
-    // so distant terrain band-limits the noise (no shimmer) while near terrain
-    // resolves the finest octave. Sign matches buildTileGeometry's vertex normal.
-    float fp = max(max(abs(dfdx(worldPos.x)), abs(dfdy(worldPos.x))),
-                   max(abs(dfdx(worldPos.z)), abs(dfdy(worldPos.z))));
-    float d = clamp(fp, 1.0, 64.0);
-    float hl = trhHeightAt(worldPos.xz - float2(d, 0.0), noiseFreq, octaves, seed, heightScale);
-    float hr = trhHeightAt(worldPos.xz + float2(d, 0.0), noiseFreq, octaves, seed, heightScale);
-    float hb = trhHeightAt(worldPos.xz - float2(0.0, d), noiseFreq, octaves, seed, heightScale);
-    float ht = trhHeightAt(worldPos.xz + float2(0.0, d), noiseFreq, octaves, seed, heightScale);
-    float3 baseN = normalize(float3(hl - hr, 2.0 * d, hb - ht));
-
-    float slope = length(baseN.xz) / max(baseN.y, 1e-3);  // rise/run
-    float4 w = trgSplatWeights(height01, slope, worldPos.xz);
-    float2 wp = worldPos.xz;
-    float3 c = float3(0.0);
-    float3 dn = float3(0.0);
-    for (int i = 0; i < 4; ++i) {
-        float2 uv = wp * kTerrainLayerFreq[i];
-        c  += w[i] * pow(detailAlbedo.sample(ts, uv, i).rgb, float3(2.2));
-        dn += w[i] * (detailNormal.sample(ts, uv, i).xyz * 2.0 - 1.0);
-    }
-    outAlbedo = c;
-    dn = normalize(dn + float3(0.0, 0.0, 1e-4));
-    float3 nn = baseN;
-    float3 T = normalize(float3(1.0, 0.0, 0.0) - nn * nn.x);
-    float3 B = cross(nn, T);
-    outN = normalize(T * dn.x + B * dn.y + nn * dn.z);
-}
+// Terrain surface shading (shaderModel == 1) — shared with the meshlet
+// fragment; see 3d_terrain_shade.metal (splat weights + per-pixel FNL normal +
+// trgShadeTerrain).
+#include "Res/shaders/3d_terrain_shade.metal"
 
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
@@ -228,9 +151,10 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample> texRefractionArg [[texture(17), function_constant(kBoundMaterials)]], // RT refractions (transmission)
     // Terrain detail-layer arrays (grass/rock/dirt/snow albedo + tangent-space
     // normal), world-space tiled — sampled only by the shaderModel == 1
-    // (Terrain) branch, bound path only (the ICB/bindless system table has no
-    // slots for them; terrain shades standard there). Metal twin of RHIMain.frag
-    // set2 b13/b14.
+    // (Terrain) branch. Direct args on the bound path; the ICB/bindless path
+    // reads the same arrays from systemTexs ids 12/13 (resolved to locals at
+    // the top of the body like every other texture). Metal twin of
+    // RHIMain.frag set2 b13/b14.
     texture2d_array<float, access::sample> terrainDetailAlbedo [[texture(18), function_constant(kBoundMaterials)]],
     texture2d_array<float, access::sample> terrainDetailNormal [[texture(19), function_constant(kBoundMaterials)]],
     const device DirLight* directionalLights [[buffer(0)]],
@@ -301,6 +225,10 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample>     texSSCS        = kBindlessMaterials ? systemTexs->texSSCS        : texSSCSArg;
     texture2d<float, access::sample>     texReflection  = kBindlessMaterials ? systemTexs->texReflection  : texReflectionArg;
     texture2d<float, access::sample>     texRefraction  = kBindlessMaterials ? systemTexs->texRefraction  : texRefractionArg;
+    texture2d_array<float, access::sample> trnDetailAlbedo =
+        kBindlessMaterials ? systemTexs->terrainDetailAlbedo : terrainDetailAlbedo;
+    texture2d_array<float, access::sample> trnDetailNormal =
+        kBindlessMaterials ? systemTexs->terrainDetailNormal : terrainDetailNormal;
 
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
@@ -376,10 +304,14 @@ fragment float4 fragmentMain(
     // Terrain: replace albedo + normal with the world-space detail-layer splat
     // (mirrors RHIMain.frag's shaderModel == 1 branch). in.uv.x carries the
     // baked height01; the geometric normal drives slope. Terrain then shades
-    // as a rough dielectric through the same lighting below. Bound path only:
-    // the ICB/bindless table carries no detail arrays, so terrain falls back
-    // to standard shading (palette-LUT albedo) there.
-    if (kBoundMaterials && material.shaderModel == 1.0) {
+    // as a rough dielectric through the same lighting below. Runs on BOTH
+    // paths — the bound one samples the direct texture(18)/(19) args, the
+    // ICB/bindless one the same arrays from the system table (trnDetail*
+    // locals above). This branch must never be path-gated: it also neutralizes
+    // the Disney lobe fields the terrain material overloads as its height-field
+    // descriptor, and skipping it once left the bindless BRDF shading with
+    // specular = heightScale — the whole terrain blown out to white.
+    if (material.shaderModel == 1.0) {
         float3 tAlbedo, tN;
         // Height-field descriptor packed into the terrain material's spare fields
         // (see renderer.cpp material upload). Seed is carried as raw bits.
@@ -388,7 +320,7 @@ fragment float4 fragmentMain(
         int   octaves     = int(material.specularTint + 0.5);
         uint  seed        = as_type<uint>(material.anisotropic);
         trgShadeTerrain(in.worldPosition.xyz, noiseFreq, octaves, seed, heightScale,
-                        clamp(in.uv.x, 0.0, 1.0), terrainDetailAlbedo, terrainDetailNormal, tAlbedo, tN);
+                        clamp(in.uv.x, 0.0, 1.0), trnDetailAlbedo, trnDetailNormal, tAlbedo, tN);
         surf.color = tAlbedo;  // detail albedo is already linearized in the blend
         surf.roughness = 0.95;
         surf.metallic = 0.0;

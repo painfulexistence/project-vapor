@@ -2335,6 +2335,14 @@ void Renderer::mainRenderPass() {
             // RT hard-shadow near region (white when RT off -> near branch is a
             // no-op since cascadeSplits.x/rtEnd is also 0, matching the forward pass).
             rhi->setTexture(0, 11, (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, clampSampler);
+            // Terrain detail-layer arrays (texture 12/13): the meshlet fragment's
+            // shaderModel == 1 branch splats them exactly like the forward pass's
+            // texture(18)/(19). Default white array keeps the texture2d_array args
+            // type-correct when no terrain is staged (never sampled then).
+            rhi->setTexture(0, 12, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                      : defaultDetailArrayTexture, defaultSampler);
+            rhi->setTexture(0, 13, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                      : defaultDetailArrayTexture, defaultSampler);
             struct MeshletShadeFlags { Uint32 shadowRGB, gibsOn; float reflOn, reflIntensity, refrOn, refrIntensity; };
             MeshletShadeFlags sf{
                 (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u,
@@ -2417,7 +2425,7 @@ void Renderer::mainRenderPass() {
             // in-flight frames), and bind it at buffer(14).
             if (!bindlessSystemTable.isValid()) {
                 bindlessSystemTable = rhi->createTextureArgumentTable(
-                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/12);
+                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/14);
             }
             if (bindlessSystemTable.isValid()) {
                 TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
@@ -2426,7 +2434,7 @@ void Renderer::mainRenderPass() {
                 bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
                 bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
                               capabilities.raytracing && refractionRT.isValid();
-                const TextureHandle sys[12] = {
+                const TextureHandle sys[14] = {
                     (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
                     (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
                     (iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, // 2
@@ -2443,8 +2451,17 @@ void Renderer::mainRenderPass() {
                     (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex,               // 9 texSSCS
                     reflOn ? reflectionRT : blackTex,                                    // 10 texReflection
                     refrOn ? refractionRT : blackTex,                                    // 11 texRefraction
+                    // Terrain detail arrays — the ICB path's stand-in for the
+                    // bound path's texture(18)/(19) args; the fragment's
+                    // shaderModel == 1 branch splats them. Default white array
+                    // keeps the texture2d_array slots type-correct (never
+                    // sampled without a terrain material).
+                    terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                       : defaultDetailArrayTexture,     // 12 terrainDetailAlbedo
+                    terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                       : defaultDetailArrayTexture,     // 13 terrainDetailNormal
                 };
-                for (Uint32 i = 0; i < 12; ++i) {
+                for (Uint32 i = 0; i < 14; ++i) {
                     if (sys[i].id != m_bindlessSysCache[i].id) {
                         rhi->writeTextureArgumentTable(bindlessSystemTable, 0, i, sys[i]);
                         m_bindlessSysCache[i] = sys[i];

@@ -2,6 +2,7 @@
 using namespace metal;
 #include "Res/shaders/3d_common.metal"  // shared CameraData/InstanceData/VertexData + inverse()
 #include "Res/shaders/3d_pbr_lib.metal" // shared Surface/BRDF/analytic-light/IBL helpers
+#include "Res/shaders/3d_terrain_shade.metal" // terrain splat + per-pixel FNL normal (shaderModel == 1)
 
 // Bring-up debug probes (the negative-errorThreshold "probe ladder" in meshMain
 // + the mesh-only meshSynthetic pipeline) that were used to chase the blank-
@@ -671,7 +672,13 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              texture2d<float, access::sample>     gibsGI         [[texture(8)]],
                              texture2d<float, access::sample>     texReflection  [[texture(9)]],
                              texture2d<float, access::sample>     texRefraction  [[texture(10)]],
-                             texture2d<float, access::sample>     texShadow      [[texture(11)]]) {
+                             texture2d<float, access::sample>     texShadow      [[texture(11)]],
+                             // Terrain detail-layer arrays for the shaderModel == 1
+                             // branch (same slots-by-convention as the forward
+                             // fragment's texture(18)/(19), placed at the next free
+                             // meshlet slots; default white array when no terrain).
+                             texture2d_array<float, access::sample> terrainDetailAlbedo [[texture(12)]],
+                             texture2d_array<float, access::sample> terrainDetailNormal [[texture(13)]]) {
     // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes / UI toggle),
     //            0 = lambertian fallback (no material bind — bindless caps absent),
     //            2 = full PBR from the shared material table + analytic lights + IBL.
@@ -749,6 +756,25 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
         float3 up = abs(N.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
         T = normalize(cross(up, N));
         B = cross(N, T);
+    }
+
+    // Terrain: full splat shading, same branch as the forward fragment — the
+    // meshlet path is a plain (non-ICB) pipeline, so the detail arrays arrive
+    // as direct texture args. in.uv.x carries the baked height01; the
+    // height-field descriptor rides the material's overloaded Disney lobe
+    // fields (already neutralized in `surf` above).
+    if (isTerrain) {
+        float3 tAlbedo, tN;
+        float noiseFreq   = material.subsurface;
+        float heightScale = material.specular;
+        int   octaves     = int(material.specularTint + 0.5);
+        uint  seed        = as_type<uint>(material.anisotropic);
+        trgShadeTerrain(in.worldPosition, noiseFreq, octaves, seed, heightScale,
+                        clamp(in.uv.x, 0.0, 1.0), terrainDetailAlbedo, terrainDetailNormal, tAlbedo, tN);
+        surf.color = tAlbedo;  // detail albedo is already linearized in the blend
+        surf.roughness = 0.95;
+        surf.metallic = 0.0;
+        norm = tN;
     }
     float3 viewDir = normalize(camera.position - in.worldPosition);
     constexpr sampler screenSampler(address::clamp_to_edge, filter::linear);
