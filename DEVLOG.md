@@ -11,3 +11,4 @@
 - 2026/07/28 - Scene-JSON `procMesh` block: entities name a mesh generator and its params, geometry comes back as per-material buckets with colliders co-emitted, rebuilt per load rather than stored
 - 2026/07/28 - Scene-JSON `water` component + WaterSystem: the FFT surface declared as data, grouped by update cost so the look stays live-tunable while the grid and spectrum are pushed only when they change
 - 2026/07/28 - procMesh colliders reach physics: generated boxes become child entities, and the new engine-side PhysicsBodySystem turns any authored collider into a Jolt body (thin boxes now shrink their convex radius instead of throwing)
+- 2026/07/28 - Poolrooms is a scene file: the whole environment (textures, materials, geometry, water, lights, fog) lives in poolrooms.json, with the hall as one composite `poolroom` mesh generator that also emits its colliders, lamps, water surface and spawn/ladder/skylight markers

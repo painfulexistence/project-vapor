@@ -637,6 +637,10 @@ static void parseMaterial(const json& j, SceneBlueprint& out,
     material->clearcoat = j.value("clearcoat", material->clearcoat);
     material->clearcoatGloss = j.value("clearcoatGloss", material->clearcoatGloss);
     material->useIBL = j.value("useIBL", material->useIBL);
+    // Multiplies emissiveFactor. Without this an emissive material authored in
+    // JSON is stuck at 1.0 — the field existed on Material but was never
+    // reachable from a scene file.
+    material->emissiveStrength = j.value("emissiveStrength", material->emissiveStrength);
     {
         const std::string type = j.value("type", "");
         if (type == "iridescent") material->materialType = MaterialType::Iridescent;
