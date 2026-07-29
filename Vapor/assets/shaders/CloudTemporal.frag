@@ -95,8 +95,17 @@ vec2 reprojectUV(vec3 wp) {
     return vec2(nd.x * 0.5 + 0.5, 1.0 - (nd.y * 0.5 + 0.5));
 }
 
+bool finite4(vec4 v) {
+    return !any(isnan(v)) && !any(isinf(v));
+}
+
 void main() {
     vec4 current = texture(currentCloud, tex_uv);
+    // Last line of defence against a non-finite raymarch sample. The density
+    // path has a 0/0 (guarded there now), but ANY future one would otherwise
+    // be latched into the history for the rest of the session and smeared one
+    // texel per frame by the reprojection — a permanent streak. Costs nothing.
+    if (!finite4(current)) current = vec4(0.0, 0.0, 0.0, 1.0);
 
     float depth = texture(sceneDepth, tex_uv).r;
     vec2 ndc = vec2(tex_uv.x * 2.0 - 1.0, 1.0 - tex_uv.y * 2.0);
@@ -155,6 +164,10 @@ void main() {
                         prevUV.y >= 0.0 && prevUV.y <= 1.0 && prevClip.w > 0.0;
 
     vec4 history = sampleHistoryCatmullRom(prevUV);
+    // Catmull-Rom's negative lobes can also produce a non-finite from finite
+    // taps if the history already holds an extreme value; reject rather than
+    // propagate.
+    if (!finite4(history)) { history = current; validHistory = false; }
 
     // Anti-ghosting: VARIANCE clip, not a hard min/max box.
     //
@@ -200,8 +213,19 @@ void main() {
     // horizontal streaks along the horizon). Widening keeps both:
     // vs the original box, simulated mean per-frame change 4.9x lower, peak
     // 3.5x lower, AND ghosting 5.6x lower.
-    vec4 sigmaFloor = max(sigma, abs(mean) * 0.05);
-    history = clamp(history, mean - 16.0 * sigmaFloor, mean + 16.0 * sigmaFloor);
+    // Clip in a HUE-PRESERVING basis. Clamping R, G and B independently on
+    // premultiplied inscatter lets the three channels be clipped by different
+    // amounts, which shifts hue — the coloured fringing along cloud edges.
+    // Scale RGB by one luminance-derived factor instead, and clip
+    // transmittance (a genuinely independent quantity) on its own.
+    const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+    float hLum = dot(history.rgb, LUMA);
+    float mLum = dot(mean.rgb, LUMA);
+    float sLum = max(dot(sigma.rgb, LUMA), abs(mLum) * 0.05);
+    float cLum = clamp(hLum, mLum - 16.0 * sLum, mLum + 16.0 * sLum);
+    history.rgb *= (abs(hLum) > 1e-6) ? (cLum / hLum) : 0.0;
+    float sA = max(sigma.a, abs(mean.a) * 0.05);
+    history.a = clamp(history.a, mean.a - 16.0 * sA, mean.a + 16.0 * sA);
 
     // Parallax-adaptive blend: base rate at rest AND under pure rotation
     // (history is exact there — Catmull-Rom keeps it sharp); extra current

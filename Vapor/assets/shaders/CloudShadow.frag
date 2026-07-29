@@ -160,7 +160,10 @@ float sampleCloudDensityCheap(vec3 worldPos) {
     float baseShape = sampleCloudShape(worldPos, weather.zw);
     // Aperiodic break-up octave — raymarch twin (de-tiling measure 3).
     baseShape += gradientNoise3D((worldPos + windOffset) * (1.0 / 6000.0)) * 0.15;
-    float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - weather.x, 1.0, 0.0, 1.0));
+    // Guard the coverage divide (remap's denominator is coverage, which reaches
+    // exactly 0) — raymarch twin. A NaN here would bake into the shadow map.
+    float cov = max(weather.x, 1e-4);
+    float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - cov, 1.0, 0.0, 1.0));
     return baseCloud * cloudDensity;
 }
 

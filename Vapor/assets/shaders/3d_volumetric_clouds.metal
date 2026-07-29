@@ -223,8 +223,14 @@ float sampleCloudDensity(float3 worldPos, constant VolumetricCloudData& data, bo
     // the coverage remap varies region to region instead of per 10 km tile.
     baseShape += gradientNoise3D((worldPos + data.windOffset) * (1.0 / 6000.0)) * 0.15;
 
-    // Apply coverage (remapping creates hard edges)
-    float baseCloud = remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0);
+    // Apply coverage (remapping creates hard edges). Guard the divide: remap's
+    // denominator here IS coverage, which reaches exactly 0 (the weather map's
+    // R is 8-bit and bottoms out; the weather system sweeps cloudCoverage
+    // through 0 on a state change) and 0/0 is a NaN that saturate() does not
+    // launder. It would land in the cloud RT, enter the temporal history and be
+    // dragged a texel per frame by reprojection — a permanent streak.
+    float cov = max(coverage, 1e-4);
+    float baseCloud = remap(baseShape * heightGradient, 1.0 - cov, 1.0, 0.0, 1.0);
     baseCloud = saturate(baseCloud);
 
     if (useCheap || baseCloud <= 0.0) {
@@ -417,6 +423,13 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
         // beyond 2.9 km the ladder is bit-for-bit unchanged.
         float nearFine = min(max(t * 0.02, 12.0), baseFine);
         float fineStep = nearFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
+        // Guarantee the ladder REACHES tRange.y inside the budget (twin of
+        // CloudRaymarch.frag). Otherwise a near-horizontal in-layer ray runs
+        // out of iterations mid-flight and stops dead; the truncation distance
+        // is a function of elevation, i.e. of screen row, so the boundary is a
+        // hard HORIZONTAL edge that slides as the camera turns.
+        float itersLeft = float(maxIters - i);
+        fineStep = max(fineStep, (tRange.y - t) / max(itersLeft, 1.0));
         float coarseStep = fineStep * 4.0;
 
         if (!inCloud) {
@@ -645,6 +658,10 @@ fragment float4 cloudTemporalResolve(
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
 
     float4 current = currentCloud.sample(linearSampler, in.uv);
+    // Last line of defence against a non-finite raymarch sample: it would be
+    // latched into the history for the rest of the session and smeared a texel
+    // per frame by the reprojection (twin of CloudTemporal.frag).
+    if (any(isnan(current)) || any(isinf(current))) current = float4(0.0, 0.0, 0.0, 1.0);
 
     float depth = sceneDepth.sample(linearSampler, in.uv).r;
     float2 ndc = in.uv * 2.0 - 1.0;
@@ -698,6 +715,7 @@ fragment float4 cloudTemporalResolve(
                         prevUV.y >= 0.0 && prevUV.y <= 1.0 && prevClip.w > 0.0;
 
     float4 history = sampleHistoryCatmullRom(historyCloud, prevUV, data.screenSize);
+    if (any(isnan(history)) || any(isinf(history))) { history = current; validHistory = false; }
 
     // Anti-ghosting: VARIANCE clip, not a hard min/max box (twin of
     // CloudTemporal.frag). The min/max box is inert over smooth cloud but
@@ -727,8 +745,17 @@ fragment float4 cloudTemporalResolve(
     // A hard min/max box overwrote the accumulator every frame (the field is
     // near-binary: optical depth 1 in 3.3 m); gating the clamp off under exact
     // reprojection fixed that but smeared history across disocclusions.
-    float4 sigmaFloor = max(sigma, abs(mean) * 0.05);
-    history = clamp(history, mean - 16.0 * sigmaFloor, mean + 16.0 * sigmaFloor);
+    // Clip in a HUE-PRESERVING basis (twin of CloudTemporal.frag): clamping R,
+    // G and B independently on premultiplied inscatter clips the channels by
+    // different amounts and shifts hue — the coloured fringing on cloud edges.
+    const float3 LUMA = float3(0.2126, 0.7152, 0.0722);
+    float hLum = dot(history.rgb, LUMA);
+    float mLum = dot(mean.rgb, LUMA);
+    float sLum = max(dot(sigma.rgb, LUMA), abs(mLum) * 0.05);
+    float cLum = clamp(hLum, mLum - 16.0 * sLum, mLum + 16.0 * sLum);
+    history.rgb *= (abs(hLum) > 1e-6) ? (cLum / hLum) : 0.0;
+    float sA = max(sigma.a, abs(mean.a) * 0.05);
+    history.a = clamp(history.a, mean.a - 16.0 * sA, mean.a + 16.0 * sA);
 
     // Parallax-adaptive blend (twin of CloudTemporal.frag): base rate at rest
     // AND under pure rotation — history is exact there, and dumping it on

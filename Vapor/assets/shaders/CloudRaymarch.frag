@@ -263,7 +263,17 @@ float sampleCloudDensity(vec3 worldPos, bool useCheap) {
     // region to region, with no repeat anywhere. Advects with the wind like
     // the baked shape so the deck drifts as one field.
     baseShape += gradientNoise3D((worldPos + windOffset) * (1.0 / 6000.0)) * 0.15;
-    float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0));
+    // The coverage remap divides by `coverage` (remap's denominator is
+    // inMax - inMin = 1 - (1 - coverage)). coverage reaches exactly 0 — the
+    // weather map's R channel is 8-bit and bottoms out, and the weather system
+    // sweeps cloudCoverage through 0 on a state change — and 0/0 there is a
+    // NaN. saturate() does NOT launder it (clamp with a NaN argument is
+    // undefined and most drivers pass it through), so it lands in the cloud RT,
+    // enters the temporal history, and is then dragged one texel per frame by
+    // the reprojection: a permanent horizontal streak, with colour fringing
+    // because each channel carries the non-finite differently.
+    float cov = max(coverage, 1e-4);
+    float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - cov, 1.0, 0.0, 1.0));
 
     if (useCheap || baseCloud <= 0.0) return baseCloud * cloudDensity;
 
@@ -412,6 +422,15 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
         // range — is bit-for-bit what it was.
         float nearFine = min(max(t * 0.02, 12.0), baseFine);
         float fineStep = nearFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
+        // Guarantee the ladder REACHES tRange.y inside the budget. Without this
+        // a near-horizontal in-layer ray runs out of iterations mid-flight and
+        // simply stops: cloud beyond that point vanishes, and because the
+        // truncation distance is a function of elevation — i.e. of screen row —
+        // the boundary is a hard HORIZONTAL edge that slides as the camera
+        // turns. Coarsening the tail instead trades far-field precision (which
+        // the aerial haze is hiding anyway) for guaranteed coverage.
+        float itersLeft = float(maxIters - i);
+        fineStep = max(fineStep, (tRange.y - t) / max(itersLeft, 1.0));
         float coarseStep = fineStep * 4.0;
 
         if (!inCloud) {
