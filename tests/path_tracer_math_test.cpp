@@ -2,20 +2,27 @@
 //
 // The GPU kernel (3d_path_trace.metal) cannot run in CI — Metal only, and CI
 // forces raytracing off — but its math is pure, so it is TRANSLITERATED here
-// and tested statistically on the CPU. The two properties under test are the
-// ones a screenshot cannot show and a wrong render will not crash on:
+// and tested statistically on the CPU. Three properties carry the ground-truth
+// claim, none of which a screenshot can show:
 //
-//   1. The BSDF importance sampler and the BSDF evaluator agree: the sampler's
-//      expected weight equals the numerically integrated reflectance. If this
-//      drifts, renders come out too bright or too dark by a factor nobody can
-//      eyeball back to a cause.
-//   2. Energy conservation: a white surface never reflects more than it
-//      receives, at any roughness/metallic combination.
+//   1. BSDF parity: evalDisneyBRDF * N.L must equal the raster path's
+//      CookTorranceBRDF (3d_pbr_lib.metal) on random inputs. This is the
+//      literal statement of "the photo integrates the same PBR model the game
+//      shades with" — if it drifts, photo mode is a different renderer.
+//   2. The importance sampler and the evaluator agree: E[f·cos/pdf] equals
+//      the numerically integrated reflectance across the parameter space,
+//      including anisotropy, sheen, clearcoat and subsurface. If this drifts,
+//      renders come out too bright or too dark with no crash and no cause.
+//   3. Energy bounds: the sampler cannot manufacture energy the model does
+//      not contain. (The Disney model itself is allowed to exceed 1 slightly
+//      — sheen and clearcoat are additive by design; the photo reproduces the
+//      model, so the bound documents the model, not ideal physics.)
 //
-// KEEP IN SYNC with 3d_path_trace.metal (buildBasis, smithG1, ggxD,
-// fresnelSchlick, sampleGGXVNDF, evalBSDF, sampleBSDF) and 3d_common.metal
-// (randomNext, sampleCosineWeightedHemisphere). The transliteration is only a
-// guard while it matches the MSL line for line.
+// KEEP IN SYNC with 3d_path_trace.metal (evalDisneyBRDF, disneyLobeWeights,
+// disneyPdf, sampleDisney, sampleGGXVNDFAniso, light helpers), 3d_pbr_lib.metal
+// (rasterCookTorranceBRDF and the GTR/Smith/Fresnel primitives) and
+// 3d_common.metal (randomNext, sampleCosineWeightedHemisphere). The
+// transliteration is only a guard while it matches the MSL line for line.
 #include <catch2/catch_test_macros.hpp>
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -49,12 +56,6 @@ inline vec3 sampleCosineWeightedHemisphere(vec2 s, vec3 normal) {
     return tangent * x + bitangent * y + normal * z;
 }
 
-struct HitSurface {
-    vec3 albedo;
-    float metallic;
-    float roughness;
-};
-
 inline void buildBasis(vec3 n, vec3& t, vec3& b) {
     float sign = n.z >= 0.0f ? 1.0f : -1.0f;
     float a = -1.0f / (sign + n.z);
@@ -63,25 +64,161 @@ inline void buildBasis(vec3 n, vec3& t, vec3& b) {
     b = vec3(c, sign + n.y * n.y * a, -n.y);
 }
 
-inline float smithG1(float NoX, float alpha) {
-    float a2 = alpha * alpha;
-    float denom = NoX + std::sqrt(a2 + (1.0f - a2) * NoX * NoX);
-    return denom > 0.0f ? (2.0f * NoX) / denom : 0.0f;
+// ── 3d_pbr_lib.metal primitives ─────────────────────────────────────────────
+
+// The PBR lib's own luma weights (0.3/0.6/0.1 — deliberately not Rec.709).
+inline float luminanceD(vec3 color) {
+    return glm::dot(color, vec3(0.3f, 0.6f, 0.1f));
 }
 
-inline float ggxD(float NoH, float alpha) {
-    float a2 = alpha * alpha;
-    float d = NoH * NoH * (a2 - 1.0f) + 1.0f;
-    return a2 / std::max(PI * d * d, 1e-9f);
+inline float FresnelApprox(float u) {
+    return std::pow(1.0f + 0.0001f - u, 5.0f);
 }
 
-inline vec3 fresnelSchlick(float VoH, vec3 F0) {
-    float f = std::pow(saturate(1.0f - VoH), 5.0f);
-    return F0 + (vec3(1.0f) - F0) * f;
+inline float GTR1(float nh, float a) {
+    if (a >= 1.0f) return 1.0f / PI;
+    float a2 = a * a;
+    float t = 1.0f + (a2 - 1.0f) * nh * nh;
+    return (a2 - 1.0f) / (PI * std::log(a2) * t);
 }
 
-inline vec3 sampleGGXVNDF(vec3 Ve, float alpha, vec2 u) {
-    vec3 Vh = glm::normalize(vec3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+inline float GTR2_aniso(float nh, float hx, float hy, float ax, float ay) {
+    float t = (hx * hx) / (ax * ax) + (hy * hy) / (ay * ay) + nh * nh;
+    return 1.0f / (PI * ax * ay * t * t);
+}
+
+inline float SmithGGX(float u, float r) {
+    float a = r * r;
+    float b = u * u;
+    return 1.0f / (u + std::sqrt(a + b - a * b));
+}
+
+inline float SmithGGX_aniso(float u, float vx, float vy, float ax, float ay) {
+    float t = vx * vx * ax * ax + vy * vy * ay * ay + u * u;
+    return 1.0f / (u + std::sqrt(t));
+}
+
+// 3d_pbr_lib.metal Surface (shading-relevant fields).
+struct Surface {
+    vec3 color = vec3(0.8f);
+    float roughness = 0.5f;
+    float metallic = 0.0f;
+    float subsurface = 0.0f;
+    float specular = 0.5f;
+    float specular_tint = 0.0f;
+    float anisotropic = 0.0f;
+    float sheen = 0.0f;
+    float sheen_tint = 0.0f;
+    float clearcoat = 0.0f;
+    float clearcoat_gloss = 0.0f;
+};
+
+// ── The raster BRDF, verbatim: 3d_pbr_lib.metal CookTorranceBRDF ───────────
+// (returns f * nl, exactly like the fragment shader's call site expects).
+inline vec3 rasterCookTorranceBRDF(vec3 norm, vec3 tangent, vec3 bitangent,
+                                   vec3 lightDir, vec3 viewDir, Surface surf) {
+    vec3 halfway = glm::normalize(lightDir + viewDir);
+    float nv = std::max(glm::dot(norm, viewDir), 0.0f);
+    float nl = std::max(glm::dot(norm, lightDir), 0.0f);
+    float nh = std::max(glm::dot(norm, halfway), 0.0f);
+    float lh = std::max(glm::dot(lightDir, halfway), 0.0f);
+    float lum = luminanceD(surf.color);
+    vec3 tint = lum > 0.0f ? surf.color / lum : vec3(1.0f);
+    vec3 spec0 = glm::mix(surf.specular * 0.08f * glm::mix(vec3(1.0f), tint, surf.specular_tint),
+                          surf.color, surf.metallic);
+    float fh = FresnelApprox(lh);
+    float fl = FresnelApprox(nl);
+    float fv = FresnelApprox(nv);
+    float fss90 = lh * lh * surf.roughness;
+    float fd90 = 0.5f + 2.0f * fss90;
+    float kd = glm::mix(1.0f, fd90, fl) * glm::mix(1.0f, fd90, fv);
+    float fss = glm::mix(1.0f, fss90, fl) * glm::mix(1.0f, fss90, fv);
+    float ss = 1.25f * (fss * (1.0f / (nl + nv + 0.0001f) - 0.5f) + 0.5f);
+    float aspect = std::sqrt(1.0f - surf.anisotropic * 0.9f);
+    float ax = std::max(0.001f, surf.roughness * surf.roughness / aspect);
+    float ay = std::max(0.001f, surf.roughness * surf.roughness * aspect);
+    float hx = glm::dot(halfway, tangent);
+    float hy = glm::dot(halfway, bitangent);
+    float lx = glm::dot(lightDir, tangent);
+    float ly = glm::dot(lightDir, bitangent);
+    float vx = glm::dot(viewDir, tangent);
+    float vy = glm::dot(viewDir, bitangent);
+    float D = GTR2_aniso(nh, hx, hy, ax, ay);
+    float G = SmithGGX_aniso(nl, lx, ly, ax, ay) * SmithGGX_aniso(nv, vx, vy, ax, ay);
+    vec3 F = glm::mix(spec0, vec3(1.0f), fh);
+    vec3 specular = D * G * F;
+    vec3 sheen = fh * surf.sheen * glm::mix(vec3(1.0f), tint, surf.sheen_tint);
+    float Dr = GTR1(nh, glm::mix(0.1f, 0.001f, surf.clearcoat_gloss));
+    float Fr = glm::mix(0.04f, 1.0f, fh);
+    float Gr = SmithGGX(nl, 0.25f) * SmithGGX(nv, 0.25f);
+    vec3 clearcoat = 0.25f * vec3(surf.clearcoat) * Dr * Fr * Gr;
+    return ((glm::mix(kd, ss, surf.subsurface) * surf.color / PI + sheen) * (1.0f - surf.metallic)
+            + specular + clearcoat) * nl;
+}
+
+// ── The photo-mode BRDF: 3d_path_trace.metal evalDisneyBRDF (no nl) ────────
+
+inline vec3 evalDisneyBRDF(Surface surf, vec3 N, vec3 T, vec3 B, vec3 V, vec3 L) {
+    float nl = glm::dot(N, L);
+    float nv = glm::dot(N, V);
+    if (nl <= 0.0f || nv <= 0.0f) return vec3(0.0f);
+
+    vec3 H = glm::normalize(L + V);
+    float nh = std::max(glm::dot(N, H), 0.0f);
+    float lh = std::max(glm::dot(L, H), 0.0f);
+
+    float lum = luminanceD(surf.color);
+    vec3 tint = lum > 0.0f ? surf.color / lum : vec3(1.0f);
+    vec3 spec0 = glm::mix(surf.specular * 0.08f * glm::mix(vec3(1.0f), tint, surf.specular_tint),
+                          surf.color, surf.metallic);
+    float fh = FresnelApprox(lh);
+    float fl = FresnelApprox(nl);
+    float fv = FresnelApprox(nv);
+    float fss90 = lh * lh * surf.roughness;
+    float fd90 = 0.5f + 2.0f * fss90;
+    float kd = glm::mix(1.0f, fd90, fl) * glm::mix(1.0f, fd90, fv);
+    float fss = glm::mix(1.0f, fss90, fl) * glm::mix(1.0f, fss90, fv);
+    float ss = 1.25f * (fss * (1.0f / (nl + nv + 0.0001f) - 0.5f) + 0.5f);
+    float aspect = std::sqrt(1.0f - surf.anisotropic * 0.9f);
+    float ax = std::max(0.001f, surf.roughness * surf.roughness / aspect);
+    float ay = std::max(0.001f, surf.roughness * surf.roughness * aspect);
+    float D = GTR2_aniso(nh, glm::dot(H, T), glm::dot(H, B), ax, ay);
+    float G = SmithGGX_aniso(nl, glm::dot(L, T), glm::dot(L, B), ax, ay)
+            * SmithGGX_aniso(nv, glm::dot(V, T), glm::dot(V, B), ax, ay);
+    vec3 F = glm::mix(spec0, vec3(1.0f), fh);
+    vec3 specular = D * G * F;
+    vec3 sheen = fh * surf.sheen * glm::mix(vec3(1.0f), tint, surf.sheen_tint);
+    float Dr = GTR1(nh, glm::mix(0.1f, 0.001f, surf.clearcoat_gloss));
+    float Fr = glm::mix(0.04f, 1.0f, fh);
+    float Gr = SmithGGX(nl, 0.25f) * SmithGGX(nv, 0.25f);
+    vec3 clearcoat = 0.25f * vec3(surf.clearcoat) * Dr * Fr * Gr;
+
+    return (glm::mix(kd, ss, surf.subsurface) * surf.color / PI + sheen) * (1.0f - surf.metallic)
+         + specular + clearcoat;
+}
+
+// ── The photo-mode sampler: mixture of cosine, aniso VNDF and GTR1 ─────────
+
+struct LobeWeights {
+    float pDiffuse;
+    float pSpec;
+    float pClearcoat;
+};
+
+inline LobeWeights disneyLobeWeights(Surface surf) {
+    float lum = luminanceD(surf.color);
+    vec3 tint = lum > 0.0f ? surf.color / lum : vec3(1.0f);
+    vec3 spec0 = glm::mix(surf.specular * 0.08f * glm::mix(vec3(1.0f), tint, surf.specular_tint),
+                          surf.color, surf.metallic);
+    float wD = (1.0f - surf.metallic) * std::max(lum, 0.05f);
+    float wS = std::max(luminanceD(spec0), 0.05f);
+    float wC = 0.25f * surf.clearcoat;
+    float total = wD + wS + wC;
+    return { wD / total, wS / total, wC / total };
+}
+
+inline vec3 sampleGGXVNDFAniso(vec3 Ve, float ax, float ay, vec2 u) {
+    vec3 Vh = glm::normalize(vec3(ax * Ve.x, ay * Ve.y, Ve.z));
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
     vec3 T1 = lensq > 0.0f ? vec3(-Vh.y, Vh.x, 0.0f) * (1.0f / std::sqrt(lensq)) : vec3(1, 0, 0);
     vec3 T2 = glm::cross(Vh, T1);
@@ -92,66 +229,67 @@ inline vec3 sampleGGXVNDF(vec3 Ve, float alpha, vec2 u) {
     float s = 0.5f * (1.0f + Vh.z);
     t2 = (1.0f - s) * std::sqrt(saturate(1.0f - t1 * t1)) + s * t2;
     vec3 Nh = t1 * T1 + t2 * T2 + std::sqrt(saturate(1.0f - t1 * t1 - t2 * t2)) * Vh;
-    return glm::normalize(vec3(alpha * Nh.x, alpha * Nh.y, std::max(Nh.z, 0.0f)));
+    return glm::normalize(vec3(ax * Nh.x, ay * Nh.y, std::max(Nh.z, 0.0f)));
 }
 
-inline vec3 evalBSDF(HitSurface surf, vec3 N, vec3 V, vec3 L) {
-    float NoL = glm::dot(N, L);
-    float NoV = glm::dot(N, V);
-    if (NoL <= 0.0f || NoV <= 0.0f) return vec3(0.0f);
-
+inline float disneyPdf(Surface surf, LobeWeights w, vec3 N, vec3 T, vec3 B, vec3 V, vec3 L) {
+    float nl = glm::dot(N, L);
+    float nv = glm::dot(N, V);
+    if (nl <= 0.0f || nv <= 0.0f) return 0.0f;
     vec3 H = glm::normalize(V + L);
-    float NoH = saturate(glm::dot(N, H));
-    float VoH = saturate(glm::dot(V, H));
+    float nh = std::max(glm::dot(N, H), 0.0f);
+    float vh = std::max(glm::dot(V, H), 1e-6f);
 
-    vec3 F0 = glm::mix(vec3(0.04f), surf.albedo, surf.metallic);
-    vec3 F = fresnelSchlick(VoH, F0);
-    float alpha = std::max(surf.roughness * surf.roughness, 1e-3f);
+    float aspect = std::sqrt(1.0f - surf.anisotropic * 0.9f);
+    float ax = std::max(0.001f, surf.roughness * surf.roughness / aspect);
+    float ay = std::max(0.001f, surf.roughness * surf.roughness * aspect);
 
-    vec3 spec = F * (ggxD(NoH, alpha) * smithG1(NoV, alpha) * smithG1(NoL, alpha))
-              / std::max(4.0f * NoV * NoL, 1e-6f);
-    vec3 diffuse = surf.albedo * (1.0f - surf.metallic) * (vec3(1.0f) - F) / PI;
-    return diffuse + spec;
+    float pdfDiffuse = nl / PI;
+    float D = GTR2_aniso(nh, glm::dot(H, T), glm::dot(H, B), ax, ay);
+    float pdfSpec = D * SmithGGX_aniso(nv, glm::dot(V, T), glm::dot(V, B), ax, ay) * 0.5f;
+    float aCC = glm::mix(0.1f, 0.001f, surf.clearcoat_gloss);
+    float pdfClearcoat = GTR1(nh, aCC) * nh / (4.0f * vh);
+
+    return w.pDiffuse * pdfDiffuse + w.pSpec * pdfSpec + w.pClearcoat * pdfClearcoat;
 }
 
-inline bool sampleBSDF(HitSurface surf, vec3 N, vec3 V, uint32_t& rngState,
-                       vec3& outDir, vec3& weight) {
-    float NoV = glm::dot(N, V);
-    if (NoV <= 0.0f) return false;
+inline bool sampleDisney(Surface surf, vec3 N, vec3 T, vec3 B, vec3 V,
+                         uint32_t& rngState, vec3& outDir, vec3& outWeight) {
+    if (glm::dot(N, V) <= 0.0f) return false;
+    LobeWeights w = disneyLobeWeights(surf);
 
-    vec3 F0 = glm::mix(vec3(0.04f), surf.albedo, surf.metallic);
-    vec3 diffuseAlbedo = surf.albedo * (1.0f - surf.metallic);
+    float pick = randomNext(rngState);
+    vec2 u = vec2(randomNext(rngState), randomNext(rngState));
 
-    float diffuseWeight = glm::dot(diffuseAlbedo, vec3(1.0f)) / 3.0f;
-    float specWeight = glm::dot(fresnelSchlick(NoV, F0), vec3(1.0f)) / 3.0f;
-    float total = diffuseWeight + specWeight;
-    float pSpec = total > 0.0f ? saturate(specWeight / total) : 1.0f;
-    pSpec = glm::clamp(pSpec, 0.1f, 0.9f);
+    float aspect = std::sqrt(1.0f - surf.anisotropic * 0.9f);
+    float ax = std::max(0.001f, surf.roughness * surf.roughness / aspect);
+    float ay = std::max(0.001f, surf.roughness * surf.roughness * aspect);
 
-    vec3 T, B;
-    buildBasis(N, T, B);
-
-    if (randomNext(rngState) < pSpec) {
-        float alpha = std::max(surf.roughness * surf.roughness, 1e-3f);
+    vec3 L;
+    if (pick < w.pDiffuse) {
+        L = sampleCosineWeightedHemisphere(u, N);
+    } else if (pick < w.pDiffuse + w.pSpec) {
         vec3 Vt = vec3(glm::dot(V, T), glm::dot(V, B), glm::dot(V, N));
-        vec2 u = vec2(randomNext(rngState), randomNext(rngState));
-        vec3 Ht = sampleGGXVNDF(Vt, alpha, u);
-        vec3 Lt = glm::reflect(-Vt, Ht);
-        if (Lt.z <= 0.0f) return false;
-
-        outDir = glm::normalize(Lt.x * T + Lt.y * B + Lt.z * N);
-        float VoH = saturate(glm::dot(Vt, Ht));
-        vec3 F = fresnelSchlick(VoH, F0);
-        weight = F * smithG1(Lt.z, alpha) / pSpec;
-        return true;
+        vec3 Ht = sampleGGXVNDFAniso(Vt, ax, ay, u);
+        vec3 H = Ht.x * T + Ht.y * B + Ht.z * N;
+        L = glm::reflect(-V, H);
+    } else {
+        float a = glm::mix(0.1f, 0.001f, surf.clearcoat_gloss);
+        float a2 = a * a;
+        float cosT2 = (1.0f - std::pow(a2, 1.0f - u.x)) / (1.0f - a2);
+        float cosT = std::sqrt(saturate(cosT2));
+        float sinT = std::sqrt(saturate(1.0f - cosT2));
+        float phi = 2.0f * PI * u.y;
+        vec3 H = T * (sinT * std::cos(phi)) + B * (sinT * std::sin(phi)) + N * cosT;
+        L = glm::reflect(-V, H);
     }
 
-    vec2 u = vec2(randomNext(rngState), randomNext(rngState));
-    outDir = sampleCosineWeightedHemisphere(u, N);
-    if (glm::dot(outDir, N) <= 0.0f) return false;
-    vec3 H = glm::normalize(V + outDir);
-    vec3 F = fresnelSchlick(saturate(glm::dot(V, H)), F0);
-    weight = diffuseAlbedo * (vec3(1.0f) - F) / (1.0f - pSpec);
+    if (glm::dot(N, L) <= 0.0f) return false;
+    float pdf = disneyPdf(surf, w, N, T, B, V, L);
+    if (pdf < 1e-7f) return false;
+
+    outDir = L;
+    outWeight = evalDisneyBRDF(surf, N, T, B, V, L) * glm::dot(N, L) / pdf;
     return true;
 }
 
@@ -236,32 +374,31 @@ inline float rectGeoViaAreaSampling(vec3 N, vec3 fragPos, const RectLightGeom& l
 
 // A: what the integrator actually does — importance-sample the BSDF and
 // average the returned weights (failed samples count as zero).
-inline vec3 reflectanceViaSampler(HitSurface surf, vec3 N, vec3 V, int samples, uint32_t seed) {
+inline vec3 reflectanceViaSampler(Surface surf, vec3 N, vec3 T, vec3 B, vec3 V,
+                                  int samples, uint32_t seed) {
     uint32_t rng = seed;
     vec3 sum(0.0f);
     for (int i = 0; i < samples; i++) {
         vec3 dir, w;
-        if (sampleBSDF(surf, N, V, rng, dir, w)) sum += w;
+        if (sampleDisney(surf, N, T, B, V, rng, dir, w)) sum += w;
     }
     return sum / float(samples);
 }
 
 // B: brute force — uniform hemisphere Monte Carlo of ∫ f·cos dω, sharing no
-// code path with the sampler beyond evalBSDF itself.
-inline vec3 reflectanceViaUniformMC(HitSurface surf, vec3 N, vec3 V, int samples, uint32_t seed) {
+// code path with the sampler beyond evalDisneyBRDF itself.
+inline vec3 reflectanceViaUniformMC(Surface surf, vec3 N, vec3 T, vec3 B, vec3 V,
+                                    int samples, uint32_t seed) {
     uint32_t rng = seed;
-    vec3 T, B;
-    buildBasis(N, T, B);
     vec3 sum(0.0f);
     for (int i = 0; i < samples; i++) {
-        // Uniform hemisphere around N (pdf = 1 / 2π).
         float u1 = randomNext(rng);
         float u2 = randomNext(rng);
         float z = u1;
         float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
         float phi = 2.0f * PI * u2;
         vec3 L = T * (r * std::cos(phi)) + B * (r * std::sin(phi)) + N * z;
-        sum += evalBSDF(surf, N, V, L) * glm::dot(N, L);
+        sum += evalDisneyBRDF(surf, N, T, B, V, L) * glm::dot(N, L);
     }
     return sum * (2.0f * PI / float(samples));
 }
@@ -309,73 +446,204 @@ TEST_CASE("PT math: cosine hemisphere 樣本在半球內且 E[cosθ] = 2/3", "[p
 }
 
 // ============================================================
+// BSDF parity：photo mode 的 BRDF ≡ raster 的 CookTorranceBRDF
+// ============================================================
+
+TEST_CASE("PT math: evalDisneyBRDF × N.L ≡ raster CookTorranceBRDF", "[ptmath]") {
+    // 這是 ground-truth 宣稱的字面語句：photo mode 積分的就是 raster shade
+    // 的那個模型。隨機掃參數空間 + 隨機方向，兩個轉寫必須逐點一致。
+    uint32_t rng = 20240729u;
+    int tested = 0;
+    for (int i = 0; i < 20000 && tested < 4000; i++) {
+        Surface surf;
+        surf.color = vec3(0.05f + 0.95f * randomNext(rng),
+                          0.05f + 0.95f * randomNext(rng),
+                          0.05f + 0.95f * randomNext(rng));
+        surf.roughness = 0.02f + 0.98f * randomNext(rng);
+        surf.metallic = randomNext(rng);
+        surf.subsurface = randomNext(rng);
+        surf.specular = randomNext(rng);
+        surf.specular_tint = randomNext(rng);
+        surf.anisotropic = randomNext(rng);
+        surf.sheen = randomNext(rng);
+        surf.sheen_tint = randomNext(rng);
+        surf.clearcoat = randomNext(rng);
+        surf.clearcoat_gloss = randomNext(rng);
+
+        const vec3 N = glm::normalize(vec3(randomNext(rng) - 0.5f, randomNext(rng) - 0.5f,
+                                           0.2f + randomNext(rng)));
+        vec3 T, B;
+        buildBasis(N, T, B);
+        vec3 V = sampleCosineWeightedHemisphere(vec2(randomNext(rng), randomNext(rng)), N);
+        vec3 L = sampleCosineWeightedHemisphere(vec2(randomNext(rng), randomNext(rng)), N);
+        // 掠射邊界的 max(0)/early-out 差異不屬於模型本身，避開它
+        if (glm::dot(N, V) < 1e-3f || glm::dot(N, L) < 1e-3f) continue;
+        tested++;
+
+        vec3 mine = evalDisneyBRDF(surf, N, T, B, V, L) * glm::dot(N, L);
+        vec3 raster = rasterCookTorranceBRDF(N, T, B, L, V, surf);
+        for (int c = 0; c < 3; c++) {
+            INFO("case " << i << " channel " << c << " mine=" << mine[c] << " raster=" << raster[c]);
+            REQUIRE(std::abs(mine[c] - raster[c]) <= 1e-4f * std::max(1.0f, std::abs(raster[c])));
+        }
+    }
+    REQUIRE(tested >= 4000);
+}
+
+// ============================================================
 // Sampler ↔ evaluator 一致性（積分器亮度正確性的核心）
 // ============================================================
 
-TEST_CASE("PT math: BSDF sampler 期望值 = 數值積分的反射率", "[ptmath]") {
+namespace {
+
+void requireSamplerMatchesIntegral(Surface surf, const char* label,
+                                   uint32_t seedA, uint32_t seedB) {
     const vec3 N(0.0f, 0.0f, 1.0f);
-    // 45 度視角 —— 掠射角另測，正對時 VNDF 的各向異性看不出來
+    vec3 T, B;
+    buildBasis(N, T, B);
+    // 45 度視角 —— 正對時 VNDF/aniso 的方向性看不出來
     const vec3 V = glm::normalize(vec3(0.0f, 0.7f, 0.7f));
 
-    // roughness 下限 0.3：更光滑的 lobe 用均勻半球參考積分的變異數太大，
-    // 測不出有意義的界限（sampler 本身沒有這個限制）
-    const float roughnessGrid[] = { 0.3f, 0.6f, 1.0f };
-    const float metallicGrid[] = { 0.0f, 0.5f, 1.0f };
+    vec3 a = reflectanceViaSampler(surf, N, T, B, V, 400000, seedA);
+    vec3 b = reflectanceViaUniformMC(surf, N, T, B, V, 1200000, seedB);
+    for (int c = 0; c < 3; c++) {
+        const float tolerance = 0.06f * std::max(a[c], b[c]) + 0.005f;
+        INFO(label << " channel=" << c << " sampler=" << a[c] << " reference=" << b[c]);
+        REQUIRE(std::abs(a[c] - b[c]) < tolerance);
+    }
+}
 
+Surface makeSurface(float roughness, float metallic) {
+    Surface s;
+    s.color = vec3(0.8f, 0.6f, 0.4f);
+    s.roughness = roughness;
+    s.metallic = metallic;
+    return s;
+}
+
+} // namespace
+
+TEST_CASE("PT math: Disney sampler 期望值 = 數值積分（基本網格）", "[ptmath]") {
+    // roughness 下限 0.3：更光滑的 lobe 用均勻半球參考積分的變異數太大，
+    // 測不出有意義的界限（sampler 本身沒有這個限制；能量測試蓋 sharp 端）
     uint32_t seed = 1u;
-    for (float roughness : roughnessGrid) {
-        for (float metallic : metallicGrid) {
-            HitSurface surf{ vec3(0.8f, 0.6f, 0.4f), metallic, roughness };
-            vec3 a = reflectanceViaSampler(surf, N, V, 400000, seed += 17u);
-            vec3 b = reflectanceViaUniformMC(surf, N, V, 1000000, seed += 31u);
-            for (int c = 0; c < 3; c++) {
-                // 兩個獨立估計器都有 MC 誤差；容差取相對 6% + 絕對 0.005
-                const float tolerance = 0.06f * std::max(a[c], b[c]) + 0.005f;
-                INFO("roughness=" << roughness << " metallic=" << metallic
-                     << " channel=" << c << " sampler=" << a[c] << " reference=" << b[c]);
-                REQUIRE(std::abs(a[c] - b[c]) < tolerance);
-            }
+    for (float roughness : { 0.3f, 0.6f, 1.0f }) {
+        for (float metallic : { 0.0f, 0.5f, 1.0f }) {
+            const uint32_t seedA = (seed += 17u);
+            const uint32_t seedB = (seed += 31u);
+            requireSamplerMatchesIntegral(makeSurface(roughness, metallic), "base", seedA, seedB);
         }
     }
 }
 
-TEST_CASE("PT math: 掠射角下 sampler 與積分仍一致", "[ptmath]") {
-    const vec3 N(0.0f, 0.0f, 1.0f);
-    const vec3 V = glm::normalize(vec3(0.0f, 0.98f, 0.2f));  // ~78 度
-    HitSurface surf{ vec3(1.0f), 0.0f, 0.5f };
+TEST_CASE("PT math: Disney sampler 一致性 — 各向異性", "[ptmath]") {
+    Surface s = makeSurface(0.5f, 1.0f);
+    s.anisotropic = 0.8f;
+    requireSamplerMatchesIntegral(s, "anisotropic", 211u, 223u);
+}
 
-    vec3 a = reflectanceViaSampler(surf, N, V, 400000, 99u);
-    vec3 b = reflectanceViaUniformMC(surf, N, V, 1000000, 101u);
+TEST_CASE("PT math: Disney sampler 一致性 — sheen", "[ptmath]") {
+    Surface s = makeSurface(0.6f, 0.0f);
+    s.sheen = 1.0f;
+    s.sheen_tint = 0.5f;
+    requireSamplerMatchesIntegral(s, "sheen", 307u, 311u);
+}
+
+TEST_CASE("PT math: Disney sampler 一致性 — clearcoat", "[ptmath]") {
+    // gloss 0 → α = 0.1：GTR1 最寬的一端，均勻參考積分還算得動；
+    // 更 glossy 的端點由能量測試涵蓋
+    Surface s = makeSurface(0.6f, 0.0f);
+    s.clearcoat = 1.0f;
+    s.clearcoat_gloss = 0.0f;
+    requireSamplerMatchesIntegral(s, "clearcoat", 401u, 409u);
+}
+
+TEST_CASE("PT math: Disney sampler 一致性 — subsurface", "[ptmath]") {
+    Surface s = makeSurface(0.6f, 0.0f);
+    s.subsurface = 1.0f;
+    requireSamplerMatchesIntegral(s, "subsurface", 503u, 509u);
+}
+
+TEST_CASE("PT math: Disney sampler 一致性 — specular/specularTint", "[ptmath]") {
+    Surface s = makeSurface(0.4f, 0.0f);
+    s.specular = 1.0f;
+    s.specular_tint = 1.0f;
+    requireSamplerMatchesIntegral(s, "spectint", 601u, 607u);
+
+    Surface z = makeSurface(0.4f, 0.0f);
+    z.specular = 0.0f;  // F0 = 0 電介質：spec lobe 為零但 pdf 仍覆蓋
+    requireSamplerMatchesIntegral(z, "nospec", 701u, 709u);
+}
+
+TEST_CASE("PT math: Disney sampler 掠射角下仍一致", "[ptmath]") {
+    const vec3 N(0.0f, 0.0f, 1.0f);
+    vec3 T, B;
+    buildBasis(N, T, B);
+    const vec3 V = glm::normalize(vec3(0.0f, 0.98f, 0.2f));  // ~78 度
+    Surface s;
+    s.color = vec3(1.0f);
+    s.roughness = 0.5f;
+
+    vec3 a = reflectanceViaSampler(s, N, T, B, V, 400000, 99u);
+    vec3 b = reflectanceViaUniformMC(s, N, T, B, V, 1200000, 101u);
     for (int c = 0; c < 3; c++) {
         REQUIRE(std::abs(a[c] - b[c]) < 0.06f * std::max(a[c], b[c]) + 0.005f);
     }
 }
 
 // ============================================================
-// 能量守恆（白爐測試的取樣端）
+// 能量界限（白爐測試的取樣端）
 // ============================================================
 
-TEST_CASE("PT math: 白色表面在任何粗糙度/金屬度下反射率 <= 1", "[ptmath]") {
+TEST_CASE("PT math: 白色基本材質在任何粗糙度/金屬度下反射率 <= 1", "[ptmath]") {
     const vec3 N(0.0f, 0.0f, 1.0f);
+    vec3 T, B;
+    buildBasis(N, T, B);
     const vec3 V = glm::normalize(vec3(0.0f, 0.6f, 0.8f));
 
     // 這裡涵蓋 sharp lobe（consistency 測試蓋不到的區域）：能量上限
     // 不需要參考積分，只需要期望值本身
-    const float roughnessGrid[] = { 0.05f, 0.15f, 0.3f, 0.6f, 1.0f };
-    const float metallicGrid[] = { 0.0f, 0.5f, 1.0f };
-
     uint32_t seed = 3u;
-    for (float roughness : roughnessGrid) {
-        for (float metallic : metallicGrid) {
-            HitSurface surf{ vec3(1.0f), metallic, roughness };
-            vec3 rho = reflectanceViaSampler(surf, N, V, 300000, seed += 13u);
+    for (float roughness : { 0.05f, 0.15f, 0.3f, 0.6f, 1.0f }) {
+        for (float metallic : { 0.0f, 0.5f, 1.0f }) {
+            Surface s;
+            s.color = vec3(1.0f);
+            s.roughness = roughness;
+            s.metallic = metallic;
+            vec3 rho = reflectanceViaSampler(s, N, T, B, V, 300000, seed += 13u);
             for (int c = 0; c < 3; c++) {
                 INFO("roughness=" << roughness << " metallic=" << metallic << " rho=" << rho[c]);
-                // 1.02：容許 MC 誤差，抓的是「明顯創造能量」這類 bug
-                REQUIRE(rho[c] <= 1.02f);
+                // 1.05：Disney 的 retro-reflective diffuse 在高粗糙度本來就
+                // 略超 1（模型自身的性質），加上 MC 誤差；抓的是「明顯創造
+                // 能量」這類 bug
+                REQUIRE(rho[c] <= 1.05f);
                 REQUIRE(rho[c] >= 0.0f);
             }
         }
+    }
+}
+
+TEST_CASE("PT math: sheen/clearcoat 疊加的能量超額有界（模型自身的非守恆）", "[ptmath]") {
+    // raster 的 Disney 模型把 sheen 和 clearcoat 疊加在基底之上 —— 模型本身
+    // 就不守恆。photo mode 重現這個模型，所以這裡鎖的是「超額有上界」而不是
+    // 「不超過 1」：上界失守代表 sampler 在創造模型沒有的能量。
+    const vec3 N(0.0f, 0.0f, 1.0f);
+    vec3 T, B;
+    buildBasis(N, T, B);
+    const vec3 V = glm::normalize(vec3(0.0f, 0.6f, 0.8f));
+
+    Surface s;
+    s.color = vec3(1.0f);
+    s.roughness = 0.6f;
+    s.sheen = 1.0f;
+    s.clearcoat = 1.0f;
+    s.clearcoat_gloss = 1.0f;  // α=.001：最 glossy 的 clearcoat 端點
+    s.subsurface = 1.0f;
+    vec3 rho = reflectanceViaSampler(s, N, T, B, V, 300000, 883u);
+    for (int c = 0; c < 3; c++) {
+        INFO("rho=" << rho[c]);
+        REQUIRE(rho[c] >= 0.0f);
+        REQUIRE(rho[c] <= 1.35f);
     }
 }
 
@@ -465,15 +733,23 @@ TEST_CASE("PT math: spot cone — 內全亮、外全暗、之間單調", "[ptmat
     }
 }
 
-TEST_CASE("PT math: 取樣方向永遠在正半球、權重非負", "[ptmath]") {
+TEST_CASE("PT math: Disney 取樣方向永遠在正半球、權重非負", "[ptmath]") {
     const vec3 N = glm::normalize(vec3(0.2f, 0.3f, 0.9f));
+    vec3 T, B;
+    buildBasis(N, T, B);
     const vec3 V = glm::normalize(vec3(-0.3f, 0.5f, 0.8f));
-    HitSurface surf{ vec3(0.5f, 0.7f, 0.9f), 0.3f, 0.25f };
+    Surface surf;
+    surf.color = vec3(0.5f, 0.7f, 0.9f);
+    surf.roughness = 0.25f;
+    surf.metallic = 0.3f;
+    surf.clearcoat = 0.5f;
+    surf.sheen = 0.5f;
+    surf.anisotropic = 0.4f;
 
     uint32_t rng = 42u;
     for (int i = 0; i < 50000; i++) {
         vec3 dir, w;
-        if (!sampleBSDF(surf, N, V, rng, dir, w)) continue;
+        if (!sampleDisney(surf, N, T, B, V, rng, dir, w)) continue;
         REQUIRE(glm::dot(dir, N) > 0.0f);
         REQUIRE(w.x >= 0.0f);
         REQUIRE(w.y >= 0.0f);

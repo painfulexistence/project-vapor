@@ -51,6 +51,11 @@ struct PathTraceSceneView {
 
     TextureHandle environment;        // prefiltered environment cube (miss + ambient)
 
+    // True when some scene material is MASK (alpha cutout). The kernel then
+    // alpha-tests every hit — primary, bounce and shadow — so foliage renders
+    // and shadows as leaves instead of solid quads.
+    bool alphaMaskInScene = false;
+
     // True when the merged geometry and material table are all bound, so hits
     // can fetch interpolated normals, UVs and material textures.
     bool hasGeometry() const {

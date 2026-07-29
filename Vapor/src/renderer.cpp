@@ -1695,6 +1695,13 @@ void Renderer::updateBuffers() {
         // in the scene transmits (the panel slider can flip this any frame).
         sceneHasTransmission = std::any_of(materials.begin(), materials.end(),
             [](const RenderMaterial& m) { return m.transmission > 0.0f; });
+        // Gates photo mode's per-hit alpha testing: the cutout walk costs a
+        // closest-hit loop per shadow ray, so only pay it when some material
+        // actually is MASK (mirrors the alphaCutoff upload above).
+        sceneHasAlphaMask = std::any_of(materials.begin(), materials.end(),
+            [](const RenderMaterial& m) {
+                return m.alphaMode == AlphaMode::MASK && m.alphaCutoff > 0.0f;
+            });
     }
 
     // The directional light IS the sun: derive the atmosphere/sky sun direction
@@ -3444,6 +3451,7 @@ PathTraceSceneView Renderer::buildPathTraceSceneView() {
     // Same IBL fallback the main pass uses: an unfilled prefilter cube would be
     // sampled as garbage sky by every ray that escapes the scene.
     view.environment = (m_iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex;
+    view.alphaMaskInScene = sceneHasAlphaMask;
     return view;
 }
 

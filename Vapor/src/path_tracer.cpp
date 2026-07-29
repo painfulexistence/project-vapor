@@ -23,8 +23,8 @@ struct PathTraceParamsGPU {
     Uint32 pointLightCount;
     Uint32 spotLightCount;
     Uint32 rectLightCount;
+    Uint32 hasAlphaMask;
     Uint32 _pad0;
-    Uint32 _pad1;
 };
 static_assert(sizeof(PathTraceParamsGPU) == 64, "PathTraceParams layout must match the MSL struct");
 
@@ -137,6 +137,9 @@ void PathTracer::trace(const PathTraceSceneView& view) {
     params.pointLightCount = view.pointLightCount;
     params.spotLightCount = view.spotLightCount;
     params.rectLightCount = view.rectLightCount;
+    // Alpha testing at hits needs the merged geometry + material table; a
+    // MASK-material scene without them falls back to solid hits.
+    params.hasAlphaMask = (view.alphaMaskInScene && view.hasGeometry()) ? 1u : 0u;
 
     m_rhi->beginComputePass("PathTrace");
     m_rhi->bindComputePipeline(m_accumulatePipeline);

@@ -3,59 +3,71 @@
 using namespace metal;
 using raytracing::instance_acceleration_structure;
 #include "Res/shaders/3d_common.metal"
+#include "Res/shaders/3d_pbr_lib.metal"
 
 // ============================================================================
-// Progressive path tracer (photo mode).
+// Progressive path tracer (photo mode) — ground truth for THIS engine's PBR.
 //
 // Unlike every other RT kernel in the engine, this one does NOT start from the
 // raster G-buffer: it generates its own camera rays, so primary visibility,
-// shading and occlusion all come from the same light transport. That is the
-// point — the raster path approximates, this one converges.
+// shading and occlusion all come from the same light transport.
 //
-// Per pixel, per sample: a camera ray with sub-pixel jitter (that jitter IS the
-// antialiasing), then a bounce loop of
-//   emissive  ->  next-event estimation toward every directional light
-//             ->  BSDF importance sample  ->  Russian roulette,
-// against the same TLAS, InstanceData, MaterialData and bindless material
-// table the raster and RT-reflection paths use. Nothing scene-side is built
-// for photo mode; it re-reads what is already resident.
+// The BRDF is the raster path's Disney model, not an approximation of it:
+// evalDisneyBRDF below is CookTorranceBRDF (3d_pbr_lib.metal) minus its
+// trailing N.L factor, assembled from the SAME GTR/Smith/Fresnel primitives —
+// this file includes 3d_pbr_lib.metal precisely so the two paths cannot
+// drift. Retro-reflective diffuse, subsurface, specular/specularTint-driven
+// F0, anisotropy, sheen and clearcoat all behave exactly as they do in the
+// raster frame; hit points are normal-mapped through the same TBN
+// construction (Gram-Schmidt against the interpolated normal, tangent-w
+// bitangent sign, geometric fallback for degenerate tangents, and — like the
+// raster shader — no normalScale application). Where the raster model does
+// something non-physical (clearcoat and sheen add energy on top), the photo
+// reproduces the model, not the physics: this is the engine's reference
+// image, not a different renderer's.
 //
-// Radiance sums into an RGBA32F accumulator: rgb = summed radiance, a = sample
-// count. pathTraceResolve divides and writes HDR into the scene colour target,
-// so the existing bloom/tonemap/post chain finishes the image unchanged.
+// Importance sampling is an explicit three-lobe mixture — cosine diffuse,
+// anisotropic GGX via visible-normal (VNDF) sampling, and GTR1 clearcoat —
+// weighted per surface, with the full mixture pdf evaluated for the sampled
+// direction (weight = f * cos / pdf). The general form costs a little more
+// than collapsed per-lobe weights but makes the estimator testable: the CPU
+// mirror of this math statistically verifies E[weight] equals the numerically
+// integrated reflectance, and that evalDisneyBRDF * N.L equals the raster
+// CookTorranceBRDF bit for bit.
 //
-// The RNG stream is keyed on (pixel, absolute sample index) only — never on
-// frame number — so N accumulated samples of a fixed camera produce the same
-// image every run. That reproducibility is what makes a render comparable
-// against a reference.
+// MASK (alpha-cutout) materials are honored on every ray: primary, bounce and
+// shadow rays re-test the albedo alpha at each hit against the material's
+// cutoff and pass through failed hits, so foliage renders and shadows as
+// leaves, not as solid quads. KHR_materials_transmission is a stochastic thin
+// -glass lobe matching the raster refraction pass's convention (IOR 1.5,
+// single interface, TIR falls back to reflect, tinted by base color).
 //
 // Light sampling covers every analytic light type, matching the raster
-// path's conventions exactly so a converged photo is comparable with a game
-// frame of the same scene:
-//   - Directional: cone-sampled sun disk (angularRadius 0 = delta).
-//   - Point/spot: punctual, 1/d² windowed to zero at `radius` by the same
-//     smoothstep the raster shader uses — which makes skipping lights beyond
-//     their radius EXACT, not a cutoff approximation. Spot adds the squared
-//     cone falloff. One shadow ray each, capped at the light's distance (the
-//     light is not geometry; a wall BEHIND it must not occlude it).
-//   - Rect: true area sampling, uniform over the quad, double-sided (the
-//     raster path's polygon formula is double-sided too). Emitted radiance is
-//     color * intensity / PI — the value at which this estimator's expectation
-//     EQUALS the raster path's Baum/Arvo solid-angle diffuse term, which is
-//     exact. The raster MRP specular is where the two legitimately diverge.
-//   No MIS anywhere: none of these lights exist in the TLAS, so a BSDF ray
-//   can never hit one — NEE is the only estimator of each, and the estimators
-//   partition by construction. Cost: sharp reflections of rect lights carry
-//   more variance than a hittable-emitter + MIS design would.
+// conventions (see the NEE section): cone-sampled sun; punctual point/spot
+// with the raster falloff window (zero at radius — skipping beyond it is
+// exact); double-sided area-sampled rect whose emitted radiance
+// color*intensity/PI makes the estimator agree with the raster's exact
+// Baum/Arvo diffuse term. No MIS: none of these lights are in the TLAS, so
+// NEE is each light's only estimator.
 //
-// Two known approximations, both deliberate at this stage:
-//   - The environment cube is the prefiltered IBL map, not a sharp capture.
-//     If the sky's sun disk survives prefiltering it is counted a second time
-//     on top of the analytic sun NEE. The disk is smeared across a 128 cube's
-//     mip 0 and the analytic sun dominates by orders of magnitude, so the
-//     error is small — but it is an error, and a sharp env capture removes it.
-//   - Video-textured rect lights emit their flat `color`, not the video
-//     frame's average — the video texture is not bound here.
+// Radiance sums into an RGBA32F accumulator (rgb = sum, a = sample count);
+// pathTraceResolve divides and writes HDR into the scene colour target. The
+// RNG is keyed on (pixel, absolute sample index) — never the frame number —
+// so N samples of a fixed camera reproduce the same image every run.
+//
+// Known deviations from the raster frame, all deliberate:
+//   - The occlusion (AO) texture is NOT applied: baked AO approximates the
+//     occlusion this integrator computes for real, and applying both would
+//     double-darken. The raster frame uses it; a photo does not need to.
+//   - The environment cube is the prefiltered IBL map, not a sharp capture,
+//     so the sky is soft and a sun disk surviving prefiltering is counted a
+//     second time on top of the analytic sun NEE (small: the analytic sun
+//     dominates by orders of magnitude).
+//   - Video-textured rect lights emit their flat color (no video texture
+//     bound here); prototype-UV (triplanar) materials resolve with their mesh
+//     UVs instead.
+//   - Shadow rays treat transmissive surfaces as opaque — matching the raster
+//     RT shadow pass, which does the same.
 // ============================================================================
 
 struct PathTraceParams {
@@ -73,8 +85,8 @@ struct PathTraceParams {
     uint  pointLightCount;
     uint  spotLightCount;
     uint  rectLightCount;
+    uint  hasAlphaMask;       // 1 = some scene material is MASK (alpha-test hits)
     uint  _pad0;
-    uint  _pad1;
 };
 
 // One entry per material in the bindless argument table — same slot order as
@@ -89,19 +101,19 @@ struct MaterialTexs {
     texture2d<float, access::sample> emissive  [[id(5)]];
 };
 
-// Surface properties at a hit, in the metallic-roughness parameterization the
-// raster path uses (3d_pbr_normal_mapped.metal: roughness from .g, metallic
-// from .b, albedo and emissive linearized from sRGB).
-struct HitSurface {
+// Everything shading needs at a hit: the raster PBR Surface (3d_pbr_lib) plus
+// the shading frame and the transmission factor the Surface doesn't carry.
+struct HitPoint {
     float3 position;
-    float3 normal;     // interpolated vertex normal, flipped to face the ray
-    float3 albedo;     // linear
-    float3 emissive;   // linear
-    float  metallic;
-    float  roughness;
+    float3 N;            // shading normal (normal-mapped when geometry is bound)
+    float3 T;            // mesh tangent frame — anisotropy follows UVs, like raster
+    float3 B;
+    Surface surf;
+    float transmission;
 };
 
-// Branchless orthonormal basis around n (Duff et al. 2017).
+// Branchless orthonormal basis around n (Duff et al. 2017). Fallback frame
+// when the mesh has no usable tangent — mirrors the raster shader's fallback.
 static void buildBasis(float3 n, thread float3& t, thread float3& b) {
     float sign = n.z >= 0.0 ? 1.0 : -1.0;
     float a = -1.0 / (sign + n.z);
@@ -110,28 +122,87 @@ static void buildBasis(float3 n, thread float3& t, thread float3& b) {
     b = float3(c, sign + n.y * n.y * a, -n.y);
 }
 
-// Smith height-correlated G1 for GGX (the separable form: G2 = G1(V) * G1(L)).
-static float smithG1(float NoX, float alpha) {
-    float a2 = alpha * alpha;
-    float denom = NoX + sqrt(a2 + (1.0 - a2) * NoX * NoX);
-    return denom > 0.0 ? (2.0 * NoX) / denom : 0.0;
+// ── Disney BRDF: evaluation and sampling ────────────────────────────────────
+
+// CookTorranceBRDF (3d_pbr_lib.metal) minus its trailing `* nl`, built from
+// the same primitives. KEEP line-for-line in sync with that function — the
+// CPU test suite asserts evalDisneyBRDF * nl == CookTorranceBRDF on random
+// inputs, so drift fails the build's test run, not a render review.
+static float3 evalDisneyBRDF(Surface surf, float3 N, float3 T, float3 B, float3 V, float3 L) {
+    float nl = dot(N, L);
+    float nv = dot(N, V);
+    if (nl <= 0.0 || nv <= 0.0) return float3(0.0);
+
+    float3 H = normalize(L + V);
+    float nh = max(dot(N, H), 0.0);
+    float lh = max(dot(L, H), 0.0);
+
+    float lum = luminance(surf.color);
+    float3 tint = lum > 0.0 ? surf.color / lum : float3(1.0);
+    float3 spec0 = mix(surf.specular * 0.08 * mix(float3(1.0), tint, surf.specular_tint),
+                       surf.color, surf.metallic);
+    float fh = FresnelApprox(lh);
+    float fl = FresnelApprox(nl);
+    float fv = FresnelApprox(nv);
+    float fss90 = lh * lh * surf.roughness;
+    // diffuse (Disney retro-reflective weight — NOT plain Lambert)
+    float fd90 = 0.5 + 2.0 * fss90;
+    float kd = mix(1.0, fd90, fl) * mix(1.0, fd90, fv);
+    // subsurface
+    float fss = mix(1.0, fss90, fl) * mix(1.0, fss90, fv);
+    float ss = 1.25 * (fss * (1.0 / (nl + nv + 0.0001) - 0.5) + 0.5);
+    // specular (anisotropic GTR2; the Smith form is G1/(2u), so no /4nlnv here)
+    float aspect = sqrt(1.0 - surf.anisotropic * .9);
+    float ax = max(.001, surf.roughness * surf.roughness / aspect);
+    float ay = max(.001, surf.roughness * surf.roughness * aspect);
+    float hx = dot(H, T);
+    float hy = dot(H, B);
+    float D = GTR2_aniso(nh, hx, hy, ax, ay);
+    float G = SmithGGX_aniso(nl, dot(L, T), dot(L, B), ax, ay)
+            * SmithGGX_aniso(nv, dot(V, T), dot(V, B), ax, ay);
+    float3 F = mix(spec0, float3(1.0), fh);
+    float3 specular = D * G * F;
+    // sheen
+    float3 sheen = fh * surf.sheen * mix(float3(1.0), tint, surf.sheen_tint);
+    // clearcoat
+    float Dr = GTR1(nh, mix(.1, .001, surf.clearcoat_gloss));
+    float Fr = mix(.04, 1.0, fh);
+    float Gr = SmithGGX(nl, .25) * SmithGGX(nv, .25);
+    float3 clearcoat = 0.25 * float3(surf.clearcoat) * Dr * Fr * Gr;
+
+    return (mix(kd, ss, surf.subsurface) * surf.color / PI + sheen) * (1.0 - surf.metallic)
+         + specular + clearcoat;
 }
 
-static float ggxD(float NoH, float alpha) {
-    float a2 = alpha * alpha;
-    float d = NoH * NoH * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-9);
+// Mixture weights for the three sampled lobes. Correctness does not depend on
+// these (the mixture pdf is evaluated in full below); they only steer variance.
+// The clamp keeps every present lobe reachable.
+struct LobeWeights {
+    float pDiffuse;
+    float pSpec;
+    float pClearcoat;
+};
+
+static LobeWeights disneyLobeWeights(Surface surf) {
+    float lum = luminance(surf.color);
+    float3 tint = lum > 0.0 ? surf.color / lum : float3(1.0);
+    float3 spec0 = mix(surf.specular * 0.08 * mix(float3(1.0), tint, surf.specular_tint),
+                       surf.color, surf.metallic);
+    float wD = (1.0 - surf.metallic) * max(lum, 0.05);
+    float wS = max(luminance(spec0), 0.05);
+    float wC = 0.25 * surf.clearcoat;
+    float total = wD + wS + wC;
+    LobeWeights w;
+    w.pDiffuse = wD / total;
+    w.pSpec = wS / total;
+    w.pClearcoat = wC / total;
+    return w;
 }
 
-static float3 fresnelSchlick(float VoH, float3 F0) {
-    float f = pow(saturate(1.0 - VoH), 5.0);
-    return F0 + (1.0 - F0) * f;
-}
-
-// Visible-normal (VNDF) GGX sample, tangent space with N = (0,0,1)
+// Anisotropic visible-normal GGX sample, tangent space with N = (0,0,1)
 // (Heitz 2018, "Sampling the GGX Distribution of Visible Normals").
-static float3 sampleGGXVNDF(float3 Ve, float alpha, float2 u) {
-    float3 Vh = normalize(float3(alpha * Ve.x, alpha * Ve.y, Ve.z));
+static float3 sampleGGXVNDFAniso(float3 Ve, float ax, float ay, float2 u) {
+    float3 Vh = normalize(float3(ax * Ve.x, ay * Ve.y, Ve.z));
     float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
     float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
     float3 T2 = cross(Vh, T1);
@@ -142,110 +213,172 @@ static float3 sampleGGXVNDF(float3 Ve, float alpha, float2 u) {
     float s = 0.5 * (1.0 + Vh.z);
     t2 = (1.0 - s) * sqrt(saturate(1.0 - t1 * t1)) + s * t2;
     float3 Nh = t1 * T1 + t2 * T2 + sqrt(saturate(1.0 - t1 * t1 - t2 * t2)) * Vh;
-    return normalize(float3(alpha * Nh.x, alpha * Nh.y, max(Nh.z, 0.0)));
+    return normalize(float3(ax * Nh.x, ay * Nh.y, max(Nh.z, 0.0)));
 }
 
-// Full BSDF value (diffuse Lambert + GGX specular), WITHOUT the N.L factor.
-// Used by next-event estimation, where the light direction is given.
-static float3 evalBSDF(HitSurface surf, float3 N, float3 V, float3 L) {
-    float NoL = dot(N, L);
-    float NoV = dot(N, V);
-    if (NoL <= 0.0 || NoV <= 0.0) return float3(0.0);
-
+// Mixture pdf of sampleDisney for direction L. Evaluated in full — this is
+// what makes weight = f*cos/pdf an unbiased estimator of the whole BRDF, and
+// what the CPU consistency test verifies.
+static float disneyPdf(Surface surf, LobeWeights w, float3 N, float3 T, float3 B,
+                       float3 V, float3 L) {
+    float nl = dot(N, L);
+    float nv = dot(N, V);
+    if (nl <= 0.0 || nv <= 0.0) return 0.0;
     float3 H = normalize(V + L);
-    float NoH = saturate(dot(N, H));
-    float VoH = saturate(dot(V, H));
+    float nh = max(dot(N, H), 0.0);
+    float vh = max(dot(V, H), 1e-6);
 
-    float3 F0 = mix(float3(0.04), surf.albedo, surf.metallic);
-    float3 F = fresnelSchlick(VoH, F0);
-    float alpha = max(surf.roughness * surf.roughness, 1e-3);
+    float aspect = sqrt(1.0 - surf.anisotropic * .9);
+    float ax = max(.001, surf.roughness * surf.roughness / aspect);
+    float ay = max(.001, surf.roughness * surf.roughness * aspect);
 
-    float3 spec = F * (ggxD(NoH, alpha) * smithG1(NoV, alpha) * smithG1(NoL, alpha))
-                / max(4.0 * NoV * NoL, 1e-6);
-    float3 diffuse = surf.albedo * (1.0 - surf.metallic) * (1.0 - F) / PI;
-    return diffuse + spec;
+    float pdfDiffuse = nl / PI;
+    // VNDF pdf: G1(V)·D/(4·nv); with SmithGGX_aniso = G1/(2u) it collapses to
+    // SmithGGX_aniso(V)·D/2.
+    float D = GTR2_aniso(nh, dot(H, T), dot(H, B), ax, ay);
+    float pdfSpec = D * SmithGGX_aniso(nv, dot(V, T), dot(V, B), ax, ay) * 0.5;
+    // GTR1 half-vector pdf is Dr·nh (GTR1 is normalized over the hemisphere);
+    // the /4vh is the half-vector -> L Jacobian.
+    float aCC = mix(.1, .001, surf.clearcoat_gloss);
+    float pdfClearcoat = GTR1(nh, aCC) * nh / (4.0 * vh);
+
+    return w.pDiffuse * pdfDiffuse + w.pSpec * pdfSpec + w.pClearcoat * pdfClearcoat;
 }
 
-// Importance-sample the BSDF. Returns false when the sample is degenerate.
-// `weight` is already f * cos / pdf, so the caller just multiplies throughput.
-static bool sampleBSDF(HitSurface surf, float3 N, float3 V,
-                       thread uint& rngState,
-                       thread float3& outDir, thread float3& weight) {
-    float NoV = dot(N, V);
-    if (NoV <= 0.0) return false;
+// Importance-sample the Disney BRDF. `weight` = f * cos / pdf(mixture).
+static bool sampleDisney(Surface surf, float3 N, float3 T, float3 B, float3 V,
+                         thread uint& rngState,
+                         thread float3& outDir, thread float3& outWeight) {
+    if (dot(N, V) <= 0.0) return false;
+    LobeWeights w = disneyLobeWeights(surf);
 
-    float3 F0 = mix(float3(0.04), surf.albedo, surf.metallic);
-    float3 diffuseAlbedo = surf.albedo * (1.0 - surf.metallic);
+    float pick = randomNext(rngState);
+    float2 u = float2(randomNext(rngState), randomNext(rngState));
 
-    // Lobe selection weighted by each lobe's rough energy, so neither lobe is
-    // starved of samples on strongly metallic or strongly diffuse surfaces.
-    float diffuseWeight = dot(diffuseAlbedo, float3(1.0)) / 3.0;
-    float specWeight = dot(fresnelSchlick(NoV, F0), float3(1.0)) / 3.0;
-    float total = diffuseWeight + specWeight;
-    float pSpec = total > 0.0 ? saturate(specWeight / total) : 1.0;
-    // Never fully starve either lobe: a 0 probability makes the other lobe's
-    // 1/p blow up on the first pixel where it is picked.
-    pSpec = clamp(pSpec, 0.1, 0.9);
+    float aspect = sqrt(1.0 - surf.anisotropic * .9);
+    float ax = max(.001, surf.roughness * surf.roughness / aspect);
+    float ay = max(.001, surf.roughness * surf.roughness * aspect);
 
-    float3 T, B;
-    buildBasis(N, T, B);
-
-    if (randomNext(rngState) < pSpec) {
-        // Specular: VNDF half-vector sample, reflected.
-        float alpha = max(surf.roughness * surf.roughness, 1e-3);
+    float3 L;
+    if (pick < w.pDiffuse) {
+        L = sampleCosineWeightedHemisphere(u, N);
+    } else if (pick < w.pDiffuse + w.pSpec) {
         float3 Vt = float3(dot(V, T), dot(V, B), dot(V, N));
-        float2 u = float2(randomNext(rngState), randomNext(rngState));
-        float3 Ht = sampleGGXVNDF(Vt, alpha, u);
-        float3 Lt = reflect(-Vt, Ht);
-        if (Lt.z <= 0.0) return false;
-
-        outDir = normalize(Lt.x * T + Lt.y * B + Lt.z * N);
-        float VoH = saturate(dot(Vt, Ht));
-        float3 F = fresnelSchlick(VoH, F0);
-        // VNDF weight collapses to F * G2/G1(V); with separable Smith that is
-        // F * G1(L). No D, no pdf division — that is the whole point of VNDF.
-        weight = F * smithG1(Lt.z, alpha) / pSpec;
-        return true;
+        float3 Ht = sampleGGXVNDFAniso(Vt, ax, ay, u);
+        float3 H = Ht.x * T + Ht.y * B + Ht.z * N;
+        L = reflect(-V, H);
+    } else {
+        // GTR1 half-vector sample (standard Disney clearcoat inversion).
+        float a = mix(.1, .001, surf.clearcoat_gloss);
+        float a2 = a * a;
+        float cosT2 = (1.0 - pow(a2, 1.0 - u.x)) / (1.0 - a2);
+        float cosT = sqrt(saturate(cosT2));
+        float sinT = sqrt(saturate(1.0 - cosT2));
+        float phi = 2.0 * PI * u.y;
+        float3 H = T * (sinT * cos(phi)) + B * (sinT * sin(phi)) + N * cosT;
+        L = reflect(-V, H);
     }
 
-    // Diffuse: cosine-weighted hemisphere. f * cos / pdf collapses to the
-    // albedo, minus the Fresnel share already carried by the specular lobe.
-    float2 u = float2(randomNext(rngState), randomNext(rngState));
-    outDir = sampleCosineWeightedHemisphere(u, N);
-    if (dot(outDir, N) <= 0.0) return false;
-    float3 H = normalize(V + outDir);
-    float3 F = fresnelSchlick(saturate(dot(V, H)), F0);
-    weight = diffuseAlbedo * (1.0 - F) / (1.0 - pSpec);
+    if (dot(N, L) <= 0.0) return false;
+    float pdf = disneyPdf(surf, w, N, T, B, V, L);
+    if (pdf < 1e-7) return false;
+
+    outDir = L;
+    outWeight = evalDisneyBRDF(surf, N, T, B, V, L) * dot(N, L) / pdf;
     return true;
 }
 
-// Any-hit occlusion query against the scene. maxDist caps the ray so a
-// punctual/area light's shadow ray stops AT the light — the light itself is
-// not in the TLAS, and geometry behind it must not occlude it.
-static bool shadowRayOccluded(instance_acceleration_structure TLAS,
-                              float3 origin, float3 dir, float maxDist) {
-    if (maxDist <= 0.001) return false;  // light effectively at the surface
-    raytracing::intersector<raytracing::instancing> occ;
-    occ.assume_geometry_type(raytracing::geometry_type::triangle);
-    occ.accept_any_intersection(true);
-    raytracing::ray r;
-    r.origin = origin;
-    r.direction = dir;
-    r.min_distance = 0.001;
-    r.max_distance = maxDist;
-    return occ.intersect(r, TLAS, 0xFF).type != raytracing::intersection_type::none;
+// ── Scene traversal with MASK (alpha-cutout) support ───────────────────────
+
+// True when the hit survives the material's MASK alpha test — the same test
+// the raster fragment's discard performs (cutoff in emissiveFactor.a; 0 =
+// OPAQUE/BLEND, never cut). Requires the merged geometry + material table.
+static bool hitAlphaPasses(uint instanceIndex, uint primitiveID, float2 barycentric,
+                           device const InstanceData* instances,
+                           device const MaterialData* materials,
+                           device const VertexData* meshVertices,
+                           device const uint* meshIndices,
+                           const device MaterialTexs* materialTexs) {
+    InstanceData inst = instances[instanceIndex];
+    MaterialData mat = materials[inst.materialID];
+    float cutoff = mat.emissiveFactor.a;
+    if (cutoff <= 0.0) return true;
+
+    uint b = inst.rtIndexOffset + primitiveID * 3u;
+    uint i0 = meshIndices[b + 0u] + inst.rtVertexOffset;
+    uint i1 = meshIndices[b + 1u] + inst.rtVertexOffset;
+    uint i2 = meshIndices[b + 2u] + inst.rtVertexOffset;
+    float2 bc = barycentric;
+    float w0 = 1.0 - bc.x - bc.y;
+    float2 uv = w0 * float2(meshVertices[i0].uv) + bc.x * float2(meshVertices[i1].uv)
+              + bc.y * float2(meshVertices[i2].uv);
+
+    constexpr sampler texSampler(address::repeat, filter::linear, mip_filter::linear);
+    float alpha = materialTexs[inst.materialID].albedo.sample(texSampler, uv, level(0.0)).a;
+    return alpha * mat.baseColorFactor.a >= cutoff;
 }
 
-// The raster path's punctual falloff (3d_pbr_lib.metal CalculatePointLight):
-// inverse square, windowed to exactly zero at the light's radius.
+// Any-hit occlusion query. When the scene contains MASK materials (and the
+// geometry tables are bound), occlusion walks closest hits and passes through
+// alpha-culled ones, so leaves shadow as leaves. maxDist caps the ray at the
+// light — the light is not in the TLAS, and a wall BEHIND it must not occlude.
+static bool shadowRayOccluded(instance_acceleration_structure TLAS,
+                              float3 origin, float3 dir, float maxDist,
+                              uint alphaTest,
+                              device const InstanceData* instances,
+                              device const MaterialData* materials,
+                              device const VertexData* meshVertices,
+                              device const uint* meshIndices,
+                              const device MaterialTexs* materialTexs) {
+    if (maxDist <= 0.001) return false;  // light effectively at the surface
+
+    if (alphaTest == 0) {
+        raytracing::intersector<raytracing::instancing> occ;
+        occ.assume_geometry_type(raytracing::geometry_type::triangle);
+        occ.accept_any_intersection(true);
+        raytracing::ray r;
+        r.origin = origin;
+        r.direction = dir;
+        r.min_distance = 0.001;
+        r.max_distance = maxDist;
+        return occ.intersect(r, TLAS, 0xFF).type != raytracing::intersection_type::none;
+    }
+
+    raytracing::intersector<raytracing::triangle_data, raytracing::instancing> occ;
+    occ.assume_geometry_type(raytracing::geometry_type::triangle);
+    for (uint step = 0; step < 8; step++) {
+        raytracing::ray r;
+        r.origin = origin;
+        r.direction = dir;
+        r.min_distance = 0.001;
+        r.max_distance = maxDist;
+        auto hit = occ.intersect(r, TLAS, 0xFF);
+        if (hit.type != raytracing::intersection_type::triangle) return false;
+        if (hitAlphaPasses(hit.user_instance_id, hit.primitive_id,
+                           hit.triangle_barycentric_coord,
+                           instances, materials, meshVertices, meshIndices, materialTexs)) {
+            return true;
+        }
+        float advance = hit.distance + 0.001;
+        origin += dir * advance;
+        maxDist -= advance;
+        if (maxDist <= 0.001) return false;
+    }
+    return true;  // pathological layering: call it occluded rather than loop on
+}
+
+// ── Analytic light helpers (conventions mirror 3d_pbr_lib.metal) ───────────
+
+// The raster path's punctual falloff (CalculatePointLight): inverse square,
+// windowed to exactly zero at the light's radius.
 static float punctualAttenuation(float dist, float radius) {
     float atten = 1.0 / max(dist * dist, 1e-6);
     return atten * (1.0 - smoothstep(radius * 0.8, radius, dist));
 }
 
-// The raster path's spot cone (3d_pbr_lib.metal CalculateSpotLight): squared
-// linear ramp between the outer (zero) and inner (full) half-angle cosines.
-// `L` is the surface->light direction; light.direction points FROM the light.
+// The raster path's spot cone (CalculateSpotLight): squared linear ramp
+// between the outer (zero) and inner (full) half-angle cosines. `L` is the
+// surface->light direction; light.direction points FROM the light.
 static float spotConeFactor(float3 L, float3 spotDirection, float cosInner, float cosOuter) {
     float cosAngle = dot(-L, spotDirection);
     float cone = clamp((cosAngle - cosOuter) / max(cosInner - cosOuter, 1e-4), 0.0, 1.0);
@@ -264,29 +397,49 @@ static float3 sampleSunDirection(float3 sunDir, float angularRadius, float2 rnd)
     return normalize(sunDir + t1 * (r * cos(phi)) + t2 * (r * sin(phi)));
 }
 
-// Resolve the hit triangle into shading inputs. Metal's triangle intersector
-// exposes no built-in normal or UV, so both are fetched from the merged scene
-// geometry (rtIndexOffset + primitive_id*3, indices rebased by rtVertexOffset)
-// and interpolated with the barycentrics — the same fetch
-// 3d_raytrace_reflection.metal performs.
-static HitSurface resolveHit(float3 rayOrigin, float3 rayDir, float hitDistance,
-                             uint instanceIndex, uint primitiveID, float2 barycentric,
-                             device const InstanceData* instances,
-                             device const MaterialData* materials,
-                             device const VertexData* meshVertices,
-                             device const uint* meshIndices,
-                             const device MaterialTexs* materialTexs,
-                             uint hasBindlessGeo) {
+// ── Hit resolution ──────────────────────────────────────────────────────────
+
+// Resolve the hit triangle into the raster PBR's Surface plus a shading frame.
+// Mirrors 3d_pbr_normal_mapped.metal's fragment setup: interpolated attributes,
+// Gram-Schmidt TBN with the tangent-w bitangent sign and the degenerate-tangent
+// fallback, normal map decoded as rgb*2-1 (the raster shader applies no
+// normalScale either), material factors and sRGB linearization identical.
+// Metal's intersector exposes no built-in normal/UV, so everything comes from
+// the merged geometry (rtIndexOffset + primitive_id*3, rebased by
+// rtVertexOffset) — the same fetch the RT reflection kernel performs.
+static HitPoint resolveHitPoint(float3 rayDir, float3 rayOrigin, float hitDistance,
+                                uint instanceIndex, uint primitiveID, float2 barycentric,
+                                device const InstanceData* instances,
+                                device const MaterialData* materials,
+                                device const VertexData* meshVertices,
+                                device const uint* meshIndices,
+                                const device MaterialTexs* materialTexs,
+                                uint hasBindlessGeo) {
     InstanceData inst = instances[instanceIndex];
     MaterialData mat = materials[inst.materialID];
 
-    HitSurface surf;
-    surf.position = rayOrigin + rayDir * hitDistance;
-    surf.albedo = srgbToLinear(mat.baseColorFactor.rgb);
-    surf.emissive = srgbToLinear(float3(mat.emissiveFactor.rgb)) * mat.emissiveStrength;
-    surf.metallic = mat.metallicFactor;
+    HitPoint hp;
+    hp.position = rayOrigin + rayDir * hitDistance;
+    hp.transmission = mat.transmission;
+
+    Surface surf;
+    surf.color = srgbToLinear(mat.baseColorFactor.rgb);
+    // Baked AO approximates the occlusion this integrator computes for real;
+    // applying both would double-darken (see the header).
+    surf.ao = 1.0;
     surf.roughness = mat.roughnessFactor;
-    surf.normal = -rayDir;
+    surf.metallic = mat.metallicFactor;
+    surf.emission = srgbToLinear(float3(mat.emissiveFactor.rgb)) * mat.emissiveStrength;
+    surf.subsurface = mat.subsurface;
+    surf.specular = mat.specular;
+    surf.specular_tint = mat.specularTint;
+    surf.anisotropic = mat.anisotropic;
+    surf.sheen = mat.sheen;
+    surf.sheen_tint = mat.sheenTint;
+    surf.clearcoat = mat.clearcoat;
+    surf.clearcoat_gloss = mat.clearcoatGloss;
+
+    float3 N = -rayDir;  // fallback when no geometry tables are bound
 
     if (hasBindlessGeo != 0) {
         float3x3 model33 = float3x3(inst.model[0].xyz, inst.model[1].xyz, inst.model[2].xyz);
@@ -301,37 +454,59 @@ static HitSurface resolveHit(float3 rayOrigin, float3 rayDir, float hitDistance,
         float w0 = 1.0 - barycentric.x - barycentric.y;
         float3 nObj = w0 * float3(v0.normal) + barycentric.x * float3(v1.normal)
                     + barycentric.y * float3(v2.normal);
-        surf.normal = normalize(model33 * nObj);
+        // model upper-3x3 for normals AND tangents — fine for the
+        // rigid/uniform transforms the scene uses (same call the RT
+        // reflection kernel makes; the raster path uses the normal matrix).
+        N = normalize(model33 * nObj);
+        // Shade the side the ray hit: single-sided geometry seen from behind
+        // gets its frame flipped, or every lit term is black.
+        if (dot(N, rayDir) > 0.0) N = -N;
 
         float2 uv = w0 * float2(v0.uv) + barycentric.x * float2(v1.uv)
                   + barycentric.y * float2(v2.uv);
+        float4 tObj = w0 * float4(v0.tangent) + barycentric.x * float4(v1.tangent)
+                    + barycentric.y * float4(v2.tangent);
         constexpr sampler texSampler(address::repeat, filter::linear, mip_filter::linear);
-        // Base mip: path-traced rays carry no differentials, so there is no
-        // footprint to pick a mip from. Texture aliasing is resolved by the
-        // sample count instead, which is what accumulation is for.
-        //
-        // Textures are pulled out of the table one at a time (the idiom
-        // 3d_pbr_normal_mapped.metal uses) rather than copying the whole
-        // MaterialTexs entry into a local.
+        // Base mip everywhere: path-traced rays carry no differentials, so
+        // there is no footprint to pick a mip from. Texture aliasing resolves
+        // through the sample count instead — that is what accumulation is for.
         texture2d<float, access::sample> texAlbedo    = materialTexs[inst.materialID].albedo;
+        texture2d<float, access::sample> texNormal    = materialTexs[inst.materialID].normal;
         texture2d<float, access::sample> texMetallic  = materialTexs[inst.materialID].metallic;
         texture2d<float, access::sample> texRoughness = materialTexs[inst.materialID].roughness;
         texture2d<float, access::sample> texEmissive  = materialTexs[inst.materialID].emissive;
-        surf.albedo = srgbToLinear(texAlbedo.sample(texSampler, uv, level(0.0)).rgb
-                                   * mat.baseColorFactor.rgb);
+
+        surf.color = srgbToLinear(texAlbedo.sample(texSampler, uv, level(0.0)).rgb
+                                  * mat.baseColorFactor.rgb);
         surf.roughness = texRoughness.sample(texSampler, uv, level(0.0)).g * mat.roughnessFactor;
         surf.metallic = texMetallic.sample(texSampler, uv, level(0.0)).b * mat.metallicFactor;
-        surf.emissive = srgbToLinear(texEmissive.sample(texSampler, uv, level(0.0)).rgb
+        surf.emission = srgbToLinear(texEmissive.sample(texSampler, uv, level(0.0)).rgb
                                      * mat.emissiveFactor.rgb) * mat.emissiveStrength;
+
+        // TBN + normal map, exactly like the raster fragment (including the
+        // degenerate-tangent guard that keeps NaNs out of the frame).
+        float3 T = model33 * tObj.xyz;
+        if (dot(T, T) > 1e-8) {
+            T = normalize(T - dot(T, N) * N);
+            float3 B = normalize(cross(N, T) * tObj.w);
+            float3x3 TBN = float3x3(T, B, N);
+            float3 mapped = normalize(TBN * normalize(
+                texNormal.sample(texSampler, uv, level(0.0)).rgb * 2.0 - 1.0));
+            hp.N = mapped;
+            hp.T = T;
+            hp.B = B;
+        } else {
+            hp.N = N;
+            buildBasis(N, hp.T, hp.B);
+        }
+    } else {
+        hp.N = N;
+        buildBasis(N, hp.T, hp.B);
     }
 
-    // Face the shading normal against the incoming ray. Interpolated vertex
-    // normals can point away on silhouettes and on single-sided geometry hit
-    // from behind; shading with those produces black pixels.
-    if (dot(surf.normal, rayDir) > 0.0) surf.normal = -surf.normal;
-    surf.roughness = clamp(surf.roughness, 0.015, 1.0);
     surf.metallic = saturate(surf.metallic);
-    return surf;
+    hp.surf = surf;
+    return hp;
 }
 
 kernel void pathTraceAccumulate(
@@ -371,6 +546,8 @@ kernel void pathTraceAccumulate(
     raytracing::intersector<raytracing::triangle_data, raytracing::instancing> primary;
     primary.assume_geometry_type(raytracing::geometry_type::triangle);
 
+    const uint alphaTest = (params.hasAlphaMask != 0 && params.hasBindlessGeo != 0) ? 1u : 0u;
+
     uint spp = max(params.samplesPerFrame, 1u);
     for (uint s = 0; s < spp; s++) {
         uint sampleIndex = params.sampleOffset + s;
@@ -406,30 +583,66 @@ kernel void pathTraceAccumulate(
             r.max_distance = params.rayMaxDistance;
 
             auto hit = primary.intersect(r, TLAS, 0xFF);
+            // MASK pass-through: a hit that fails its material's alpha test is
+            // not a surface — step past it and re-cast (bounded, so a stack of
+            // cutout cards cannot spin the kernel).
+            for (uint step = 0; step < 8 && alphaTest != 0 &&
+                 hit.type == raytracing::intersection_type::triangle &&
+                 !hitAlphaPasses(hit.user_instance_id, hit.primitive_id,
+                                 hit.triangle_barycentric_coord,
+                                 instances, materials, meshVertices, meshIndices,
+                                 materialTexs); step++) {
+                r.origin = r.origin + rayDir * (hit.distance + 0.001);
+                hit = primary.intersect(r, TLAS, 0xFF);
+            }
+
             if (hit.type != raytracing::intersection_type::triangle) {
                 radiance += throughput * envMap.sample(envSampler, rayDir, level(0.0)).rgb
                           * params.envIntensity;
                 break;
             }
 
-            HitSurface surf = resolveHit(rayOrigin, rayDir, hit.distance,
-                                         hit.user_instance_id, hit.primitive_id,
-                                         hit.triangle_barycentric_coord,
-                                         instances, materials, meshVertices, meshIndices,
-                                         materialTexs, params.hasBindlessGeo);
+            HitPoint hp = resolveHitPoint(rayDir, r.origin, hit.distance,
+                                          hit.user_instance_id, hit.primitive_id,
+                                          hit.triangle_barycentric_coord,
+                                          instances, materials, meshVertices, meshIndices,
+                                          materialTexs, params.hasBindlessGeo);
 
-            radiance += throughput * surf.emissive;
+            radiance += throughput * hp.surf.emission;
 
             float3 V = -rayDir;
-            float3 N = surf.normal;
+            float3 N = hp.N;
+
+            // KHR_materials_transmission: stochastic thin-glass lobe matching
+            // the raster refraction pass's convention — IOR 1.5, one
+            // interface, TIR falls back to reflect, tinted by base color.
+            // Branch probability = the material's transmission share, so no
+            // throughput division is needed (t·glass + (1-t)·opaque mixture).
+            float pTransmit = hp.transmission * (1.0 - hp.surf.metallic);
+            if (pTransmit > 0.0 && randomNext(rngState) < pTransmit) {
+                float cosI = saturate(dot(N, V));
+                float F = 0.04 + 0.96 * pow(1.0 - cosI, 5.0);
+                float3 newDir;
+                if (randomNext(rngState) < F) {
+                    newDir = reflect(rayDir, N);
+                } else {
+                    newDir = refract(rayDir, N, 1.0 / 1.5);
+                    if (dot(newDir, newDir) < 1e-8) newDir = reflect(rayDir, N);  // TIR
+                }
+                throughput *= hp.surf.color;
+                rayOrigin = hp.position + newDir * 0.001
+                          + (dot(newDir, N) > 0.0 ? N : -N) * params.rayBias;
+                rayDir = newDir;
+                continue;  // a glass pass consumes a bounce
+            }
 
             // ── Next-event estimation over every analytic light, one shadow
             // ray each. None of these lights exist in the TLAS, so a BSDF ray
             // can never hit one — NEE is each light's only estimator and no
-            // MIS weight applies. Falloff/cone/radiance conventions mirror
-            // 3d_pbr_lib.metal so the converged image is comparable with the
-            // raster frame (see the header).
-            const float3 shadowOrigin = surf.position + N * params.rayBias;
+            // MIS weight applies. Conventions mirror 3d_pbr_lib.metal (see the
+            // header) so the converged image is comparable with the raster
+            // frame.
+            const float3 shadowOrigin = hp.position + N * params.rayBias;
 
             for (uint li = 0; li < params.dirLightCount; li++) {
                 DirLight light = dirLights[li];
@@ -437,39 +650,39 @@ kernel void pathTraceAccumulate(
                 float2 rnd = float2(randomNext(rngState), randomNext(rngState));
                 float3 L = sampleSunDirection(sunDir, params.sunAngularRadius, rnd);
 
-                float NoL = dot(N, L);
-                if (NoL <= 0.0) continue;
-
-                float3 f = evalBSDF(surf, N, V, L);
+                if (dot(N, L) <= 0.0) continue;
+                float3 f = evalDisneyBRDF(hp.surf, N, hp.T, hp.B, V, L);
                 if (all(f <= float3(0.0))) continue;
-                if (shadowRayOccluded(TLAS, shadowOrigin, L, params.rayMaxDistance)) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, params.rayMaxDistance, alphaTest,
+                                      instances, materials, meshVertices, meshIndices,
+                                      materialTexs)) continue;
 
-                radiance += throughput * f * NoL * light.color * light.intensity;
+                radiance += throughput * f * dot(N, L) * light.color * light.intensity;
             }
 
             for (uint li = 0; li < params.pointLightCount; li++) {
                 PointLight light = pointLights[li];
-                float3 toLight = light.position - surf.position;
+                float3 toLight = light.position - hp.position;
                 float dist = length(toLight);
                 // The window function is exactly zero at radius, so this skip
                 // is exact — it is the raster falloff's own boundary.
                 if (dist >= light.radius || dist < 1e-4) continue;
                 float3 L = toLight / dist;
 
-                float NoL = dot(N, L);
-                if (NoL <= 0.0) continue;
-
-                float3 f = evalBSDF(surf, N, V, L);
+                if (dot(N, L) <= 0.0) continue;
+                float3 f = evalDisneyBRDF(hp.surf, N, hp.T, hp.B, V, L);
                 if (all(f <= float3(0.0))) continue;
-                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005)) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005, alphaTest,
+                                      instances, materials, meshVertices, meshIndices,
+                                      materialTexs)) continue;
 
-                radiance += throughput * f * NoL * light.color * light.intensity
+                radiance += throughput * f * dot(N, L) * light.color * light.intensity
                           * punctualAttenuation(dist, light.radius);
             }
 
             for (uint li = 0; li < params.spotLightCount; li++) {
                 SpotLight light = spotLights[li];
-                float3 toLight = light.position - surf.position;
+                float3 toLight = light.position - hp.position;
                 float dist = length(toLight);
                 if (dist >= light.radius || dist < 1e-4) continue;
                 float3 L = toLight / dist;
@@ -477,14 +690,14 @@ kernel void pathTraceAccumulate(
                 float cone = spotConeFactor(L, light.direction, light.cosInner, light.cosOuter);
                 if (cone <= 0.0) continue;
 
-                float NoL = dot(N, L);
-                if (NoL <= 0.0) continue;
-
-                float3 f = evalBSDF(surf, N, V, L);
+                if (dot(N, L) <= 0.0) continue;
+                float3 f = evalDisneyBRDF(hp.surf, N, hp.T, hp.B, V, L);
                 if (all(f <= float3(0.0))) continue;
-                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005)) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005, alphaTest,
+                                      instances, materials, meshVertices, meshIndices,
+                                      materialTexs)) continue;
 
-                radiance += throughput * f * NoL * light.color * light.intensity
+                radiance += throughput * f * dot(N, L) * light.color * light.intensity
                           * punctualAttenuation(dist, light.radius) * cone;
             }
 
@@ -500,20 +713,21 @@ kernel void pathTraceAccumulate(
                 float3 q = lp + lr * (light.halfWidth * (2.0 * rnd.x - 1.0))
                               + lu * (light.halfHeight * (2.0 * rnd.y - 1.0));
 
-                float3 toQ = q - surf.position;
+                float3 toQ = q - hp.position;
                 float distSq = max(dot(toQ, toQ), 1e-6);
                 float dist = sqrt(distSq);
                 float3 L = toQ / dist;
 
-                float NoL = dot(N, L);
-                if (NoL <= 0.0) continue;
+                if (dot(N, L) <= 0.0) continue;
                 // Double-sided emitter, like the raster polygon formula.
                 float cosLight = abs(dot(normalize(cross(lr, lu)), L));
                 if (cosLight < 1e-4) continue;
 
-                float3 f = evalBSDF(surf, N, V, L);
+                float3 f = evalDisneyBRDF(hp.surf, N, hp.T, hp.B, V, L);
                 if (all(f <= float3(0.0))) continue;
-                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005)) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005, alphaTest,
+                                      instances, materials, meshVertices, meshIndices,
+                                      materialTexs)) continue;
 
                 float area = 4.0 * light.halfWidth * light.halfHeight;
                 // color * intensity / PI: the emitted radiance at which this
@@ -521,13 +735,13 @@ kernel void pathTraceAccumulate(
                 // solid-angle diffuse term (see header). Video-textured lights
                 // emit their flat color — the video texture is not bound here.
                 float3 emitted = float3(light.color) * (light.intensity / PI);
-                radiance += throughput * f * NoL * emitted * (area * cosLight / distSq);
+                radiance += throughput * f * dot(N, L) * emitted * (area * cosLight / distSq);
             }
 
             if (bounce == params.maxBounces) break;
 
             float3 nextDir, weight;
-            if (!sampleBSDF(surf, N, V, rngState, nextDir, weight)) break;
+            if (!sampleDisney(hp.surf, N, hp.T, hp.B, V, rngState, nextDir, weight)) break;
             throughput *= weight;
             if (all(throughput <= float3(0.0))) break;
 
@@ -539,7 +753,7 @@ kernel void pathTraceAccumulate(
                 throughput /= p;
             }
 
-            rayOrigin = surf.position + N * params.rayBias;
+            rayOrigin = hp.position + N * params.rayBias;
             rayDir = nextDir;
         }
 

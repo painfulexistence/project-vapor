@@ -1111,6 +1111,7 @@ private:
     bool rtRefractionsEnabled = true;        // panel toggle (no-op without RT)
     float rtRefractionIntensity = 1.0f;      // composite multiplier in the PBR
     bool sceneHasTransmission = false;       // recomputed in updateBuffers()
+    bool sceneHasAlphaMask = false;          // recomputed in updateBuffers() (photo-mode cutouts)
     // RT sun soft shadows: 0 = hard single ray (legacy behavior); > 0 = the
     // sun's angular radius in radians, cone-sampled with a few rays/pixel
     // (real sun ~0.0047). Panel slider under Shadow Debug.
