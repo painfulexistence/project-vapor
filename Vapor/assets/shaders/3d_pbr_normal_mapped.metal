@@ -412,10 +412,23 @@ fragment float4 fragmentMain(
     float3 shadowL = normalize(-directionalLights[0].direction);
 
     // Helper: sample a specific cascade
+    // Returns -1 when the fragment falls OUTSIDE this cascade's map, so the
+    // caller can fall through to a farther cascade and ultimately treat it as
+    // lit. Mirrors RHIMain.frag's sampleCascade. Without this test the
+    // clamp_to_edge sampler silently read the border texel, and proj.z > 1
+    // failed every less_equal compare — so everything past the last split
+    // (pssmShadowDistance, 2500 m by default, far short of the 30 km far
+    // plane) shaded FULLY SHADOWED. That is a camera-locked black band over
+    // the terrain: the regression the shadow-distance decoupling introduced
+    // on Metal, where the range beyond the cascades first came to exist.
     auto sampleCascade = [&](int ci) -> float {
         float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
         float3 proj  = lsPos.xyz / lsPos.w;
         float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
+            shadowUV.y < 0.0 || shadowUV.y > 1.0 || proj.z > 1.0) {
+            return -1.0;
+        }
         // Per-cascade + slope-scaled depth bias. A flat bias is fine for the
         // near cascade but far cascades cover far more world per texel, and
         // grazing surfaces (small N·L, e.g. a ceiling lit obliquely) self-shadow
@@ -465,14 +478,24 @@ fragment float4 fragmentMain(
         debugCascade = ci;
 
         shadowFactor = sampleCascade(ci);
+        // Left this cascade's box -> try the farther ones, then give up and
+        // call it lit. Fog/aerial perspective covers that range.
+        if (shadowFactor < 0.0 && ci < 1) { ci = 1; shadowFactor = sampleCascade(1); }
+        if (shadowFactor < 0.0 && ci < 2) { ci = 2; shadowFactor = sampleCascade(2); }
+        bool beyondAll = shadowFactor < 0.0;
+        if (beyondAll) shadowFactor = 1.0;  // past every cascade -> lit
+        debugCascade = beyondAll ? 3 : ci;
 
         // Cascade blend: smooth transition between cascades
         float cascadeBlend = pssmData.cascadeBlendRange;
-        if (cascadeBlend > 0.0 && ci < 2) {
+        if (cascadeBlend > 0.0 && ci < 2 && !beyondAll) {
             float cascadeEnd = (ci == 0) ? pssmData.cascadeSplits.y : pssmData.cascadeSplits.z;
             float blendStart = cascadeEnd - cascadeBlend;
             if (viewDepth > blendStart && viewDepth < cascadeEnd) {
                 float nextShadow = sampleCascade(ci + 1);
+                // The next cascade can be out of range too — blending -1 would
+                // darken toward black instead of fading to lit.
+                if (nextShadow < 0.0) nextShadow = 1.0;
                 float t = (viewDepth - blendStart) / cascadeBlend;
                 shadowFactor = mix(shadowFactor, nextShadow, smoothstep(0.0, 1.0, t));
             }
@@ -489,13 +512,14 @@ fragment float4 fragmentMain(
 
     // Debug visualization: show cascade colors
     if (pssmData.debugVisualize > 0) {
-        float3 cascadeColors[4] = {
+        float3 cascadeColors[5] = {
             float3(0.2, 0.8, 0.2), // RT = green
             float3(0.8, 0.2, 0.2), // Cascade 0 = red
             float3(0.2, 0.2, 0.8), // Cascade 1 = blue
-            float3(0.8, 0.8, 0.2)  // Cascade 2 = yellow
+            float3(0.8, 0.8, 0.2), // Cascade 2 = yellow
+            float3(0.4, 0.4, 0.4)  // beyond every cascade (unshadowed) = grey
         };
-        float3 cascadeColor = cascadeColors[debugCascade + 1];
+        float3 cascadeColor = cascadeColors[clamp(debugCascade + 1, 0, 4)];
         return float4(cascadeColor * shadowFactor, 1.0);
     }
 

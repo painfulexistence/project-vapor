@@ -556,6 +556,12 @@ static float meshletSampleCascade(float3 worldPos, float ndl, int ci,
     float4 lsPos = pssm.lightSpaceMatrices[ci] * float4(worldPos, 1.0);
     float3 proj  = lsPos.xyz / lsPos.w;
     float2 uv    = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    // -1 = outside this cascade's map; the caller falls through to a farther
+    // cascade and finally to "lit". See the forward fragment for why the
+    // missing test rendered everything past the last split fully shadowed.
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || proj.z > 1.0) {
+        return -1.0;
+    }
     float  slope = clamp(1.0 - ndl, 0.0, 1.0);
     float  bias  = 0.002 * float(ci + 1) * (1.0 + 2.0 * slope);
     float  ref   = proj.z - bias;
@@ -594,12 +600,17 @@ static float meshletDirShadow(float3 worldPos, float ndl, float viewZ, float2 sc
     if      (viewZ > pssm.cascadeSplits.z) ci = 2;
     else if (viewZ > pssm.cascadeSplits.y) ci = 1;
     float sh = meshletSampleCascade(worldPos, ndl, ci, pssm, shadowMaps);
+    bool beyondAll = false;
+    if (sh < 0.0 && ci < 1) { ci = 1; sh = meshletSampleCascade(worldPos, ndl, 1, pssm, shadowMaps); }
+    if (sh < 0.0 && ci < 2) { ci = 2; sh = meshletSampleCascade(worldPos, ndl, 2, pssm, shadowMaps); }
+    if (sh < 0.0) { sh = 1.0; beyondAll = true; }  // past every cascade -> lit
     float cb = pssm.cascadeBlendRange;
-    if (cb > 0.0 && ci < 2) {
+    if (cb > 0.0 && ci < 2 && !beyondAll) {
         float cascadeEnd = (ci == 0) ? pssm.cascadeSplits.y : pssm.cascadeSplits.z;
         float blendStart = cascadeEnd - cb;
         if (viewZ > blendStart && viewZ < cascadeEnd) {
             float next = meshletSampleCascade(worldPos, ndl, ci + 1, pssm, shadowMaps);
+            if (next < 0.0) next = 1.0;  // out of range -> fade to lit, not black
             float t = (viewZ - blendStart) / cb;
             sh = mix(sh, next, smoothstep(0.0, 1.0, t));
         }
