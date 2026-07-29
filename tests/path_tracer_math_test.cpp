@@ -155,6 +155,83 @@ inline bool sampleBSDF(HitSurface surf, vec3 N, vec3 V, uint32_t& rngState,
     return true;
 }
 
+// ── Analytic light transliterations (3d_path_trace.metal light NEE) ────────
+
+inline float smoothstepf(float e0, float e1, float x) {
+    float t = glm::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+// punctualAttenuation: the raster path's point/spot falloff — inverse square,
+// windowed to exactly zero at the light's radius.
+inline float punctualAttenuation(float dist, float radius) {
+    float atten = 1.0f / std::max(dist * dist, 1e-6f);
+    return atten * (1.0f - smoothstepf(radius * 0.8f, radius, dist));
+}
+
+// spotConeFactor: squared linear ramp between outer and inner cosines.
+inline float spotConeFactor(vec3 L, vec3 spotDirection, float cosInner, float cosOuter) {
+    float cosAngle = glm::dot(-L, spotDirection);
+    float cone = glm::clamp((cosAngle - cosOuter) / std::max(cosInner - cosOuter, 1e-4f), 0.0f, 1.0f);
+    return cone * cone;
+}
+
+struct RectLightGeom {
+    vec3 position;
+    vec3 right;       // normalized
+    vec3 up;          // normalized
+    float halfWidth;
+    float halfHeight;
+};
+
+// Transliterated from 3d_pbr_lib.metal EvalRectLightDiffuse — the raster
+// path's EXACT polygon solid-angle formula (Baum et al.). Returns
+// dot(vectorIrradiance-ish sum, N) / 2π, so ∫cosθ dω over the quad = π * this.
+inline float rectDiffuseGeo(vec3 N, vec3 fragPos, const RectLightGeom& light) {
+    vec3 corners[4] = {
+        light.position + light.right * light.halfWidth + light.up * light.halfHeight,
+        light.position - light.right * light.halfWidth + light.up * light.halfHeight,
+        light.position - light.right * light.halfWidth - light.up * light.halfHeight,
+        light.position + light.right * light.halfWidth - light.up * light.halfHeight,
+    };
+    vec3 sum(0.0f);
+    for (int i = 0; i < 4; i++) {
+        vec3 v0 = glm::normalize(corners[i] - fragPos);
+        vec3 v1 = glm::normalize(corners[(i + 1) % 4] - fragPos);
+        vec3 c = glm::cross(v0, v1);
+        float len = glm::length(c);
+        if (len < 1e-6f) continue;
+        float theta = std::atan2(len, glm::dot(v0, v1));
+        sum += (theta / len) * c;
+    }
+    return std::max(0.0f, glm::dot(sum, N)) / (2.0f * PI);
+}
+
+// The photo-mode rect NEE geometry estimator: E over uniform quad samples of
+// cosθ_surf * area * |cosθ_light| / d² — this IS ∫cosθ dω, estimated the way
+// the kernel estimates it (same sampling, same double-sidedness).
+inline float rectGeoViaAreaSampling(vec3 N, vec3 fragPos, const RectLightGeom& light,
+                                    int samples, uint32_t seed) {
+    uint32_t rng = seed;
+    vec3 lightN = glm::normalize(glm::cross(light.right, light.up));
+    float area = 4.0f * light.halfWidth * light.halfHeight;
+    double sum = 0.0;
+    for (int i = 0; i < samples; i++) {
+        float u = 2.0f * randomNext(rng) - 1.0f;
+        float v = 2.0f * randomNext(rng) - 1.0f;
+        vec3 q = light.position + light.right * (light.halfWidth * u)
+                                + light.up * (light.halfHeight * v);
+        vec3 toQ = q - fragPos;
+        float distSq = std::max(glm::dot(toQ, toQ), 1e-6f);
+        vec3 L = toQ / std::sqrt(distSq);
+        float NoL = glm::dot(N, L);
+        if (NoL <= 0.0f) continue;
+        float cosLight = std::abs(glm::dot(lightN, L));
+        sum += double(NoL) * double(area * cosLight / distSq);
+    }
+    return float(sum / samples);
+}
+
 // Directional-hemispherical reflectance ρ(V), two independent estimators.
 
 // A: what the integrator actually does — importance-sample the BSDF and
@@ -299,6 +376,92 @@ TEST_CASE("PT math: 白色表面在任何粗糙度/金屬度下反射率 <= 1", 
                 REQUIRE(rho[c] >= 0.0f);
             }
         }
+    }
+}
+
+// ============================================================
+// 分析光源：photo mode 的 NEE 必須跟 raster 的定義吻合
+// ============================================================
+
+TEST_CASE("PT math: rect light 面積採樣 = Baum 立體角解析公式", "[ptmath]") {
+    // 兩條完全獨立的數學路徑算同一個 ∫cosθ dω：
+    //   MC 面積採樣（kernel 的做法，pdf 轉換 area·cosθ_l/d²）
+    //   vs Baum 多邊形公式（raster 的做法，解析）
+    // 一致才能宣稱 photo mode 的 rect diffuse 期望值 = raster 的精確項，
+    // 也是 L_e = color·intensity/π 這個輻射度約定成立的前提。
+    const vec3 N(0.0f, 0.0f, 1.0f);
+    const vec3 fragPos(0.0f);
+
+    RectLightGeom light;
+    light.position = vec3(0.6f, 0.4f, 1.2f);
+    light.right = glm::normalize(vec3(1.0f, 0.2f, -0.1f));
+    light.up = glm::normalize(glm::cross(vec3(0.3f, -0.4f, 0.9f), light.right));
+    light.halfWidth = 0.35f;
+    light.halfHeight = 0.25f;
+
+    const float analytic = PI * rectDiffuseGeo(N, fragPos, light);
+    const float sampled = rectGeoViaAreaSampling(N, fragPos, light, 500000, 2024u);
+    INFO("analytic=" << analytic << " sampled=" << sampled);
+    REQUIRE(analytic > 0.01f);  // 這個佈局必須真的照到，否則測試空轉
+    REQUIRE(std::abs(sampled - analytic) < 0.02f * analytic + 1e-4f);
+}
+
+TEST_CASE("PT math: rect light 從背面照樣發光（雙面，與 raster 一致）", "[ptmath]") {
+    // raster 的 Baum 公式從背面看 winding 反轉、cross 全部變號，貢獻仍為正
+    // —— rect light 是雙面光源。kernel 用 |cosθ_l| 對應這個行為。
+    const vec3 N(0.0f, 0.0f, 1.0f);
+    const vec3 fragPos(0.0f);
+
+    RectLightGeom light;
+    light.position = vec3(0.2f, -0.1f, 1.0f);
+    // right × up 的法線朝 +z —— 面向「遠離」受光面的方向，受光面在背面
+    light.right = vec3(1.0f, 0.0f, 0.0f);
+    light.up = vec3(0.0f, 1.0f, 0.0f);
+    light.halfWidth = 0.4f;
+    light.halfHeight = 0.3f;
+
+    const float analytic = PI * rectDiffuseGeo(N, fragPos, light);
+    const float sampled = rectGeoViaAreaSampling(N, fragPos, light, 500000, 7u);
+    INFO("analytic=" << analytic << " sampled=" << sampled);
+    REQUIRE(analytic > 0.01f);
+    REQUIRE(std::abs(sampled - analytic) < 0.02f * analytic + 1e-4f);
+}
+
+TEST_CASE("PT math: point light 衰減 — 反平方 + radius 窗函數", "[ptmath]") {
+    const float radius = 10.0f;
+    // 窗內（d < 0.8r）：純反平方
+    REQUIRE(std::abs(punctualAttenuation(2.0f, radius) - 1.0f / 4.0f) < 1e-6f);
+    REQUIRE(std::abs(punctualAttenuation(5.0f, radius) - 1.0f / 25.0f) < 1e-6f);
+    // 窗中（0.8r < d < r）：小於純反平方
+    REQUIRE(punctualAttenuation(9.0f, radius) < 1.0f / 81.0f);
+    REQUIRE(punctualAttenuation(9.0f, radius) > 0.0f);
+    // 邊界與界外：恰好為零 —— kernel 以 d >= radius 跳過是精確的，不是截斷
+    REQUIRE(punctualAttenuation(10.0f, radius) == 0.0f);
+    REQUIRE(punctualAttenuation(12.0f, radius) == 0.0f);
+}
+
+TEST_CASE("PT math: spot cone — 內全亮、外全暗、之間單調", "[ptmath]") {
+    const vec3 spotDir(0.0f, 0.0f, -1.0f);  // 光朝 -z 照
+    const float cosInner = std::cos(glm::radians(15.0f));
+    const float cosOuter = std::cos(glm::radians(30.0f));
+
+    // 正中央（表面在光正下方，L 指回光 = +z，-L = spotDir）
+    REQUIRE(spotConeFactor(vec3(0, 0, 1), spotDir, cosInner, cosOuter) == 1.0f);
+    // 外錐之外（表面在軸外 45 度）
+    const float out = glm::radians(45.0f);
+    vec3 Lout = glm::normalize(vec3(std::sin(out), 0.0f, std::cos(out)));
+    REQUIRE(spotConeFactor(Lout, spotDir, cosInner, cosOuter) == 0.0f);
+
+    // 內外之間：沿角度掃描單調遞減，且值域 (0,1)
+    float prev = 1.0f;
+    for (int deg = 16; deg < 30; deg++) {
+        const float a = glm::radians(float(deg));
+        vec3 L = glm::normalize(vec3(std::sin(a), 0.0f, std::cos(a)));
+        float cone = spotConeFactor(L, spotDir, cosInner, cosOuter);
+        REQUIRE(cone > 0.0f);
+        REQUIRE(cone < 1.0f);
+        REQUIRE(cone <= prev);
+        prev = cone;
     }
 }
 

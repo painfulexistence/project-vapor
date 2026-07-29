@@ -28,10 +28,19 @@ struct PathTraceSceneView {
     BufferHandle instances;           // InstanceData[]
     BufferHandle materials;           // MaterialData[]
     BufferHandle directionalLights;   // DirectionalLightData[]
+    BufferHandle pointLights;         // PointLightData[]
+    BufferHandle spotLights;          // Vapor::SpotLight[]
+    BufferHandle rectLights;          // Vapor::RectLight[]
     size_t instanceRange = 0;
     size_t materialRange = 0;
     size_t directionalLightRange = 0;
+    size_t pointLightRange = 0;
+    size_t spotLightRange = 0;
+    size_t rectLightRange = 0;        // 0 = bind the whole buffer
     Uint32 directionalLightCount = 0;
+    Uint32 pointLightCount = 0;
+    Uint32 spotLightCount = 0;
+    Uint32 rectLightCount = 0;
 
     // Merged scene geometry + the bindless per-material texture table. Hits
     // resolve their normal, UV and textures through these; without them the
@@ -48,12 +57,14 @@ struct PathTraceSceneView {
         return mergedVertices.isValid() && mergedIndices.isValid() && materialTextureTable.isValid();
     }
 
-    // Minimum needed to trace at all. The light buffer is required even for an
-    // unlit scene: the kernel declares the argument unconditionally and uses
-    // directionalLightCount, not the binding, to decide whether to read it.
+    // Minimum needed to trace at all. Every light buffer is required even for
+    // an unlit scene: the kernel declares the arguments unconditionally and
+    // uses the counts, not the bindings, to decide whether to read them.
     bool isTraceable() const {
         return tlas.isValid() && camera.isValid() && instances.isValid() &&
-               materials.isValid() && directionalLights.isValid() && environment.isValid();
+               materials.isValid() && directionalLights.isValid() &&
+               pointLights.isValid() && spotLights.isValid() && rectLights.isValid() &&
+               environment.isValid();
     }
 };
 

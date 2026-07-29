@@ -20,9 +20,13 @@ struct PathTraceParamsGPU {
     float fireflyClamp;
     Uint32 hasBindlessGeo;
     Uint32 resetAccumulation;
-    Uint32 _pad;
+    Uint32 pointLightCount;
+    Uint32 spotLightCount;
+    Uint32 rectLightCount;
+    Uint32 _pad0;
+    Uint32 _pad1;
 };
-static_assert(sizeof(PathTraceParamsGPU) == 48, "PathTraceParams layout must match the MSL struct");
+static_assert(sizeof(PathTraceParamsGPU) == 64, "PathTraceParams layout must match the MSL struct");
 
 constexpr Uint32 kThreadGroupSize = 8;
 
@@ -130,6 +134,9 @@ void PathTracer::trace(const PathTraceSceneView& view) {
     params.fireflyClamp = settings.fireflyClamp;
     params.hasBindlessGeo = view.hasGeometry() ? 1u : 0u;
     params.resetAccumulation = m_accumulator.resetPending() ? 1u : 0u;
+    params.pointLightCount = view.pointLightCount;
+    params.spotLightCount = view.spotLightCount;
+    params.rectLightCount = view.rectLightCount;
 
     m_rhi->beginComputePass("PathTrace");
     m_rhi->bindComputePipeline(m_accumulatePipeline);
@@ -146,6 +153,9 @@ void PathTracer::trace(const PathTraceSceneView& view) {
         m_rhi->setComputeBuffer(7, view.mergedIndices);
         m_rhi->bindComputeTextureArgumentTable(view.materialTextureTable, 8);
     }
+    m_rhi->setComputeBuffer(9, view.pointLights, 0, view.pointLightRange);
+    m_rhi->setComputeBuffer(10, view.spotLights, 0, view.spotLightRange);
+    m_rhi->setComputeBuffer(11, view.rectLights, 0, view.rectLightRange);
     m_rhi->dispatch((m_width + kThreadGroupSize - 1) / kThreadGroupSize,
                     (m_height + kThreadGroupSize - 1) / kThreadGroupSize, 1);
     m_rhi->endComputePass();

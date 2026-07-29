@@ -57,7 +57,9 @@ Photo frame    BuildAccelStructures -> PathTrace -> PathTraceResolve ->  │ com
     <p>A single compute megakernel. Metal has no raygen/miss/hit shader tables (see ADR-008), so there is nothing to gain from a wavefront architecture here, and a megakernel keeps the whole light transport readable in one file.</p>
     <ul>
       <li><strong>Camera rays</strong> generated from <code>invProj</code>/<code>invView</code> with sub-pixel jitter. That jitter <em>is</em> the antialiasing — no MSAA, no TAA, the pixel integrates its own area.</li>
-      <li><strong>Next-event estimation</strong> toward every directional light, cone-sampled over the sun's disk for a true penumbra. Directional lights are not geometry, so a BSDF-sampled ray can never hit one: no MIS weight is needed and none is applied.</li>
+      <li><strong>Next-event estimation over every analytic light type</strong>, one shadow ray each, matching <code>3d_pbr_lib.metal</code>'s conventions so a converged photo is comparable with a raster frame of the same scene. Directional: cone-sampled sun disk. Point/spot: punctual, the raster path's inverse-square falloff windowed to zero at <code>radius</code> — which makes skipping lights beyond their radius <em>exact</em>, not a cutoff. Spot adds the squared cone ramp. Rect: true area sampling, uniform over the quad, double-sided like the raster polygon formula; shadow rays to positional lights are capped at the light's distance, since the light is not geometry and a wall behind it must not occlude it.</li>
+      <li><strong>The rect radiance convention is derived, not guessed:</strong> emitting <code>color · intensity / π</code> makes the area estimator's expectation equal the raster path's Baum/Arvo solid-angle diffuse term — which is exact, so photo mode and raster agree on rect diffuse <em>in expectation</em>, and the raster's representative-point specular approximation becomes measurable against the true integral. That agreement is unit-tested: the MC area estimator and a transliterated Baum formula must match within 2%, front side and back.</li>
+      <li><strong>No MIS anywhere, by construction:</strong> none of these lights exist in the TLAS, so a BSDF ray can never hit one — NEE is each light's only estimator. The cost is extra variance in sharp reflections of rect lights, which a hittable-emitter + MIS design would reduce.</li>
       <li><strong>BSDF importance sampling</strong> with lobe selection between Lambert diffuse and GGX specular. The specular lobe uses visible-normal (VNDF) sampling, whose weight collapses to <code>F · G1(L)</code> — no distribution term, no pdf division.</li>
       <li><strong>Russian roulette</strong> from the third bounce, scaling survivors by 1/p so the estimator stays unbiased.</li>
     </ul>
@@ -81,10 +83,11 @@ Photo frame    BuildAccelStructures -> PathTrace -> PathTraceResolve ->  │ com
     </ul>
 
     <h2>Known approximations</h2>
-    <p>Both are deliberate at this stage and both are stated in the kernel's header comment rather than left for a reader to discover:</p>
+    <p>All deliberate, all stated in the kernel's header comment rather than left for a reader to discover:</p>
     <ul>
       <li>The environment cube is the <strong>prefiltered</strong> IBL map, not a sharp capture. If the sky's sun disk survives prefiltering it is counted a second time on top of the analytic sun NEE. The disk is smeared across a 128 cube's mip 0 and the analytic sun dominates by orders of magnitude, so the error is small — but it is an error, and a sharp environment capture removes it.</li>
-      <li><strong>Only directional lights are sampled by NEE.</strong> Point, spot and rect lights are invisible to photo mode until area-light sampling lands. Rect lights are the natural next step: they are already in the scene data and are a genuine area light to sample.</li>
+      <li><strong>Video-textured rect lights emit their flat colour</strong>, not the current video frame — the video texture is not bound in the kernel. Solid-colour rect lights (the common case) are exact per the convention above.</li>
+      <li><strong>Light edits are caught by content, geometry edits are not.</strong> The photo frame hashes every light pool (FNV over positions, colours, cones, extents), so nudging a light in the inspector restarts the render automatically. Moving a <em>mesh</em> still leaves a stale accumulation — that remains the panel's manual restart.</li>
     </ul>
 
     <h2>What this unlocks</h2>
@@ -93,8 +96,9 @@ Photo frame    BuildAccelStructures -> PathTrace -> PathTraceResolve ->  │ com
       <li><strong>Landed:</strong> HDR readback. <code>RHI::copyTextureToBuffer</code> blits the RGBA32F accumulator into a shared buffer with the same fencing as screenshots; the divide-by-sample-count happens on the CPU. A photo leaves the engine at full precision, before bloom and tonemap ever touch it.</li>
       <li><strong>Landed:</strong> the render CLI. <code>main --photo out.exr --spp 1024 --bounces 6</code> warms the scene up (IBL capture, async loads), freezes the simulation, traces to the sample budget, writes a linear EXR plus a tonemapped PNG preview, and exits with a meaningful status code (0 written, 2 unavailable, 3 write failed, 4 aborted). <code>--photo-wait</code> is the compose mode: the demo boots into its main menu, so instead of freezing on a timer, play to the moment, frame the shot on the free camera, and press F9 — the trace starts from exactly that state. The EXR writer is in-repo (single-part scanline FLOAT, no compression, ~100 lines against the format spec) and locked by a round-trip test with an independent parser — one emitted variant did not justify a 12k-line vendored dependency.</li>
       <li><strong>Landed:</strong> CPU verification of the integrator math. The sampling functions are transliterated into <code>test_path_tracer</code> and tested statistically: the BSDF sampler's expected weight must match the numerically integrated reflectance (the property that keeps renders from silently coming out a constant factor too bright or dark), and a white surface must never reflect more energy than it receives, down to roughness 0.05. The transliteration must be kept in sync with the MSL by hand — the price of testing GPU math where no GPU exists.</li>
+      <li><strong>Landed:</strong> analytic-light NEE for every light type — point, spot and rect join the sun (see the integrator section for the conventions and the derived rect radiance). A photo of an interior scene now converges to its actual lighting instead of pretending only the sun exists.</li>
       <li>Next: depth of field — lens sampling at ray generation, which a path tracer gets essentially for free and a raster DoF pass can only approximate.</li>
-      <li>Next: area-light NEE with MIS, closing the point/spot/rect gap above.</li>
+      <li>Next: MIS against hittable emissive quad proxies for rect lights, to cut the variance of their sharp reflections.</li>
     </ul>
   </main>
 </body>

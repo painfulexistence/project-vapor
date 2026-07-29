@@ -29,14 +29,33 @@ using raytracing::instance_acceleration_structure;
 // image every run. That reproducibility is what makes a render comparable
 // against a reference.
 //
+// Light sampling covers every analytic light type, matching the raster
+// path's conventions exactly so a converged photo is comparable with a game
+// frame of the same scene:
+//   - Directional: cone-sampled sun disk (angularRadius 0 = delta).
+//   - Point/spot: punctual, 1/d² windowed to zero at `radius` by the same
+//     smoothstep the raster shader uses — which makes skipping lights beyond
+//     their radius EXACT, not a cutoff approximation. Spot adds the squared
+//     cone falloff. One shadow ray each, capped at the light's distance (the
+//     light is not geometry; a wall BEHIND it must not occlude it).
+//   - Rect: true area sampling, uniform over the quad, double-sided (the
+//     raster path's polygon formula is double-sided too). Emitted radiance is
+//     color * intensity / PI — the value at which this estimator's expectation
+//     EQUALS the raster path's Baum/Arvo solid-angle diffuse term, which is
+//     exact. The raster MRP specular is where the two legitimately diverge.
+//   No MIS anywhere: none of these lights exist in the TLAS, so a BSDF ray
+//   can never hit one — NEE is the only estimator of each, and the estimators
+//   partition by construction. Cost: sharp reflections of rect lights carry
+//   more variance than a hittable-emitter + MIS design would.
+//
 // Two known approximations, both deliberate at this stage:
 //   - The environment cube is the prefiltered IBL map, not a sharp capture.
 //     If the sky's sun disk survives prefiltering it is counted a second time
 //     on top of the analytic sun NEE. The disk is smeared across a 128 cube's
 //     mip 0 and the analytic sun dominates by orders of magnitude, so the
 //     error is small — but it is an error, and a sharp env capture removes it.
-//   - Only directional lights are sampled by NEE. Point/spot/rect lights are
-//     invisible to photo mode until area-light sampling lands.
+//   - Video-textured rect lights emit their flat `color`, not the video
+//     frame's average — the video texture is not bound here.
 // ============================================================================
 
 struct PathTraceParams {
@@ -51,7 +70,11 @@ struct PathTraceParams {
     float fireflyClamp;       // per-sample radiance ceiling; <= 0 disables
     uint  hasBindlessGeo;     // 1 = merged geometry + material table bound
     uint  resetAccumulation;  // 1 = overwrite the accumulator instead of adding
-    uint  _pad;
+    uint  pointLightCount;
+    uint  spotLightCount;
+    uint  rectLightCount;
+    uint  _pad0;
+    uint  _pad1;
 };
 
 // One entry per material in the bindless argument table — same slot order as
@@ -196,6 +219,39 @@ static bool sampleBSDF(HitSurface surf, float3 N, float3 V,
     return true;
 }
 
+// Any-hit occlusion query against the scene. maxDist caps the ray so a
+// punctual/area light's shadow ray stops AT the light — the light itself is
+// not in the TLAS, and geometry behind it must not occlude it.
+static bool shadowRayOccluded(instance_acceleration_structure TLAS,
+                              float3 origin, float3 dir, float maxDist) {
+    if (maxDist <= 0.001) return false;  // light effectively at the surface
+    raytracing::intersector<raytracing::instancing> occ;
+    occ.assume_geometry_type(raytracing::geometry_type::triangle);
+    occ.accept_any_intersection(true);
+    raytracing::ray r;
+    r.origin = origin;
+    r.direction = dir;
+    r.min_distance = 0.001;
+    r.max_distance = maxDist;
+    return occ.intersect(r, TLAS, 0xFF).type != raytracing::intersection_type::none;
+}
+
+// The raster path's punctual falloff (3d_pbr_lib.metal CalculatePointLight):
+// inverse square, windowed to exactly zero at the light's radius.
+static float punctualAttenuation(float dist, float radius) {
+    float atten = 1.0 / max(dist * dist, 1e-6);
+    return atten * (1.0 - smoothstep(radius * 0.8, radius, dist));
+}
+
+// The raster path's spot cone (3d_pbr_lib.metal CalculateSpotLight): squared
+// linear ramp between the outer (zero) and inner (full) half-angle cosines.
+// `L` is the surface->light direction; light.direction points FROM the light.
+static float spotConeFactor(float3 L, float3 spotDirection, float cosInner, float cosOuter) {
+    float cosAngle = dot(-L, spotDirection);
+    float cone = clamp((cosAngle - cosOuter) / max(cosInner - cosOuter, 1e-4), 0.0, 1.0);
+    return cone * cone;
+}
+
 // A direction inside the sun's disk. angularRadius == 0 gives the delta sun
 // (identical to 3d_raytrace_shadow.metal's hard-shadow path).
 static float3 sampleSunDirection(float3 sunDir, float angularRadius, float2 rnd) {
@@ -292,6 +348,11 @@ kernel void pathTraceAccumulate(
     device const VertexData*              meshVertices [[buffer(6)]],
     device const uint*                    meshIndices  [[buffer(7)]],
     const device MaterialTexs*            materialTexs [[buffer(8)]],
+    // Analytic light pools (same buffers the cluster cull and PBR bind); the
+    // counts in params gate every read.
+    device const PointLight*              pointLights  [[buffer(9)]],
+    device const SpotLight*               spotLights   [[buffer(10)]],
+    device const RectLight*               rectLights   [[buffer(11)]],
     uint2 tid [[thread_position_in_grid]]
 ) {
     uint w = accumTexture.get_width();
@@ -309,10 +370,6 @@ kernel void pathTraceAccumulate(
 
     raytracing::intersector<raytracing::triangle_data, raytracing::instancing> primary;
     primary.assume_geometry_type(raytracing::geometry_type::triangle);
-
-    raytracing::intersector<raytracing::instancing> occlusion;
-    occlusion.assume_geometry_type(raytracing::geometry_type::triangle);
-    occlusion.accept_any_intersection(true);
 
     uint spp = max(params.samplesPerFrame, 1u);
     for (uint s = 0; s < spp; s++) {
@@ -366,9 +423,14 @@ kernel void pathTraceAccumulate(
             float3 V = -rayDir;
             float3 N = surf.normal;
 
-            // ── Next-event estimation: every directional light, one shadow ray
-            // each. Directional lights are not geometry, so a BSDF-sampled ray
-            // can never hit them — no MIS weight is needed and none is applied.
+            // ── Next-event estimation over every analytic light, one shadow
+            // ray each. None of these lights exist in the TLAS, so a BSDF ray
+            // can never hit one — NEE is each light's only estimator and no
+            // MIS weight applies. Falloff/cone/radiance conventions mirror
+            // 3d_pbr_lib.metal so the converged image is comparable with the
+            // raster frame (see the header).
+            const float3 shadowOrigin = surf.position + N * params.rayBias;
+
             for (uint li = 0; li < params.dirLightCount; li++) {
                 DirLight light = dirLights[li];
                 float3 sunDir = normalize(-light.direction);
@@ -380,16 +442,86 @@ kernel void pathTraceAccumulate(
 
                 float3 f = evalBSDF(surf, N, V, L);
                 if (all(f <= float3(0.0))) continue;
-
-                raytracing::ray shadowRay;
-                shadowRay.origin = surf.position + N * params.rayBias;
-                shadowRay.direction = L;
-                shadowRay.min_distance = 0.001;
-                shadowRay.max_distance = params.rayMaxDistance;
-                auto sh = occlusion.intersect(shadowRay, TLAS, 0xFF);
-                if (sh.type != raytracing::intersection_type::none) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, params.rayMaxDistance)) continue;
 
                 radiance += throughput * f * NoL * light.color * light.intensity;
+            }
+
+            for (uint li = 0; li < params.pointLightCount; li++) {
+                PointLight light = pointLights[li];
+                float3 toLight = light.position - surf.position;
+                float dist = length(toLight);
+                // The window function is exactly zero at radius, so this skip
+                // is exact — it is the raster falloff's own boundary.
+                if (dist >= light.radius || dist < 1e-4) continue;
+                float3 L = toLight / dist;
+
+                float NoL = dot(N, L);
+                if (NoL <= 0.0) continue;
+
+                float3 f = evalBSDF(surf, N, V, L);
+                if (all(f <= float3(0.0))) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005)) continue;
+
+                radiance += throughput * f * NoL * light.color * light.intensity
+                          * punctualAttenuation(dist, light.radius);
+            }
+
+            for (uint li = 0; li < params.spotLightCount; li++) {
+                SpotLight light = spotLights[li];
+                float3 toLight = light.position - surf.position;
+                float dist = length(toLight);
+                if (dist >= light.radius || dist < 1e-4) continue;
+                float3 L = toLight / dist;
+
+                float cone = spotConeFactor(L, light.direction, light.cosInner, light.cosOuter);
+                if (cone <= 0.0) continue;
+
+                float NoL = dot(N, L);
+                if (NoL <= 0.0) continue;
+
+                float3 f = evalBSDF(surf, N, V, L);
+                if (all(f <= float3(0.0))) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005)) continue;
+
+                radiance += throughput * f * NoL * light.color * light.intensity
+                          * punctualAttenuation(dist, light.radius) * cone;
+            }
+
+            for (uint li = 0; li < params.rectLightCount; li++) {
+                RectLight light = rectLights[li];
+                float3 lp = float3(light.position);
+                float3 lr = float3(light.right);
+                float3 lu = float3(light.up);
+
+                // Uniform point on the quad; pdf_A = 1/area folds into the
+                // area * cosLight / dist² geometry factor below.
+                float2 rnd = float2(randomNext(rngState), randomNext(rngState));
+                float3 q = lp + lr * (light.halfWidth * (2.0 * rnd.x - 1.0))
+                              + lu * (light.halfHeight * (2.0 * rnd.y - 1.0));
+
+                float3 toQ = q - surf.position;
+                float distSq = max(dot(toQ, toQ), 1e-6);
+                float dist = sqrt(distSq);
+                float3 L = toQ / dist;
+
+                float NoL = dot(N, L);
+                if (NoL <= 0.0) continue;
+                // Double-sided emitter, like the raster polygon formula.
+                float cosLight = abs(dot(normalize(cross(lr, lu)), L));
+                if (cosLight < 1e-4) continue;
+
+                float3 f = evalBSDF(surf, N, V, L);
+                if (all(f <= float3(0.0))) continue;
+                if (shadowRayOccluded(TLAS, shadowOrigin, L, dist - 0.005)) continue;
+
+                float area = 4.0 * light.halfWidth * light.halfHeight;
+                // color * intensity / PI: the emitted radiance at which this
+                // estimator's expectation equals the raster path's exact
+                // solid-angle diffuse term (see header). Video-textured lights
+                // emit their flat color — the video texture is not bound here.
+                float3 emitted = float3(light.color) * (light.intensity / PI);
+                radiance += throughput * f * NoL * emitted * (area * cosLight / distSq);
             }
 
             if (bounce == params.maxBounces) break;

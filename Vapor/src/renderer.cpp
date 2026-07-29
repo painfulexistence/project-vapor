@@ -3425,10 +3425,19 @@ PathTraceSceneView Renderer::buildPathTraceSceneView() {
     view.instances = instanceDataBuffer;
     view.materials = materialUniformBuffer;
     view.directionalLights = directionalLightBuffer;
+    view.pointLights = pointLightBuffer;
+    view.spotLights = spotLightBuffer;
+    view.rectLights = rectLightBuffer;
     view.instanceRange = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
     view.materialRange = sizeof(Vapor::MaterialData) * MAX_INSTANCES;
     view.directionalLightRange = sizeof(DirectionalLightData) * maxDirectionalLights;
+    view.pointLightRange = sizeof(PointLightData) * maxPointLights;
+    view.spotLightRange = sizeof(Vapor::SpotLight) * maxSpotLights;
+    view.rectLightRange = 0;  // whole buffer, like the cluster cull's binding
     view.directionalLightCount = static_cast<Uint32>(directionalLights.size());
+    view.pointLightCount = static_cast<Uint32>(pointLights.size());
+    view.spotLightCount = static_cast<Uint32>(spotLights.size());
+    view.rectLightCount = static_cast<Uint32>(rectLights.size());
     view.mergedVertices = mergedVertexBuffer;
     view.mergedIndices = mergedIndexBuffer;
     view.materialTextureTable = bindlessMaterialTable;
@@ -3445,12 +3454,27 @@ void Renderer::pathTracePass() {
     // still camera by definition; a partially reprojected accumulation would be
     // a smeared render, not a faster one.
     pathTracer.accumulator().observeCamera(currentCamera);
-    // Coarse scene guard: the drawable and light counts catch the changes that
-    // visibly invalidate a render — a model swapped, an object spawned, a light
-    // added — without hashing the whole scene every frame.
-    const Uint64 sceneRevision = (static_cast<Uint64>(frameDrawables.size()) << 32) |
-                                 (static_cast<Uint64>(directionalLights.size()) << 16) |
-                                 static_cast<Uint64>(pointLights.size());
+    // Scene guard: the drawable count catches spawns/despawns coarsely, and
+    // the light pools are hashed by CONTENT — every light's position, color,
+    // intensity, cone and extent feeds the integrator directly, so nudging a
+    // light in the inspector restarts the render instead of accumulating a
+    // blend of before and after. A few KB of FNV per photo frame is nothing
+    // next to the dispatch it guards. (Moving a drawable's transform still
+    // isn't caught — that remains the panel's manual restart.)
+    Uint64 sceneRevision = 1469598103934665603ull;  // FNV-1a offset basis
+    auto fnv = [&sceneRevision](const void* data, size_t bytes) {
+        const unsigned char* p = static_cast<const unsigned char*>(data);
+        for (size_t i = 0; i < bytes; i++) {
+            sceneRevision ^= p[i];
+            sceneRevision *= 1099511628211ull;
+        }
+    };
+    const Uint64 drawableCount = frameDrawables.size();
+    fnv(&drawableCount, sizeof(drawableCount));
+    fnv(directionalLights.data(), directionalLights.size() * sizeof(DirectionalLightData));
+    fnv(pointLights.data(), pointLights.size() * sizeof(PointLightData));
+    fnv(spotLights.data(), spotLights.size() * sizeof(Vapor::SpotLight));
+    fnv(rectLights.data(), rectLights.size() * sizeof(Vapor::RectLight));
     pathTracer.accumulator().observeScene(sceneRevision);
 
     pathTracer.trace(buildPathTraceSceneView());
