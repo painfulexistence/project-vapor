@@ -36,6 +36,7 @@ The result is that I get the throughput benefits of agentic coding without cedin
 - GLTF scene loading
 - Tiled Forward rendering
 - Raytraced hard shadow (Metal only)
+- Path-traced photo mode — progressive, converging renders on a still camera (Metal only)
 
 #### Engine
 - ECS architecture (EnTT) with a working game demo

@@ -219,6 +219,25 @@ target_link_libraries(test_scene_blueprint PRIVATE
 target_compile_features(test_scene_blueprint PRIVATE cxx_std_20)
 target_compile_options(test_scene_blueprint PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Path tracer accumulation tests (pure logic, no GPU) ────────────────────
+# Links SDL3 for its integer typedefs only (rhi.hpp pulls SDL_stdinc.h); the
+# accumulator itself holds no device state.
+add_executable(test_path_tracer
+    path_tracer_test.cpp
+)
+target_include_directories(test_path_tracer PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+    ${CMAKE_SOURCE_DIR}/Vapor/include/Vapor
+)
+target_link_libraries(test_path_tracer PRIVATE
+    Catch2::Catch2WithMain
+    SDL3::SDL3
+    glm::glm
+    fmt::fmt
+)
+target_compile_features(test_path_tracer PRIVATE cxx_std_20)
+target_compile_options(test_path_tracer PRIVATE ${TEST_WARNING_FLAGS})
+
 vapor_copy_engine_assets(test_physics)
 vapor_copy_engine_assets(test_resource_manager)
 vapor_copy_engine_assets(test_asset_management)
@@ -234,6 +253,7 @@ catch_discover_tests(test_action_system   WORKING_DIRECTORY "$<TARGET_FILE_DIR:t
 catch_discover_tests(test_ecs_transform   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_ecs_transform>")
 catch_discover_tests(test_fsm_system      WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_fsm_system>")
 catch_discover_tests(test_camera          WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_camera>")
+catch_discover_tests(test_path_tracer     WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_path_tracer>")
 catch_discover_tests(test_physics         WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_physics>")
 catch_discover_tests(test_asset_management   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_asset_management>")
 catch_discover_tests(test_resource_manager   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_resource_manager>")

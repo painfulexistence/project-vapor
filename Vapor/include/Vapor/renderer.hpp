@@ -3,6 +3,7 @@
 #include "rhi.hpp"
 #include "render_data.hpp"
 #include "render_graph.hpp"
+#include "path_tracer.hpp"
 #include "camera.hpp"
 #include "graphics.hpp"
 #include "font_manager.hpp"
@@ -121,6 +122,25 @@ public:
 
     // Feature support of the active backend (raytracing, compute, ...).
     const RHICapabilities& getCapabilities() const { return capabilities; }
+
+    // ========================================================================
+    // Photo Mode (progressive path tracing)
+    // ========================================================================
+
+    // Swap the frame for a path-traced one: the same scene, integrated instead
+    // of rasterized, refining for as long as the camera holds still.
+    //
+    // Photo mode runs its OWN pass list (photoRenderGraph). The gameplay graph
+    // is left untouched, so custom passes appended through getRenderGraph()
+    // survive a round trip through photo mode. Requires backend ray tracing;
+    // the call is ignored (with a warning) otherwise.
+    void setPhotoModeEnabled(bool enabled);
+    bool isPhotoModeEnabled() const { return photoModeEnabled; }
+
+    // The integrator itself — sample counts, convergence, and the quality
+    // settings the photo-mode panel edits.
+    PathTracer& getPathTracer() { return pathTracer; }
+    const PathTracer& getPathTracer() const { return pathTracer; }
 
     // ========================================================================
     // Render Path Management
@@ -391,6 +411,14 @@ private:
 
     void performCulling();
     void setupDefaultRenderGraph();
+    void setupPhotoModeRenderGraph();
+    // Bloom -> flare -> post-process -> UI overlay. Shared verbatim by the game
+    // and photo-mode graphs: both hand a finished HDR colorRT to the same
+    // composite chain, so a photo looks like the game shot it.
+    void addCompositePasses(RenderGraph& graph);
+    // The graph this frame executes. getRenderGraph() always returns the
+    // gameplay graph, which is why photo mode can own a second one.
+    RenderGraph& activeRenderGraph() { return photoModeEnabled ? photoRenderGraph : renderGraph; }
     void drawGpuTimingsImGui();
     void drawCpuTimingsImGui();  // per-pass CPU (command-recording) time
     void drawRenderGraphImGui();
@@ -508,7 +536,30 @@ private:
     // ========================================================================
 
     RenderGraph renderGraph;
+    // Photo mode's own frame. Kept separate rather than rebuilt over the
+    // gameplay graph so entering and leaving photo mode cannot destroy passes
+    // gameplay code added through getRenderGraph().
+    RenderGraph photoRenderGraph;
     RHICapabilities capabilities;  // copied from the RHI at initialize()
+
+    // ========================================================================
+    // Photo Mode
+    // ========================================================================
+
+    PathTracer pathTracer;
+    bool photoModeEnabled = false;
+    // Screen-space AO and god rays are approximations of what the path tracer
+    // computes exactly, and PostProcess composites them unconditionally. Photo
+    // mode parks them on entry and restores whatever the game had on exit.
+    bool savedAOEnabled = false;
+    bool savedLightScatteringEnabled = false;
+    void pathTracePass();
+    void pathTraceResolvePass();
+    // Gathers this frame's scene resources into the integrator's input
+    // contract. Also forces the merged geometry / bindless material table to
+    // exist, since photo mode does not run the draw modes that build them.
+    PathTraceSceneView buildPathTraceSceneView();
+    void drawPhotoModeImGui();
 
     // ========================================================================
     // Full PBR shader contract (matches 3d_pbr_normal_mapped.metal)

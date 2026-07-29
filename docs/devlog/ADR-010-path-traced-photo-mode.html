@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ADR-010: Path-Traced Photo Mode — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+  <style>
+    .page-header { margin-bottom: 32px; }
+    .page-header h1 { font-size: 20px; }
+    h2 { font-size: 16px; margin: 36px 0 14px; }
+    h3 { font-size: 14px; margin: 24px 0 10px; }
+    p { margin-bottom: 14px; }
+    hr { margin: 36px 0; }
+    .pipeline { font-family: monospace; white-space: pre; line-height: 1.5; padding: 16px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="../documentation/index.html">Docs</a>
+      <a href="index.html" class="active">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <div class="eyebrow">
+      <a href="index.html">Devlog</a> / ADR-010</div>
+      <h1>ADR-010: Path-Traced Photo Mode</h1>
+      <div class="meta-row">
+        <span>2026-07-29</span>
+        <span><span class="badge badge-ok">Adopted</span></span>
+      </div>
+    </div>
+
+    <h2>Context</h2>
+    <p>Every ray-traced effect in the engine so far is a <em>correction applied to a rasterized frame</em>: the G-buffer decides what is visible, and rays answer one narrow question about it — is this point in shadow, how occluded is it, what does this mirror see. That is the right trade for a game frame, and pillar three of the vision says so explicitly.</p>
+    <p>It also means the engine has never produced a ground-truth image. There is nothing to compare the hybrid path against. When a scene looks wrong, the question "is the approximation wrong, or is the input wrong?" has no reference answer, only other approximations.</p>
+    <p>A path-traced photo mode answers that. The camera stops, the same scene is integrated properly, and the result converges. It is both a feature (players take screenshots) and an instrument (the hybrid frame now has a reference to be measured against).</p>
+
+    <h2>Decision</h2>
+    <p>Add a progressive path tracer that runs as an <strong>alternate frame</strong>, not an extra pass. Photo mode owns its own <code>RenderGraph</code>; the gameplay graph is never rebuilt or cleared, so passes gameplay code appended through <code>getRenderGraph()</code> survive a round trip through photo mode.</p>
+
+    <div class="pipeline">Game frame     PrePass -> LightCull -> RT shadow/AO/GI -> Main -> sky/fog -> │ composite tail │
+Photo frame    BuildAccelStructures -> PathTrace -> PathTraceResolve ->  │ composite tail │</div>
+
+    <p>The composite tail — bloom pyramid, flare, tonemap/post-process, UI overlay — is shared verbatim between the two graphs. That is why the resolve kernel writes <strong>linear HDR into <code>colorRT</code></strong> rather than presenting on its own: a photo then receives exactly the same grade and bloom the game does, and downstream passes need no idea which renderer produced the pixels.</p>
+
+    <h3>Reuse over reinvention</h3>
+    <p>The integrator allocates no scene data. It reads the TLAS, <code>InstanceData</code>, <code>MaterialData</code>, the merged vertex/index buffers and the bindless material texture table — all of which already exist for the raster and RT-reflection paths. Hit shading resolves normals, UVs and textures through the same <code>user_instance_id → materialID → argument table</code> chain <code>3d_raytrace_reflection.metal</code> uses, because Metal's triangle intersector exposes no built-in hit normal.</p>
+    <p>Those inputs arrive through one struct, <code>PathTraceSceneView</code>, filled by the renderer each photo frame. The path tracer never reaches back into <code>Renderer</code> for anything. That one-way contract is what keeps photo mode from leaving traces in the scene layer — and it is what will let a headless CLI renderer drive the same integrator with no swapchain and no game loop.</p>
+
+    <h3>The integrator</h3>
+    <p>A single compute megakernel. Metal has no raygen/miss/hit shader tables (see ADR-008), so there is nothing to gain from a wavefront architecture here, and a megakernel keeps the whole light transport readable in one file.</p>
+    <ul>
+      <li><strong>Camera rays</strong> generated from <code>invProj</code>/<code>invView</code> with sub-pixel jitter. That jitter <em>is</em> the antialiasing — no MSAA, no TAA, the pixel integrates its own area.</li>
+      <li><strong>Next-event estimation</strong> toward every directional light, cone-sampled over the sun's disk for a true penumbra. Directional lights are not geometry, so a BSDF-sampled ray can never hit one: no MIS weight is needed and none is applied.</li>
+      <li><strong>BSDF importance sampling</strong> with lobe selection between Lambert diffuse and GGX specular. The specular lobe uses visible-normal (VNDF) sampling, whose weight collapses to <code>F · G1(L)</code> — no distribution term, no pdf division.</li>
+      <li><strong>Russian roulette</strong> from the third bounce, scaling survivors by 1/p so the estimator stays unbiased.</li>
+    </ul>
+
+    <h3>Accumulation</h3>
+    <p>Radiance sums into a full-resolution <strong>RGBA32F</strong> target: rgb is a running sum, alpha counts samples. 16-bit was rejected outright — at a few thousand samples a half-float mantissa stops resolving the newest contribution and the image silently stops converging, which is the worst possible failure mode for a feature whose entire promise is "leave it running and it gets better."</p>
+    <p>The RNG stream is keyed on <strong>(pixel, absolute sample index) only — never on frame number</strong>. N accumulated samples of a fixed camera therefore produce the same image every run. Reproducibility is what makes a render comparable against a reference; without it the instrument is useless as an instrument.</p>
+
+    <h3>Invalidation</h3>
+    <p>The accumulation state machine (<code>PathTraceAccumulator</code>) is deliberately pure logic with no GPU state, because its rules are the part of path tracing that is easy to get subtly wrong and impossible to see in a screenshot. An accumulator that fails to reset blends two different images together; one that resets too eagerly never converges. Neither failure crashes. Both silently ruin the render. It is unit-tested (<code>test_path_tracer</code>) on the CPU, with no device.</p>
+    <p>Any camera change invalidates. A coarse scene revision (drawable and light counts) catches models swapped and objects spawned. A material edit that changes a colour without changing those counts is <em>not</em> caught — that is what the panel's manual restart is for, and it is a documented gap rather than a hidden one.</p>
+
+    <h2>Consequences</h2>
+    <ul>
+      <li><strong>Metal only.</strong> The Vulkan backend reports no ray tracing, so the graph's <code>RequiresRaytracing</code> flags skip every photo-mode pass automatically and <code>setPhotoModeEnabled</code> refuses with a log line. The same Metal-first pattern as the rest of the RT chain.</li>
+      <li><strong>CI cannot cover the image.</strong> <code>rhi_metal.cpp</code> forces <code>capabilities.raytracing = false</code> under <code>GITHUB_ACTIONS</code>, so only the CPU-side accumulation logic is testable there. Accepted: the alternative is no test at all.</li>
+      <li><strong><code>colorRT</code> gained <code>TextureUsage::Storage</code></strong> so the resolve kernel can write it directly. This costs nothing on either backend and avoids an extra blit target plus its fullscreen pipeline.</li>
+      <li><strong>Screen-space AO and god rays are parked on entry and restored on exit.</strong> <code>PostProcess</code> composites both unconditionally, and a stale AO buffer would multiply last raster frame's occlusion over an image that already computed occlusion exactly.</li>
+      <li><strong>Canvas batches are drained, not drawn.</strong> HUD sprites do not belong in a photograph, but gameplay keeps submitting them and only a flush resets the batch — so photo mode resets them explicitly. Without that the vertex buffers grow for as long as the mode is open.</li>
+      <li><strong>Dynamic geometry is invisible to it.</strong> Tessellated terrain, water and particles are not in the merged geometry or the BLAS set, so they do not appear in a photo. Accepted for a still-camera feature.</li>
+    </ul>
+
+    <h2>Known approximations</h2>
+    <p>Both are deliberate at this stage and both are stated in the kernel's header comment rather than left for a reader to discover:</p>
+    <ul>
+      <li>The environment cube is the <strong>prefiltered</strong> IBL map, not a sharp capture. If the sky's sun disk survives prefiltering it is counted a second time on top of the analytic sun NEE. The disk is smeared across a 128 cube's mip 0 and the analytic sun dominates by orders of magnitude, so the error is small — but it is an error, and a sharp environment capture removes it.</li>
+      <li><strong>Only directional lights are sampled by NEE.</strong> Point, spot and rect lights are invisible to photo mode until area-light sampling lands. Rect lights are the natural next step: they are already in the scene data and are a genuine area light to sample.</li>
+    </ul>
+
+    <h2>What this unlocks</h2>
+    <p>The integrator is decoupled from the swapchain and the game loop by construction. The obvious follow-ons, in the order they make sense:</p>
+    <ul>
+      <li>Depth of field — lens sampling at ray generation, which a path tracer gets essentially for free and a raster DoF pass can only approximate.</li>
+      <li>Area-light NEE with MIS, closing the gap above.</li>
+      <li>HDR readback (<code>copyTextureToBuffer</code> + EXR) so a render leaves the engine at full precision instead of through an 8-bit swapchain copy.</li>
+      <li>A headless render mode — <code>--render scene.json --spp 1024 --output out.exr</code> — driving the same <code>PathTracer</code> with no window at all.</li>
+    </ul>
+  </main>
+</body>
+</html>

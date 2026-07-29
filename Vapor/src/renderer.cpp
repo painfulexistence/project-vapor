@@ -482,6 +482,14 @@ void Renderer::initialize(std::unique_ptr<RHI> rhiPtr, GraphicsBackend backendTy
     // Create default resources
     createDefaultResources();
 
+    // Photo mode's integrator. Metal MSL like the rest of the RT chain, so it
+    // compiles only where ray tracing exists; elsewhere it stays unavailable
+    // and setPhotoModeEnabled refuses. Before createRenderTargets so the
+    // accumulator can be allocated in the same pass as every other target.
+    if (backend == GraphicsBackend::Metal && capabilities.raytracing) {
+        pathTracer.init(rhi.get());
+    }
+
     // Create render targets
     createRenderTargets();
 
@@ -675,6 +683,9 @@ void Renderer::shutdown() {
         // GPU may still be executing the last frame; ImGui backend shutdown
         // and resource destruction below require it to be finished.
         rhi->waitIdle();
+
+        // Photo mode's kernels and accumulator (no-op when it never loaded).
+        pathTracer.shutdown();
 
         // RmlUI renderer (RmlUi itself was already shut down by EngineCore).
         m_uiRenderer.reset();
@@ -1165,8 +1176,10 @@ void Renderer::render() {
     // Execute the frame's passes. Which passes run is decided by the graph:
     // disabled passes and passes whose capability requirements the backend
     // doesn't meet (PassFlags vs RHICapabilities) are skipped — no backend
-    // checks here.
-    renderGraph.execute(*this, capabilities);
+    // checks here. In photo mode this is the path-traced graph instead of the
+    // gameplay one; everything above (cull, sort, buffer upload) is identical,
+    // because the integrator reads exactly the same scene resources.
+    activeRenderGraph().execute(*this, capabilities);
 
     // Frame stats for the Engine window (read next frame, before the clear)
     lastFrameStats.totalDrawables = static_cast<Uint32>(frameDrawables.size());
@@ -1392,29 +1405,100 @@ void Renderer::setupDefaultRenderGraph() {
             r.rhi->endRenderPass();
         });
 
+    addCompositePasses(renderGraph);
+}
+
+// The tail every frame ends with, whatever produced colorRT: bloom pyramid,
+// flare, the fullscreen post-process to the swapchain, then the UI overlay.
+// Photo mode reuses it unchanged — a path-traced frame gets the same tonemap,
+// grade and bloom the game does, which is the whole reason its resolve writes
+// HDR into colorRT instead of presenting on its own.
+void Renderer::addCompositePasses(RenderGraph& graph) {
     // Pyramid bloom: brightness extract -> downsample chain -> tent-filter
     // upsample chain (accumulates into pyramid[0]); composited in PostProcess.
     // No-ops until the bloom pipelines/targets exist.
-    renderGraph.addPass("BloomBrightness",
+    graph.addPass("BloomBrightness",
         [](Renderer& r) { r.bloomBrightnessPass(); });
-    renderGraph.addPass("BloomDownsample",
+    graph.addPass("BloomDownsample",
         [](Renderer& r) { r.bloomDownsamplePass(); });
-    renderGraph.addPass("BloomUpsample",
+    graph.addPass("BloomUpsample",
         [](Renderer& r) { r.bloomUpsamplePass(); });
 
     // Sun/lens flare, additive over the HDR scene (off by default, like native).
-    renderGraph.addPass("SunFlare",
+    graph.addPass("SunFlare",
         [](Renderer& r) { r.sunFlarePass(); });
 
     // Fullscreen post-process to swapchain; no-op until a post-process
     // pipeline is created.
-    renderGraph.addPass("PostProcess",
+    graph.addPass("PostProcess",
         [](Renderer& r) { r.postProcessPass(); });
 
     // RmlUI overlay onto the swapchain (no-op until initUI() succeeds).
     // ImGui renders after the graph, in endFrame().
-    renderGraph.addPass("RmlUi",
+    graph.addPass("RmlUi",
         [](Renderer& r) { r.renderUI(); });
+}
+
+// Photo mode's frame. Four passes replace the entire raster pipeline: refit the
+// TLAS, integrate another batch of samples, resolve the accumulator into
+// colorRT, then the shared composite tail.
+//
+// There is no pre-pass, no G-buffer, no shadow map and no light cull here —
+// the integrator derives primary visibility, occlusion and lighting from the
+// same rays, which is exactly what makes the result converge to ground truth
+// instead of approximating it.
+void Renderer::setupPhotoModeRenderGraph() {
+    photoRenderGraph.clear();
+
+    photoRenderGraph.addPass("BuildAccelStructures",
+        [](Renderer& r) { r.buildAccelerationStructures(); }, PassFlags::RequiresRaytracing);
+    photoRenderGraph.addPass("PathTrace",
+        [](Renderer& r) { r.pathTracePass(); }, PassFlags::RequiresRaytracing);
+    photoRenderGraph.addPass("PathTraceResolve",
+        [](Renderer& r) { r.pathTraceResolvePass(); }, PassFlags::RequiresRaytracing);
+
+    // HUD sprites and world-space quads do not belong in a photograph, but the
+    // batches still have to be emptied: gameplay keeps submitting them every
+    // frame, and only a flush (or this) resets them. Without it the vertex
+    // buffers grow without bound for as long as photo mode is open.
+    photoRenderGraph.addPass("CanvasDiscard",
+        [](Renderer& r) {
+            r.batch2D.reset();
+            r.batch3D.reset();
+        });
+
+    addCompositePasses(photoRenderGraph);
+}
+
+void Renderer::setPhotoModeEnabled(bool enabled) {
+    if (enabled == photoModeEnabled) return;
+
+    if (enabled && !capabilities.raytracing) {
+        fmt::print(stderr, "Photo mode needs backend ray tracing — staying in the raster frame\n");
+        return;
+    }
+    if (enabled && !pathTracer.isAvailable()) {
+        fmt::print(stderr, "Photo mode unavailable: the path tracing kernels did not load\n");
+        return;
+    }
+
+    photoModeEnabled = enabled;
+
+    if (enabled) {
+        // PostProcess composites AO and god rays unconditionally, and in photo
+        // mode neither is written this frame — a stale AO buffer would multiply
+        // last raster frame's occlusion over a path-traced image that already
+        // computed occlusion correctly.
+        savedAOEnabled = aoEnabled;
+        savedLightScatteringEnabled = lightScatteringEnabled;
+        aoEnabled = false;
+        lightScatteringEnabled = false;
+        pathTracer.accumulator().invalidate();
+        setupPhotoModeRenderGraph();
+    } else {
+        aoEnabled = savedAOEnabled;
+        lightScatteringEnabled = savedLightScatteringEnabled;
+    }
 }
 
 void Renderer::endFrame() {
@@ -3286,6 +3370,67 @@ void Renderer::raytraceRefractionPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // refraction writes -> fragment reads in Main
+}
+
+// ============================================================================
+// Photo mode passes
+// ============================================================================
+
+// Gather the frame's scene resources into the path tracer's input contract.
+// Every handle here already exists for the raster or RT paths — photo mode
+// allocates no scene data of its own, which is what lets it be entered and left
+// without disturbing anything.
+PathTraceSceneView Renderer::buildPathTraceSceneView() {
+    // The integrator resolves hit normals, UVs and material textures out of the
+    // merged geometry and the bindless table, exactly like the RT reflection
+    // kernel. Photo mode runs none of the draw modes that build them, so ensure
+    // them here. Both self-gate on dirty, so this is near-free once warm.
+    ensureMergedGeometry();
+    ensureBindlessMaterialTable();
+
+    PathTraceSceneView view;
+    view.tlas = sceneTLAS;
+    view.camera = cameraUniformBuffer;
+    view.instances = instanceDataBuffer;
+    view.materials = materialUniformBuffer;
+    view.directionalLights = directionalLightBuffer;
+    view.instanceRange = sizeof(Vapor::InstanceData) * MAX_INSTANCES;
+    view.materialRange = sizeof(Vapor::MaterialData) * MAX_INSTANCES;
+    view.directionalLightRange = sizeof(DirectionalLightData) * maxDirectionalLights;
+    view.directionalLightCount = static_cast<Uint32>(directionalLights.size());
+    view.mergedVertices = mergedVertexBuffer;
+    view.mergedIndices = mergedIndexBuffer;
+    view.materialTextureTable = bindlessMaterialTable;
+    // Same IBL fallback the main pass uses: an unfilled prefilter cube would be
+    // sampled as garbage sky by every ray that escapes the scene.
+    view.environment = (m_iblReady && prefilterMap.isValid()) ? prefilterMap : defaultBlackCubemapTex;
+    return view;
+}
+
+void Renderer::pathTracePass() {
+    if (!pathTracer.isAvailable()) return;
+
+    // Any camera movement throws the accumulated image away. Photo mode is a
+    // still camera by definition; a partially reprojected accumulation would be
+    // a smeared render, not a faster one.
+    pathTracer.accumulator().observeCamera(currentCamera);
+    // Coarse scene guard: the drawable and light counts catch the changes that
+    // visibly invalidate a render — a model swapped, an object spawned, a light
+    // added — without hashing the whole scene every frame.
+    const Uint64 sceneRevision = (static_cast<Uint64>(frameDrawables.size()) << 32) |
+                                 (static_cast<Uint64>(directionalLights.size()) << 16) |
+                                 static_cast<Uint64>(pointLights.size());
+    pathTracer.accumulator().observeScene(sceneRevision);
+
+    pathTracer.trace(buildPathTraceSceneView());
+}
+
+void Renderer::pathTraceResolvePass() {
+    if (!pathTracer.isAvailable() || !colorRT.isValid()) return;
+    // Writes linear HDR into the scene colour target, so the shared composite
+    // tail (bloom, tonemap, grade) finishes the photo the same way it finishes
+    // a game frame.
+    pathTracer.resolve(colorRT);
 }
 
 // AO raygen into the noisy aoRawRT; the temporal + à-trous passes below
@@ -6189,6 +6334,9 @@ void Renderer::destroyRenderTargets() {
     kill(voxelGIAtrousRT[0]); kill(voxelGIAtrousRT[1]);
     voxelGIHistoryValid = false;
     kill(swapchainDepthBuffer);
+    // The accumulator is swapchain-sized; a resize discards the render in
+    // progress along with every other history buffer.
+    pathTracer.destroyTargets();
 
     // History/reprojection state is stale at the new resolution.
     aoHistoryValid = false;
@@ -6261,7 +6409,11 @@ void Renderer::createRenderTargets() {
         colorRT_MSAA = rhi->createTexture(desc);
 
         desc.sampleCount = 1;
-        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled;  // Sampled in post-process
+        // Storage on top of the usual RenderTarget|Sampled: photo mode's
+        // resolve kernel writes the finished path-traced image straight into
+        // this target, so the composite chain downstream needs no idea which
+        // renderer produced it.
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::Sampled | TextureUsage::Storage;
         colorRT = rhi->createTexture(desc);
         // Ping-pong twin for the fog pass (read colorRT -> write tempColorRT ->
         // swap, so downstream passes transparently see the fogged result).
@@ -6508,6 +6660,10 @@ void Renderer::createRenderTargets() {
         desc.sampleCount = 1;  // No MSAA for swapchain depth
         swapchainDepthBuffer = rhi->createTexture(desc);
     }
+
+    // Photo mode's full-res RGBA32F sample accumulator. No-op on backends
+    // where the integrator never initialized.
+    pathTracer.createTargets(width, height);
 
     // Verify all render targets were created successfully
     if (!colorRT_MSAA.isValid() || !colorRT.isValid() || !depthStencilRT_MSAA.isValid() ||
@@ -8206,6 +8362,7 @@ void Renderer::invokeImGuiCallback() {
 
     drawGraphicsImGui();
     drawPostProcessImGui();
+    drawPhotoModeImGui();
     drawRenderGraphImGui();
     drawGpuTimingsImGui();
     drawCpuTimingsImGui();
@@ -9093,6 +9250,78 @@ void Renderer::drawGraphicsImGui() {
     }
 }
 
+// The "Photo Mode" section of the Engine window: the mode toggle, live
+// convergence readout, and the sampling budget. Every quality control here
+// invalidates the accumulated image when changed — a render whose settings
+// shifted halfway through is a blend of two different images, not a better one.
+void Renderer::drawPhotoModeImGui() {
+    if (!ImGui::CollapsingHeader("Photo Mode")) {
+        return;
+    }
+
+    if (!capabilities.raytracing) {
+        ImGui::TextDisabled("Requires backend ray tracing (Metal today).");
+        return;
+    }
+    if (!pathTracer.isAvailable()) {
+        ImGui::TextDisabled("Path tracing kernels unavailable — see the log.");
+        return;
+    }
+
+    bool on = photoModeEnabled;
+    if (ImGui::Checkbox("Enabled##photo", &on)) {
+        setPhotoModeEnabled(on);
+    }
+    ImGui::TextDisabled("Replaces the raster frame with a progressive path trace.");
+
+    PathTraceSettings& s = pathTracer.settings;
+    const PathTraceAccumulator& acc = pathTracer.accumulator();
+
+    ImGui::Separator();
+    const Uint32 samples = acc.sampleCount();
+    ImGui::Text("Samples: %u / %u", samples, s.maxSamples);
+    ImGui::ProgressBar(s.maxSamples > 0 ? float(samples) / float(s.maxSamples) : 0.0f,
+                       ImVec2(-1.0f, 0.0f),
+                       acc.isConverged(s.maxSamples) ? "converged" : "accumulating");
+    if (ImGui::Button("Restart accumulation")) {
+        pathTracer.accumulator().invalidate();
+    }
+
+    ImGui::Separator();
+    // Changing any of these makes every accumulated sample stale.
+    bool dirty = false;
+    int maxBounces = int(s.maxBounces);
+    if (ImGui::SliderInt("Max bounces", &maxBounces, 0, 16)) {
+        s.maxBounces = Uint32(maxBounces);
+        dirty = true;
+    }
+    int spf = int(s.samplesPerFrame);
+    if (ImGui::SliderInt("Samples / frame", &spf, 1, 32)) {
+        s.samplesPerFrame = Uint32(std::max(1, spf));
+        dirty = true;
+    }
+    int maxSamples = int(s.maxSamples);
+    if (ImGui::DragInt("Sample budget", &maxSamples, 16.0f, 1, 65536)) {
+        s.maxSamples = Uint32(std::max(1, maxSamples));
+        // Raising the budget resumes an already-converged render; the samples
+        // already in the accumulator stay valid, so this alone is not dirty.
+    }
+    if (ImGui::SliderFloat("Sun angular radius", &s.sunAngularRadius, 0.0f, 0.1f, "%.4f rad")) {
+        dirty = true;
+    }
+    if (ImGui::SliderFloat("Environment intensity", &s.envIntensity, 0.0f, 5.0f)) {
+        dirty = true;
+    }
+    if (ImGui::SliderFloat("Firefly clamp", &s.fireflyClamp, 0.0f, 100.0f)) {
+        dirty = true;
+    }
+    ImGui::TextDisabled("Firefly clamp 0 = unbiased (and slower to look clean).");
+
+    if (dirty) {
+        pathTracer.accumulator().invalidate();
+    }
+}
+
 void Renderer::drawRenderGraphImGui() {
     if (!ImGui::CollapsingHeader("Render Passes"))
         return;
@@ -9100,9 +9329,14 @@ void Renderer::drawRenderGraphImGui() {
     ImGui::Text("Backend features: raytracing=%s, compute=%s",
                 capabilities.raytracing ? "yes" : "no",
                 capabilities.computeShaders ? "yes" : "no");
+    if (photoModeEnabled) {
+        ImGui::TextDisabled("Photo mode graph (the gameplay graph is untouched)");
+    }
     ImGui::Separator();
 
-    for (const auto& pass : renderGraph.getPasses()) {
+    // The graph actually executing this frame, so the toggles below drive what
+    // is on screen rather than a list nobody is running.
+    for (const auto& pass : activeRenderGraph().getPasses()) {
         if (!pass->isSupported(capabilities)) {
             ImGui::BeginDisabled();
             bool off = false;
