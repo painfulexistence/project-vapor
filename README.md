@@ -71,6 +71,12 @@ cmake --build --preset dev --target main -j4
 ./build/Vaporware/Debug/main --vulkan
 ```
 
+**Render a path-traced photo (Metal only)**
+```bash
+# Warm up the scene, freeze it, trace 1024 spp, write linear EXR + tonemapped PNG, exit
+./build/Vaporware/Debug/main --photo shot.exr --spp 1024 --bounces 6
+```
+
 ### Testing
 
 76 characterization tests across 5 binaries. These tests lock in the existing behavior of core engine systems — if a refactor silently breaks something, a test will fail.

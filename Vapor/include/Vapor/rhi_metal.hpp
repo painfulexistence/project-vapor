@@ -82,6 +82,7 @@ public:
     void captureFrame(const char* outPath) override;
 
     BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) override;
+    BufferHandle copyTextureToBuffer(TextureHandle src, Uint32& outWidth, Uint32& outHeight) override;
     void* mapBuffer(BufferHandle handle) override;
     void unmapBuffer(BufferHandle handle) override;
 

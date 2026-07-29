@@ -142,6 +142,15 @@ public:
     PathTracer& getPathTracer() { return pathTracer; }
     const PathTracer& getPathTracer() const { return pathTracer; }
 
+    // Capture the accumulated photo as linear HDR, at the accumulator's full
+    // 32-bit precision — this does NOT pass through bloom, tonemap, or the
+    // 8-bit swapchain. Asynchronous with the same fencing as screenshots: the
+    // blit rides this frame's command stream and the callback fires at the
+    // start of a later frame, after the GPU is known to be done. Returns false
+    // (and never calls back) when photo mode is off or nothing has accumulated.
+    using PhotoCaptureCallback = std::function<void(const PhotoHDRImage&)>;
+    bool capturePhotoHDRAsync(PhotoCaptureCallback callback);
+
     // ========================================================================
     // Render Path Management
     // ========================================================================
@@ -560,6 +569,21 @@ private:
     // exist, since photo mode does not run the draw modes that build them.
     PathTraceSceneView buildPathTraceSceneView();
     void drawPhotoModeImGui();
+    // HDR capture plumbing — the screenshot flow's structural twin, reading the
+    // RGBA32F accumulator instead of the 8-bit swapchain. Requested any time,
+    // blitted in endFrame while the command stream is live, resolved (divide by
+    // sample count) and delivered at the start of a later frame.
+    struct PendingPhotoCapture {
+        BufferHandle buffer;
+        Uint32 width = 0;
+        Uint32 height = 0;
+        Uint32 samplesPerPixel = 0;
+        PhotoCaptureCallback callback;
+    };
+    bool photoCaptureRequested = false;
+    PhotoCaptureCallback photoCaptureCallback;
+    std::vector<PendingPhotoCapture> pendingPhotoCaptures;
+    void processPendingPhotoCaptures();
 
     // ========================================================================
     // Full PBR shader contract (matches 3d_pbr_normal_mapped.metal)

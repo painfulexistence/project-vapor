@@ -585,6 +585,14 @@ public:
     // Returns a buffer handle that can be mapped after the copy completes
     virtual BufferHandle copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeight) = 0;
 
+    // Same contract for an arbitrary 2D texture (mip 0), at the texture's full
+    // precision — the swapchain copy is 8-bit by construction, this one is not.
+    // Photo mode reads its RGBA32F accumulator through here. Must be called
+    // while a frame's command stream is active (the blit rides it); map only
+    // after the GPU finishes (waitIdle or next-frame fence), like screenshots.
+    // Default no-op so backends without it still link.
+    virtual BufferHandle copyTextureToBuffer(TextureHandle /*src*/, Uint32& /*outWidth*/, Uint32& /*outHeight*/) { return {}; }
+
     // Map buffer memory for CPU read (returns nullptr on failure)
     virtual void* mapBuffer(BufferHandle handle) = 0;
     virtual void unmapBuffer(BufferHandle handle) = 0;

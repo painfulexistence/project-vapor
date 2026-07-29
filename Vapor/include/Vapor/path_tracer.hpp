@@ -57,6 +57,18 @@ struct PathTraceSceneView {
     }
 };
 
+// A finished photo, off the GPU: linear Rec.709 RGB, row 0 at the top, no
+// tonemap and no bloom — this is the accumulator's mean radiance, exactly what
+// an EXR should store. Consumers tonemap for previews (see image_io.hpp).
+struct PhotoHDRImage {
+    Uint32 width = 0;
+    Uint32 height = 0;
+    Uint32 samplesPerPixel = 0;  // how converged this image was at capture
+    std::vector<float> rgb;      // width * height * 3
+
+    bool isValid() const { return width > 0 && height > 0 && rgb.size() == size_t(width) * height * 3; }
+};
+
 struct PathTraceSettings {
     // Bounces AFTER the primary ray. 0 = direct lighting only (no indirect);
     // 4 already carries most of the visible interreflection in a closed room.
@@ -178,6 +190,11 @@ public:
     PathTraceAccumulator& accumulator() { return m_accumulator; }
     const PathTraceAccumulator& accumulator() const { return m_accumulator; }
     PathTraceSettings settings;
+
+    // The raw RGBA32F accumulator (rgb = radiance sum, a = sample count) — the
+    // HDR capture path reads this and divides on the CPU, so a photo leaves the
+    // engine at full precision, before bloom and tonemap ever touch it.
+    TextureHandle accumTexture() const { return m_accumTexture; }
 
     Uint32 width() const { return m_width; }
     Uint32 height() const { return m_height; }

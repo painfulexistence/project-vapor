@@ -219,15 +219,31 @@ target_link_libraries(test_scene_blueprint PRIVATE
 target_compile_features(test_scene_blueprint PRIVATE cxx_std_20)
 target_compile_options(test_scene_blueprint PRIVATE ${TEST_WARNING_FLAGS})
 
-# ── Path tracer accumulation tests (pure logic, no GPU) ────────────────────
-# Links SDL3 for its integer typedefs only (rhi.hpp pulls SDL_stdinc.h); the
-# accumulator itself holds no device state.
+# ── Path tracer tests (pure logic, no GPU) ─────────────────────────────────
+# Links SDL3 for its integer typedefs only (rhi.hpp pulls SDL_stdinc.h).
+# Three suites in one binary:
+#   - accumulation state machine (path_tracer_test.cpp)
+#   - integrator sampling math, transliterated from 3d_path_trace.metal and
+#     statistically tested for evaluator/sampler consistency + energy bounds
+#     (path_tracer_math_test.cpp)
+#   - EXR/PNG output round-trip via an independent parser (image_io_test.cpp;
+#     compiles image_io.cpp directly rather than linking the whole engine)
 add_executable(test_path_tracer
     path_tracer_test.cpp
+    path_tracer_math_test.cpp
+    image_io_test.cpp
+    stb_image_write_impl.cpp
+    ${CMAKE_SOURCE_DIR}/Vapor/src/image_io.cpp
 )
 target_include_directories(test_path_tracer PRIVATE
     ${CMAKE_SOURCE_DIR}/Vapor/include
     ${CMAKE_SOURCE_DIR}/Vapor/include/Vapor
+    ${CMAKE_SOURCE_DIR}/Vapor
+)
+# Vendored stb code trips -Wextra's missing-field-initializers; third-party
+# noise, not ours — silence it on that one TU so the suite stays warning-free.
+set_source_files_properties(stb_image_write_impl.cpp PROPERTIES
+    COMPILE_OPTIONS "-Wno-missing-field-initializers"
 )
 target_link_libraries(test_path_tracer PRIVATE
     Catch2::Catch2WithMain

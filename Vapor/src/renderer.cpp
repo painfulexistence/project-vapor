@@ -1042,6 +1042,7 @@ TextureId Renderer::registerTexture(const std::shared_ptr<Vapor::Image>& image) 
 void Renderer::beginFrame(const CameraRenderData& camera) {
     // Process any pending screenshots from previous frames
     processPendingScreenshots();
+    processPendingPhotoCaptures();
 
     // Rotate every frames-in-flight buffer slot BEFORE anything writes frame
     // data: all named aliases (cameraUniformBuffer, instanceDataBuffer, ...)
@@ -1582,6 +1583,28 @@ void Renderer::endFrame() {
 
         screenshotRequested = false;
         screenshotCallback = nullptr;
+    }
+
+    // Photo HDR capture request: blit the RGBA32F accumulator into a shared
+    // buffer on this frame's command stream (same timing rules as the
+    // screenshot above). The divide-by-sample-count happens on the CPU when the
+    // pending capture resolves — the accumulator itself is never modified.
+    if (photoCaptureRequested) {
+        if (pathTracer.accumTexture().isValid() && pathTracer.accumulator().hasImage()) {
+            Uint32 width = 0, height = 0;
+            BufferHandle captureBuffer = rhi->copyTextureToBuffer(pathTracer.accumTexture(), width, height);
+            if (captureBuffer.isValid()) {
+                PendingPhotoCapture pending;
+                pending.buffer = captureBuffer;
+                pending.width = width;
+                pending.height = height;
+                pending.samplesPerPixel = pathTracer.accumulator().sampleCount();
+                pending.callback = photoCaptureCallback;
+                pendingPhotoCaptures.push_back(std::move(pending));
+            }
+        }
+        photoCaptureRequested = false;
+        photoCaptureCallback = nullptr;
     }
 
     // End RHI frame (present drawable, commit command buffer)
@@ -8328,6 +8351,57 @@ void Renderer::processPendingScreenshots() {
         rhi->destroyBuffer(pending.buffer);
         it = pendingScreenshots.erase(it);
     }
+}
+
+// ============================================================================
+// Photo HDR Capture
+// ============================================================================
+
+bool Renderer::capturePhotoHDRAsync(PhotoCaptureCallback callback) {
+    if (!callback) return false;
+    // Nothing meaningful to capture: either photo mode never ran or the
+    // accumulator was invalidated and holds no samples. Refusing here (instead
+    // of delivering a black image later) lets the CLI distinguish "not ready"
+    // from "captured".
+    if (!photoModeEnabled || !pathTracer.accumulator().hasImage()) return false;
+    photoCaptureCallback = std::move(callback);
+    photoCaptureRequested = true;
+    return true;
+}
+
+void Renderer::processPendingPhotoCaptures() {
+    if (pendingPhotoCaptures.empty()) return;
+    rhi->waitIdle();  // same fencing as screenshots: blit must have retired
+
+    for (auto& pending : pendingPhotoCaptures) {
+        void* data = rhi->mapBuffer(pending.buffer);
+        if (data && pending.callback) {
+            PhotoHDRImage image;
+            image.width = pending.width;
+            image.height = pending.height;
+            image.samplesPerPixel = pending.samplesPerPixel;
+            image.rgb.resize(size_t(pending.width) * pending.height * 3);
+
+            // Accumulator texels are RGBA32F sums: rgb = radiance total,
+            // a = sample count for that pixel. The mean is the render.
+            const float* texels = static_cast<const float*>(data);
+            const size_t pixelCount = size_t(pending.width) * pending.height;
+            for (size_t i = 0; i < pixelCount; i++) {
+                const float* texel = texels + i * 4;
+                const float samples = texel[3];
+                const float inv = samples > 0.0f ? 1.0f / samples : 0.0f;
+                image.rgb[i * 3 + 0] = texel[0] * inv;
+                image.rgb[i * 3 + 1] = texel[1] * inv;
+                image.rgb[i * 3 + 2] = texel[2] * inv;
+            }
+            rhi->unmapBuffer(pending.buffer);
+            pending.callback(image);
+        } else if (data) {
+            rhi->unmapBuffer(pending.buffer);
+        }
+        rhi->destroyBuffer(pending.buffer);
+    }
+    pendingPhotoCaptures.clear();
 }
 
 // ============================================================================

@@ -88,12 +88,13 @@ Photo frame    BuildAccelStructures -> PathTrace -> PathTraceResolve ->  │ com
     </ul>
 
     <h2>What this unlocks</h2>
-    <p>The integrator is decoupled from the swapchain and the game loop by construction. The obvious follow-ons, in the order they make sense:</p>
+    <p>The integrator is decoupled from the swapchain and the game loop by construction. Status of the follow-ons:</p>
     <ul>
-      <li>Depth of field — lens sampling at ray generation, which a path tracer gets essentially for free and a raster DoF pass can only approximate.</li>
-      <li>Area-light NEE with MIS, closing the gap above.</li>
-      <li>HDR readback (<code>copyTextureToBuffer</code> + EXR) so a render leaves the engine at full precision instead of through an 8-bit swapchain copy.</li>
-      <li>A headless render mode — <code>--render scene.json --spp 1024 --output out.exr</code> — driving the same <code>PathTracer</code> with no window at all.</li>
+      <li><strong>Landed:</strong> HDR readback. <code>RHI::copyTextureToBuffer</code> blits the RGBA32F accumulator into a shared buffer with the same fencing as screenshots; the divide-by-sample-count happens on the CPU. A photo leaves the engine at full precision, before bloom and tonemap ever touch it.</li>
+      <li><strong>Landed:</strong> the render CLI. <code>main --photo out.exr --spp 1024 --bounces 6</code> warms the scene up (IBL capture, async loads), freezes the simulation, traces to the sample budget, writes a linear EXR plus a tonemapped PNG preview, and exits with a meaningful status code. The EXR writer is in-repo (single-part scanline FLOAT, no compression, ~100 lines against the format spec) and locked by a round-trip test with an independent parser — one emitted variant did not justify a 12k-line vendored dependency.</li>
+      <li><strong>Landed:</strong> CPU verification of the integrator math. The sampling functions are transliterated into <code>test_path_tracer</code> and tested statistically: the BSDF sampler's expected weight must match the numerically integrated reflectance (the property that keeps renders from silently coming out a constant factor too bright or dark), and a white surface must never reflect more energy than it receives, down to roughness 0.05. The transliteration must be kept in sync with the MSL by hand — the price of testing GPU math where no GPU exists.</li>
+      <li>Next: depth of field — lens sampling at ray generation, which a path tracer gets essentially for free and a raster DoF pass can only approximate.</li>
+      <li>Next: area-light NEE with MIS, closing the point/spot/rect gap above.</li>
     </ul>
   </main>
 </body>

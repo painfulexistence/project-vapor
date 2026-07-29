@@ -1131,6 +1131,62 @@ BufferHandle RHI_Metal::copySwapchainToBuffer(Uint32& outWidth, Uint32& outHeigh
     return BufferHandle{id};
 }
 
+// copySwapchainToBuffer's structural twin for an arbitrary texture, at the
+// texture's own pixel size (the swapchain copy hardcodes 4 bytes; an RGBA32F
+// accumulator is 16). Photo mode's HDR capture is the caller.
+BufferHandle RHI_Metal::copyTextureToBuffer(TextureHandle src, Uint32& outWidth, Uint32& outHeight) {
+    if (!currentCommandBuffer) {
+        fmt::print(stderr, "copyTextureToBuffer: no active frame to ride (call between beginFrame/endFrame)\n");
+        return BufferHandle{};
+    }
+    auto it = textures.find(src.id);
+    if (it == textures.end()) {
+        fmt::print(stderr, "copyTextureToBuffer: invalid texture handle\n");
+        return BufferHandle{};
+    }
+    const TextureResource& texRes = it->second;
+    MTL::Texture* texture = texRes.texture.get();
+    outWidth = texRes.width;
+    outHeight = texRes.height;
+
+    Uint32 bytesPerRow = outWidth * texRes.bytesPerPixel;
+    size_t bufferSize = size_t(bytesPerRow) * outHeight;
+
+    auto buffer = NS::TransferPtr(device->newBuffer(bufferSize, MTL::ResourceStorageModeShared));
+    if (!buffer) {
+        fmt::print(stderr, "copyTextureToBuffer: failed to create readback buffer\n");
+        return BufferHandle{};
+    }
+
+    // A command buffer may only have one active encoder at a time. End any
+    // render/compute encoder still open before creating the blit encoder,
+    // otherwise Metal raises a validation assertion (crash).
+    if (currentRenderEncoder) {
+        currentRenderEncoder->endEncoding();
+        currentRenderEncoder = nullptr;
+    }
+    if (currentComputeEncoder) {
+        currentComputeEncoder->endEncoding();
+        currentComputeEncoder = nullptr;
+    }
+
+    auto blitEncoder = currentCommandBuffer->blitCommandEncoder();
+    if (!blitEncoder) {
+        fmt::print(stderr, "copyTextureToBuffer: failed to create blit encoder\n");
+        return BufferHandle{};
+    }
+    blitEncoder->copyFromTexture(
+        texture, 0, 0,
+        MTL::Origin::Make(0, 0, 0),
+        MTL::Size::Make(outWidth, outHeight, 1),
+        buffer.get(), 0, bytesPerRow, bufferSize);
+    blitEncoder->endEncoding();
+
+    Uint32 id = nextBufferId++;
+    buffers[id] = {buffer, bufferSize, false, nullptr};
+    return BufferHandle{id};
+}
+
 void* RHI_Metal::mapBuffer(BufferHandle handle) {
     auto it = buffers.find(handle.id);
     if (it == buffers.end()) {

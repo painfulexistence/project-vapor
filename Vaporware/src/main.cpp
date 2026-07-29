@@ -7,6 +7,7 @@
 #include <glm/ext/matrix_transform.hpp>
 #include <glm/ext/vector_float3.hpp>
 #include <glm/trigonometric.hpp>
+#include <filesystem>
 #include <iostream>
 
 #include "Vapor/asset_manager.hpp"
@@ -17,6 +18,7 @@
 #include "Vapor/input_manager.hpp"
 #include "Vapor/mesh_builder.hpp"
 #include "Vapor/physics_3d.hpp"
+#include "Vapor/image_io.hpp"
 #include "Vapor/renderer.hpp"
 #include "Vapor/rmlui_manager.hpp"
 #include "Vapor/stats_log.hpp"
@@ -43,6 +45,7 @@
 #include "pages/settings_page.hpp"
 #include "pages/subtitle_page.hpp"
 #include "systems.hpp"
+#include <algorithm>
 #include <cmath>
 
 static void setupCustomDrawers(Vapor::SceneInspector& inspector) {
@@ -512,6 +515,16 @@ auto main(int argc, char* args[]) -> int {
     args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", { "vulkan" });
     args::Group debugGroup(parser, "Debug:");
     args::Flag statsFlag(debugGroup, "stats", "Enable per-frame telemetry log (stderr + vapor_stats.log)", { "stats" });
+    // Headless-ish photo render: run the scene, freeze it, path-trace to the
+    // sample budget, write the result, exit. "Headless-ish" because a Metal
+    // swapchain still needs a real window — it just drives itself and quits.
+    args::Group photoGroup(parser, "Photo:");
+    args::ValueFlag<std::string> photoOut(photoGroup, "path",
+        "Path-trace a photo to this .exr (plus a tonemapped .png), then exit. Metal only.", { "photo" });
+    args::ValueFlag<Uint32> photoSpp(photoGroup, "number", "Photo sample budget per pixel", { "spp" }, 512);
+    args::ValueFlag<Uint32> photoBounces(photoGroup, "number", "Photo max bounces", { "bounces" }, 4);
+    args::ValueFlag<Uint32> photoWarmup(photoGroup, "number",
+        "Frames to run before freezing for the photo (IBL capture, async loads)", { "photo-warmup" }, 60);
     args::Group helpGroup(parser, "Help:");
     args::HelpFlag help(helpGroup, "help", "Display help menu", { "help" });
     if (argc > 1) {
@@ -788,6 +801,15 @@ auto main(int argc, char* args[]) -> int {
     float time = SDL_GetTicks() / 1000.0f;
     bool quit = false;
 
+    // ── Photo render CLI state ──────────────────────────────────────────────
+    // Warmup: run the game normally so IBL capture, async scene loads and the
+    //   merged RT geometry all settle. Tracing: world frozen, accumulating.
+    // WaitingCapture: converged, HDR readback in flight. Done: files written.
+    enum class PhotoCLI { Off, Warmup, Tracing, WaitingCapture, Done };
+    PhotoCLI photoState = photoOut ? PhotoCLI::Warmup : PhotoCLI::Off;
+    int photoExitCode = 0;
+    float photoTraceStart = 0.0f;
+
     auto& inputManager = engineCore->getInputManager();
 
     while (!quit) {
@@ -913,6 +935,15 @@ auto main(int argc, char* args[]) -> int {
             intent.sprint = inputState.isPressed(Vapor::InputAction::Sprint);
         });
 
+        // While a photo is tracing, the world must hold still: every system in
+        // this block can move something — the camera, an auto-rotating prop,
+        // the sun — and any of that invalidates the accumulation every frame,
+        // so the render would never converge. Events and rendering keep
+        // running; only simulation freezes.
+        const bool photoFrozen = photoState == PhotoCLI::Tracing ||
+                                 photoState == PhotoCLI::WaitingCapture;
+        if (!photoFrozen) {
+
         // Gameplay updates
         CameraSwitchSystem::update(registry, global);
         Vapor::CameraControlSystem::update(registry, deltaTime);
@@ -962,6 +993,8 @@ auto main(int argc, char* args[]) -> int {
         FpsTextSystem::update(registry, deltaTime);
         Shape2DRenderSystem::update(registry, renderer.get());
         Text2DRenderSystem::update(registry, renderer.get(), fontCache);
+
+        }  // !photoFrozen
 
         // Rendering
         entt::entity activeCamEntity = Vapor::CameraControlSystem::getActiveCamera(registry);
@@ -1043,6 +1076,71 @@ auto main(int argc, char* args[]) -> int {
             renderer->endFrame();
         }
 
+        // ── Photo render CLI state machine ─────────────────────────────────
+        if (photoState != PhotoCLI::Off && photoState != PhotoCLI::Done) {
+            auto* rhiRenderer = dynamic_cast<Vapor::Renderer*>(renderer.get());
+            if (!rhiRenderer) {
+                fmt::print(stderr, "--photo requires the RHI renderer (not the native Metal renderer)\n");
+                photoExitCode = 2;
+                photoState = PhotoCLI::Done;
+                quit = true;
+            } else if (photoState == PhotoCLI::Warmup) {
+                if (frameCount >= photoWarmup.Get()) {
+                    auto& pt = rhiRenderer->getPathTracer();
+                    pt.settings.maxSamples = std::max(1u, photoSpp.Get());
+                    pt.settings.maxBounces = photoBounces.Get();
+                    rhiRenderer->setPhotoModeEnabled(true);
+                    if (!rhiRenderer->isPhotoModeEnabled()) {
+                        // setPhotoModeEnabled already logged why (no RT backend
+                        // or the kernels failed to load).
+                        photoExitCode = 2;
+                        photoState = PhotoCLI::Done;
+                        quit = true;
+                    } else {
+                        photoTraceStart = time;
+                        fmt::print("photo: tracing {} spp, {} bounces -> {}\n",
+                                   pt.settings.maxSamples, pt.settings.maxBounces, photoOut.Get());
+                        photoState = PhotoCLI::Tracing;
+                    }
+                }
+            } else if (photoState == PhotoCLI::Tracing) {
+                const auto& pt = rhiRenderer->getPathTracer();
+                if ((frameCount % 240) == 0) {
+                    fmt::print("photo: {} / {} spp\n", pt.accumulator().sampleCount(), pt.settings.maxSamples);
+                }
+                if (pt.accumulator().isConverged(pt.settings.maxSamples)) {
+                    const float traceSeconds = time - photoTraceStart;
+                    const bool requested = rhiRenderer->capturePhotoHDRAsync(
+                        [&photoExitCode, &photoState, &quit, &photoOut, traceSeconds](const Vapor::PhotoHDRImage& img) {
+                            const std::string exrPath = photoOut.Get();
+                            const std::string pngPath =
+                                std::filesystem::path(exrPath).replace_extension(".png").string();
+                            const bool exrOK = Vapor::writeEXR(exrPath, img.rgb.data(), img.width, img.height);
+                            const bool pngOK = Vapor::writeTonemappedPNG(pngPath, img.rgb.data(), img.width, img.height);
+                            if (exrOK && pngOK) {
+                                fmt::print("photo: {}x{}, {} spp in {:.1f}s\n  {}\n  {}\n",
+                                           img.width, img.height, img.samplesPerPixel, traceSeconds,
+                                           exrPath, pngPath);
+                                photoExitCode = 0;
+                            } else {
+                                fmt::print(stderr, "photo: write failed (exr: {}, png: {})\n", exrOK, pngOK);
+                                photoExitCode = 3;
+                            }
+                            photoState = PhotoCLI::Done;
+                            quit = true;
+                        });
+                    if (!requested) {
+                        fmt::print(stderr, "photo: capture request refused (no accumulated image?)\n");
+                        photoExitCode = 3;
+                        photoState = PhotoCLI::Done;
+                        quit = true;
+                    } else {
+                        photoState = PhotoCLI::WaitingCapture;
+                    }
+                }
+            }
+        }
+
         frameCount++;
     }
 
@@ -1056,5 +1154,5 @@ auto main(int argc, char* args[]) -> int {
     SDL_DestroyWindow(window);
     SDL_Quit();
 
-    return 0;
+    return photoExitCode;
 }
