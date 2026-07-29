@@ -71,10 +71,17 @@ static void trgShadeTerrain(float3 worldPos, float noiseFreq, int octaves, uint 
     float fp = max(max(abs(dfdx(worldPos.x)), abs(dfdy(worldPos.x))),
                    max(abs(dfdx(worldPos.z)), abs(dfdy(worldPos.z))));
     float d = clamp(fp, 1.0, 64.0);
-    float hl = trhHeightAt(worldPos.xz - float2(d, 0.0), noiseFreq, octaves, seed, heightScale);
-    float hr = trhHeightAt(worldPos.xz + float2(d, 0.0), noiseFreq, octaves, seed, heightScale);
-    float hb = trhHeightAt(worldPos.xz - float2(0.0, d), noiseFreq, octaves, seed, heightScale);
-    float ht = trhHeightAt(worldPos.xz + float2(0.0, d), noiseFreq, octaves, seed, heightScale);
+    // Drop octaves whose wavelength falls below the sampling footprint — they
+    // cannot contribute to a central difference at spacing d. Keep octave k
+    // while (1/freq)/2^k >= 4d; all four taps share the count so the normal
+    // stays consistent (GLSL twin: RHIMain.frag shadeTerrain). Distant pixels
+    // dominate the screen and drop from 9 octaves to 3-5 — this is the
+    // terrain fragment hot spot.
+    int effOctaves = clamp(int(floor(log2(1.0 / (noiseFreq * 4.0 * d)))) + 1, 3, octaves);
+    float hl = trhHeightAt(worldPos.xz - float2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
+    float hr = trhHeightAt(worldPos.xz + float2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
+    float hb = trhHeightAt(worldPos.xz - float2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
+    float ht = trhHeightAt(worldPos.xz + float2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
     float3 baseN = normalize(float3(hl - hr, 2.0 * d, hb - ht));
 
     float slope = length(baseN.xz) / max(baseN.y, 1e-3);  // rise/run

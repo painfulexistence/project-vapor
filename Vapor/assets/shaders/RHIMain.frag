@@ -734,10 +734,19 @@ void shadeTerrain(vec3 worldPos, MaterialData mat, float height01, out vec3 albe
     float fp = max(max(abs(dFdx(worldPos.x)), abs(dFdy(worldPos.x))),
                    max(abs(dFdx(worldPos.z)), abs(dFdy(worldPos.z))));
     float d = clamp(fp, 1.0, 64.0);
-    float hl = trHeightAt(worldPos.xz - vec2(d, 0.0), noiseFreq, octaves, seed, heightScale);
-    float hr = trHeightAt(worldPos.xz + vec2(d, 0.0), noiseFreq, octaves, seed, heightScale);
-    float hb = trHeightAt(worldPos.xz - vec2(0.0, d), noiseFreq, octaves, seed, heightScale);
-    float ht = trHeightAt(worldPos.xz + vec2(0.0, d), noiseFreq, octaves, seed, heightScale);
+    // Drop octaves whose wavelength falls below the sampling footprint: they
+    // cannot contribute to a central difference at spacing d (the fnl evals
+    // just cost). Octave k's wavelength is (1/freq)/2^k, so keep k while
+    // (1/freq)/2^k >= 4d. All four taps share the count, so the normal stays
+    // consistent; the count only shifts with distance — the same band-limiting
+    // a mipmapped heightmap gives. This is the main-pass fragment hot spot
+    // (4 taps x N simplex octaves per terrain pixel), and distant terrain
+    // dominates the screen, so the horizon drops from 9 octaves to 3-5.
+    int effOctaves = clamp(int(floor(log2(1.0 / (noiseFreq * 4.0 * d)))) + 1, 3, octaves);
+    float hl = trHeightAt(worldPos.xz - vec2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
+    float hr = trHeightAt(worldPos.xz + vec2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
+    float hb = trHeightAt(worldPos.xz - vec2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
+    float ht = trHeightAt(worldPos.xz + vec2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
     vec3 baseN = normalize(vec3(hl - hr, 2.0 * d, hb - ht));
 
     float slope = length(baseN.xz) / max(baseN.y, 1e-3);  // rise/run

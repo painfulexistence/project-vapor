@@ -4259,6 +4259,10 @@ void Renderer::shadowPass() {
     gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
     gpuData.blendRange = (shadowFar - rtEnd) * 0.05f;
 
+    // Per-cascade bounding spheres, kept for the caster culling below.
+    glm::vec3 cascadeCtr[3];
+    float cascadeRad[3] = { 0.0f, 0.0f, 0.0f };
+
     for (int ci = 0; ci < 3; ci++) {
         float splitNear = glm::clamp(splits[ci],     nearClip, shadowFar);
         float splitFar  = glm::clamp(splits[ci + 1], nearClip, shadowFar);
@@ -4309,6 +4313,8 @@ void Renderer::shadowPass() {
 
         glm::mat4 lightProj = glm::orthoZO(-sphereRadius, sphereRadius, -sphereRadius, sphereRadius, minDist, maxDist);
         gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
+        cascadeCtr[ci] = snapped;
+        cascadeRad[ci] = sphereRadius;
     }
 
     // Independent near-field shadow map for the [near, rtEnd] sub-frustum.
@@ -4322,6 +4328,8 @@ void Renderer::shadowPass() {
     gpuData.pcfSampleCount = pssmPcfSampleCount;
     gpuData.cascadeBlendRange = pssmCascadeBlendRange;
     gpuData.debugVisualize = pssmDebugVisualize ? 1u : 0u;
+    glm::vec3 nearCtr(0.0f);
+    float nearRad = 0.0f;  // bounding radius of the near-map slice (for culling)
     if (rtEnd > nearClip) {
         float nNDC = viewDepthToNDCz(glm::clamp(nearClip, nearClip, farClip));
         float fNDC = viewDepthToNDCz(glm::clamp(rtEnd,    nearClip, farClip));
@@ -4355,10 +4363,47 @@ void Renderer::shadowPass() {
         mn -= (mx - mn);
         gpuData.nearLightMatrix = glm::orthoZO(-extent * 0.5f, extent * 0.5f,
                                                -extent * 0.5f, extent * 0.5f, mn, mx) * lv;
+        nearCtr = ctrWorld;
+        nearRad = extent * 0.7072f;  // half-diagonal of the square light-space box
     }
 
     // Upload all cascade matrices once; the shadow VS indexes by cascadeIndex.
     rhi->updateBuffer(pssmDataBuffer, &gpuData, 0, sizeof(gpuData));
+
+    // Shadow-caster set, with world bounding spheres for the per-map culling
+    // below. A directional caster shadows a map iff its sphere, swept along the
+    // light direction, touches the map's bounding sphere — i.e. the caster lies
+    // inside the infinite light-axis CYLINDER around the map's centre (remove
+    // the along-light component of the offset, compare the rest against the
+    // radius sum). Without this every cascade + the near map re-recorded EVERY
+    // drawable: 4 passes x the whole 10 km tile grid + scatter, thousands of
+    // per-draw bind/draw pairs a frame — the "CPU shadow > 10 ms" cost on
+    // MoltenVK (whose per-command overhead is far above native). Cascade 0/1
+    // cover tens-to-hundreds of metres, so almost everything culls.
+    struct ShadowCaster {
+        glm::vec3 center;
+        float radius;
+        Uint32 drawableIdx;
+        Uint32 iid;
+    };
+    static std::vector<ShadowCaster> shadowCasters;  // scratch, reused per frame
+    shadowCasters.clear();
+    shadowCasters.reserve(frameDrawables.size());
+    for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        if (!drawable.castShadow) continue;
+        auto it = drawableToInstanceID.find(drawableIdx);
+        if (it == drawableToInstanceID.end()) continue;
+        shadowCasters.push_back({ (drawable.aabbMin + drawable.aabbMax) * 0.5f,
+                                  glm::length(drawable.aabbMax - drawable.aabbMin) * 0.5f,
+                                  drawableIdx, it->second });
+    }
+    const auto casterTouches = [&](const ShadowCaster& c, const glm::vec3& ctr, float rad) {
+        glm::vec3 off = c.center - ctr;
+        off -= lightDir * glm::dot(off, lightDir);
+        const float r = rad + c.radius;
+        return glm::dot(off, off) <= r * r;
+    };
 
     // Render scene depth into each cascade layer (depth only).
     for (Uint32 ci = 0; ci < 3; ci++) {
@@ -4394,17 +4439,14 @@ void Renderer::shadowPass() {
         if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
             rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
 
-        // ALL drawables, not the camera-visible set: casters outside the view
-        // frustum must still render into the cascades or their shadows vanish
-        // when they leave the screen. (updateBuffers uploads instance data for
-        // every drawable — culled ones follow the visible prefix.)
-        for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
-            const Drawable& drawable = frameDrawables[drawableIdx];
-            if (!drawable.castShadow) continue;
+        // Casters from the whole submitted set, NOT the camera-visible one
+        // (casters outside the view frustum must still render into the
+        // cascades or their shadows vanish when they leave the screen) —
+        // culled per cascade by the light-axis cylinder test above.
+        for (const ShadowCaster& caster : shadowCasters) {
+            if (!casterTouches(caster, cascadeCtr[ci], cascadeRad[ci])) continue;
+            const Drawable& drawable = frameDrawables[caster.drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
-            auto it = drawableToInstanceID.find(drawableIdx);
-            if (it == drawableToInstanceID.end()) continue;
-            Uint32 iid = it->second;
             // Alpha-cutout casters (MASK) bind their albedo for the fragment
             // discard — Metal via 3d_pssm_shadow_depth, Vulkan via
             // ShadowDepth.frag. Opaque casters need no texture (pure depth).
@@ -4413,7 +4455,7 @@ void Renderer::shadowPass() {
                 bindMaterialAlbedo(drawable.material);
             }
             if (!shadowPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
-            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
+            rhi->setVertexBytes(&caster.iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
                 rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
@@ -4451,19 +4493,19 @@ void Renderer::shadowPass() {
         if (nearPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
         if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
             rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
-        for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
-            const Drawable& drawable = frameDrawables[drawableIdx];
-            if (!drawable.castShadow) continue;
+        // Same cylinder culling as the cascades, against the near slice's
+        // bounding sphere — this map covers tens of metres, so nearly the
+        // whole caster set drops out.
+        for (const ShadowCaster& caster : shadowCasters) {
+            if (!casterTouches(caster, nearCtr, nearRad)) continue;
+            const Drawable& drawable = frameDrawables[caster.drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
-            auto it = drawableToInstanceID.find(drawableIdx);
-            if (it == drawableToInstanceID.end()) continue;
-            Uint32 iid = it->second;
             if (drawable.material < materials.size() &&
                 materials[drawable.material].alphaMode == AlphaMode::MASK) {
                 bindMaterialAlbedo(drawable.material);  // albedo for the alpha-cutout
             }
             if (!nearPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
-            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
+            rhi->setVertexBytes(&caster.iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
                 rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
