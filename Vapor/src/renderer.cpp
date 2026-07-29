@@ -2807,6 +2807,20 @@ void Renderer::prePass() {
     rp.clearDepth = 1.0f;
     rhi->beginRenderPass(rp);
 
+    // Wireframe must match the main pass here too: the pre-pass writes the depth
+    // the SkyAtmosphere pass tests against, so a FILLED pre-pass would stamp
+    // solid depth over every terrain pixel — the sky then can't paint the
+    // triangle interiors, and they keep the colorRT clear colour (the cyan the
+    // wireframe view showed between the lines). Drawing the pre-pass in Line
+    // mode too leaves depth only along the edges, so the sky fills the gaps and
+    // the wireframe reads as lines over the real background. Dynamic-polygon-
+    // mode backends only (Metal always; Vulkan with eds3) — the baked Line twin
+    // fallback has no pre-pass variant, but it also can't reach the GPU-driven
+    // pre-pass paths, so this is the whole story on those devices.
+    if (capabilities.dynamicPolygonMode) {
+        rhi->setFillMode(wireframe ? PolygonMode::Line : PolygonMode::Fill);
+    }
+
     // Meshlet Option A: GPU-driven depth+normal pre-pass via the SAME task+mesh
     // shaders the main meshlet pass uses, so the pre-pass depth matches exactly
     // what the main pass draws (its task-stage per-cluster cull decides
