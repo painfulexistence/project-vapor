@@ -74,7 +74,18 @@ static float fnlSimplex2(int seed, float2 p) {
 // GetNoise: TransformNoiseCoordinate (frequency + F2 skew) -> GenFractalFBm
 // (lacunarity 2, gain 0.5, weightedStrength 0), then the heightFn mapping
 // noise * 0.5 + 0.5 clamped to [0,1] and scaled — matching heightAt exactly.
-inline float trhHeightAt(float2 xz, float noiseFreq, int octaves, uint seed, float heightScale) {
+// `lodOctaves` is a CONTINUOUS octave count for band-limited sampling: the
+// summation stops early and fades the final octave in fractionally. Pass
+// float(octaves) for full fidelity (identical to the CPU heightAt). Two rules
+// keep the LOD from being visible:
+//   - fractalBounding is derived from the FULL `octaves`, never from the LOD
+//     count. Normalizing by the truncated sum instead rescales EVERY octave
+//     (1/1.75 vs 1/1.996 for 3 vs 9), so the whole height field jumped ~14%
+//     wherever the count changed — hard concentric rings of wrong shading.
+//   - the final octave is weighted by the fractional part, so an octave fades
+//     out continuously instead of popping when floor() ticks over.
+inline float trhHeightAt(float2 xz, float noiseFreq, int octaves, float lodOctaves,
+                         uint seed, float heightScale) {
     float2 p = xz * noiseFreq;
     const float SQRT3 = 1.7320508075688772935;
     const float F2 = 0.5 * (SQRT3 - 1.0);
@@ -84,9 +95,11 @@ inline float trhHeightAt(float2 xz, float noiseFreq, int octaves, uint seed, flo
     for (int i = 1; i < octaves; ++i) { ampFractal += amp; amp *= gain; }
     int s = int(seed);
     float sum = 0.0;
-    amp = 1.0 / ampFractal;  // fractalBounding
-    for (int i = 0; i < octaves; ++i) {
-        sum += fnlSimplex2(s++, p) * amp;
+    amp = 1.0 / ampFractal;  // fractalBounding — full-count, LOD-independent
+    int n = int(ceil(lodOctaves));
+    float lastW = 1.0 - (float(n) - lodOctaves);
+    for (int i = 0; i < n; ++i) {
+        sum += fnlSimplex2(s++, p) * amp * ((i == n - 1) ? lastW : 1.0);
         p *= 2.0;
         amp *= gain;
     }

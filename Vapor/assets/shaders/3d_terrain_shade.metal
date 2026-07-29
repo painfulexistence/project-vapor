@@ -71,17 +71,21 @@ static void trgShadeTerrain(float3 worldPos, float noiseFreq, int octaves, uint 
     float fp = max(max(abs(dfdx(worldPos.x)), abs(dfdy(worldPos.x))),
                    max(abs(dfdx(worldPos.z)), abs(dfdy(worldPos.z))));
     float d = clamp(fp, 1.0, 64.0);
-    // Drop octaves whose wavelength falls below the sampling footprint — they
-    // cannot contribute to a central difference at spacing d. Keep octave k
-    // while (1/freq)/2^k >= 4d; all four taps share the count so the normal
-    // stays consistent (GLSL twin: RHIMain.frag shadeTerrain). Distant pixels
-    // dominate the screen and drop from 9 octaves to 3-5 — this is the
-    // terrain fragment hot spot.
-    int effOctaves = clamp(int(floor(log2(1.0 / (noiseFreq * 4.0 * d)))) + 1, 3, octaves);
-    float hl = trhHeightAt(worldPos.xz - float2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
-    float hr = trhHeightAt(worldPos.xz + float2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
-    float hb = trhHeightAt(worldPos.xz - float2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
-    float ht = trhHeightAt(worldPos.xz + float2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
+    // Band-limit the height field to the pixel's footprint: an octave whose
+    // wavelength is under 4d aliases in a central difference at spacing d
+    // (the two taps are 2d apart, so 4d is the Nyquist wavelength) — it
+    // contributes shimmer, not detail, and it is the terrain fragment's main
+    // cost (4 taps x N simplex evals). Distant pixels, which dominate the
+    // screen, fall to 3-5 octaves instead of 9. CONTINUOUS count: trhHeightAt
+    // fades the final octave by the fractional part, and normalizes by the
+    // full octave count, so the surface has no visible LOD rings. All four
+    // taps share it, keeping the reconstructed normal consistent.
+    // (GLSL twin: RHIMain.frag shadeTerrain.)
+    float lodOct = clamp(log2(1.0 / (noiseFreq * 4.0 * d)) + 1.0, 3.0, float(octaves));
+    float hl = trhHeightAt(worldPos.xz - float2(d, 0.0), noiseFreq, octaves, lodOct, seed, heightScale);
+    float hr = trhHeightAt(worldPos.xz + float2(d, 0.0), noiseFreq, octaves, lodOct, seed, heightScale);
+    float hb = trhHeightAt(worldPos.xz - float2(0.0, d), noiseFreq, octaves, lodOct, seed, heightScale);
+    float ht = trhHeightAt(worldPos.xz + float2(0.0, d), noiseFreq, octaves, lodOct, seed, heightScale);
     float3 baseN = normalize(float3(hl - hr, 2.0 * d, hb - ht));
 
     float slope = length(baseN.xz) / max(baseN.y, 1e-3);  // rise/run

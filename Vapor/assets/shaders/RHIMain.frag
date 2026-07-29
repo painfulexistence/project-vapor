@@ -697,7 +697,18 @@ float fnlSimplex2(int seed, vec2 p) {
 // GetNoise: TransformNoiseCoordinate (frequency + F2 skew) -> GenFractalFBm
 // (lacunarity 2, gain 0.5, weightedStrength 0), then the heightFn mapping
 // noise * 0.5 + 0.5 clamped to [0,1] and scaled — matching heightAt exactly.
-float trHeightAt(vec2 xz, float noiseFreq, int octaves, uint seed, float heightScale) {
+// `lodOctaves` is a CONTINUOUS octave count for band-limited sampling: the
+// summation stops early and fades the final octave in fractionally. Pass
+// float(octaves) for full fidelity (identical to the CPU heightAt). Two rules
+// keep the LOD from being visible:
+//   - fractalBounding is derived from the FULL `octaves`, never from the LOD
+//     count. Normalizing by the truncated sum instead rescales EVERY octave
+//     (1/1.75 vs 1/1.996 for 3 vs 9), so the whole height field jumped ~14%
+//     wherever the count changed — hard concentric rings of wrong shading.
+//   - the final octave is weighted by the fractional part, so an octave fades
+//     out continuously instead of popping when floor() ticks over.
+float trHeightAt(vec2 xz, float noiseFreq, int octaves, float lodOctaves,
+                 uint seed, float heightScale) {
     vec2 p = xz * noiseFreq;
     const float SQRT3 = 1.7320508075688772935;
     const float F2 = 0.5 * (SQRT3 - 1.0);
@@ -707,9 +718,11 @@ float trHeightAt(vec2 xz, float noiseFreq, int octaves, uint seed, float heightS
     for (int i = 1; i < octaves; ++i) { ampFractal += amp; amp *= gain; }
     int s = int(seed);
     float sum = 0.0;
-    amp = 1.0 / ampFractal;  // fractalBounding
-    for (int i = 0; i < octaves; ++i) {
-        sum += fnlSimplex2(s++, p) * amp;
+    amp = 1.0 / ampFractal;  // fractalBounding — full-count, LOD-independent
+    int n = int(ceil(lodOctaves));
+    float lastW = 1.0 - (float(n) - lodOctaves);
+    for (int i = 0; i < n; ++i) {
+        sum += fnlSimplex2(s++, p) * amp * ((i == n - 1) ? lastW : 1.0);
         p *= 2.0;
         amp *= gain;
     }
@@ -734,19 +747,21 @@ void shadeTerrain(vec3 worldPos, MaterialData mat, float height01, out vec3 albe
     float fp = max(max(abs(dFdx(worldPos.x)), abs(dFdy(worldPos.x))),
                    max(abs(dFdx(worldPos.z)), abs(dFdy(worldPos.z))));
     float d = clamp(fp, 1.0, 64.0);
-    // Drop octaves whose wavelength falls below the sampling footprint: they
-    // cannot contribute to a central difference at spacing d (the fnl evals
-    // just cost). Octave k's wavelength is (1/freq)/2^k, so keep k while
-    // (1/freq)/2^k >= 4d. All four taps share the count, so the normal stays
-    // consistent; the count only shifts with distance — the same band-limiting
-    // a mipmapped heightmap gives. This is the main-pass fragment hot spot
-    // (4 taps x N simplex octaves per terrain pixel), and distant terrain
-    // dominates the screen, so the horizon drops from 9 octaves to 3-5.
-    int effOctaves = clamp(int(floor(log2(1.0 / (noiseFreq * 4.0 * d)))) + 1, 3, octaves);
-    float hl = trHeightAt(worldPos.xz - vec2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
-    float hr = trHeightAt(worldPos.xz + vec2(d, 0.0), noiseFreq, effOctaves, seed, heightScale);
-    float hb = trHeightAt(worldPos.xz - vec2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
-    float ht = trHeightAt(worldPos.xz + vec2(0.0, d), noiseFreq, effOctaves, seed, heightScale);
+    // Band-limit the height field to the pixel's footprint: an octave whose
+    // wavelength is under 4d aliases in a central difference at spacing d
+    // (the two taps are 2d apart, so 4d is the Nyquist wavelength) — it
+    // contributes shimmer, not detail, and it is the terrain fragment's main
+    // cost (4 taps x N simplex evals). Distant pixels, which dominate the
+    // screen, fall to 3-5 octaves instead of 9. CONTINUOUS count: trHeightAt
+    // fades the final octave by the fractional part, and normalizes by the
+    // full octave count, so the surface has no visible LOD rings. All four
+    // taps share it, keeping the reconstructed normal consistent.
+    // (MSL twin: 3d_terrain_shade.metal trgShadeTerrain.)
+    float lodOct = clamp(log2(1.0 / (noiseFreq * 4.0 * d)) + 1.0, 3.0, float(octaves));
+    float hl = trHeightAt(worldPos.xz - vec2(d, 0.0), noiseFreq, octaves, lodOct, seed, heightScale);
+    float hr = trHeightAt(worldPos.xz + vec2(d, 0.0), noiseFreq, octaves, lodOct, seed, heightScale);
+    float hb = trHeightAt(worldPos.xz - vec2(0.0, d), noiseFreq, octaves, lodOct, seed, heightScale);
+    float ht = trHeightAt(worldPos.xz + vec2(0.0, d), noiseFreq, octaves, lodOct, seed, heightScale);
     vec3 baseN = normalize(vec3(hl - hr, 2.0 * d, hb - ht));
 
     float slope = length(baseN.xz) / max(baseN.y, 1e-3);  // rise/run

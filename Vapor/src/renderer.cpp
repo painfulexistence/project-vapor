@@ -4314,7 +4314,12 @@ void Renderer::shadowPass() {
         glm::mat4 lightProj = glm::orthoZO(-sphereRadius, sphereRadius, -sphereRadius, sphereRadius, minDist, maxDist);
         gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
         cascadeCtr[ci] = snapped;
-        cascadeRad[ci] = sphereRadius;
+        // The ortho above is a SQUARE of half-edge sphereRadius, not the
+        // inscribed sphere, so the caster cull must bound the square: its
+        // half-diagonal. Using sphereRadius dropped casters in the corner
+        // region that do project into the map — shadows went missing (and
+        // popped at cascade boundaries, where the next cascade still had them).
+        cascadeRad[ci] = sphereRadius * 1.41421356f;
     }
 
     // Independent near-field shadow map for the [near, rtEnd] sub-frustum.

@@ -248,7 +248,11 @@ inline float tessDisplaceAmount(float3 p, float scale) {
 
 // Height (metres, = world y) of the terrain field under object-space p.
 inline float tessTerrainHeight(float3 p, constant TessParams& params) {
+    // Full fidelity (lodOctaves == octaves): the tessellated surface IS the
+    // geometry, so it must match the CPU height field exactly — the fragment
+    // stage's footprint-based octave LOD does not apply here.
     return trhHeightAt(p.xz, params.terrainFrequency, int(params.terrainOctaves),
+                       float(params.terrainOctaves),
                        params.terrainSeed, params.displacementScale);
 }
 
