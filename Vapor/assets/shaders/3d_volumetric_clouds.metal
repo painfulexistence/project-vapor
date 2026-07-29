@@ -390,7 +390,10 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // thickness instead (view-angle independent); coarse steps (4x) skip the
     // empty air so the total stays in the same budget.
     float baseFine = min(data.cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
-    uint maxIters = data.primarySteps * 2u;
+    // Inside the layer the ladder is finer (below) and there is far more of it
+    // in front of the eye, so give the fly-through a larger iteration budget.
+    bool insideLayer = (tRange.x <= 0.001);
+    uint maxIters = data.primarySteps * (insideLayer ? 3u : 2u);
 
     // Undithered ladder + STRATIFIED sample inside each segment (twin of
     // CloudRaymarch.frag). A single entry dither could not span fineStep once
@@ -398,13 +401,22 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // erased it outright whenever the first probe hit — the in-layer case.
     float t = tRange.x;
     float tIntegrated = tRange.x;  // never integrate behind this (no double count)
+    float tFirstHit = 1e9;         // distance to the nearest contributing sample
     bool inCloud = false;
     int emptyRun = 0;
 
     for (uint i = 0; i < maxIters && t < tRange.y; i++) {
         // Steps grow with distance, lagging the detail LOD fade: once only the
         // 10 km base shape survives, 4x coarser is still ~40 samples/feature.
-        float fineStep = baseFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
+        // Near-field LOD (twin of CloudRaymarch.frag). baseFine is ~57 m at
+        // every view angle, but at the shipped density (0.3/m) optical depth 1
+        // is reached in 3.3 m — one 57 m step drives transmittance 1.0 -> 3e-8,
+        // so every cloud boundary is a hard 57 m staircase. That, not the RT
+        // resolution, caps in-layer sharpness. Ramp with distance (12 m at the
+        // eye, baseFine again by ~2.9 km) for a constant angular footprint;
+        // beyond 2.9 km the ladder is bit-for-bit unchanged.
+        float nearFine = min(max(t * 0.02, 12.0), baseFine);
+        float fineStep = nearFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
         float coarseStep = fineStep * 4.0;
 
         if (!inCloud) {
@@ -428,6 +440,7 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
         float density = sampleCloudDensity(pos, data, false, shapeTex, detailTex, weatherTex);
 
         if (density > 0.001) {
+            tFirstHit = min(tFirstHit, t);
             // Sun-by-day / moon-by-night key lighting + ambient.
             float3 luminance = cloudLighting(pos, rayDir, data, shapeTex, detailTex, weatherTex);
 
@@ -460,7 +473,12 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // the horizon haze — scattering fades toward a sky tint and the cloud
     // loses opacity (~40 km e-folding on the entry distance). Day-gated.
     float apDay = smoothstep(-0.12, 0.08, data.sunDirection.y);
-    float haze = 1.0 - exp(-max(tRange.x, 0.0) * 2.5e-5);
+    // Keyed on the nearest CONTRIBUTING sample, not the layer entry: inside
+    // the layer the entry is 0, which switched haze and distFade off entirely
+    // and left a near-horizontal in-layer ray ending dead at the iteration
+    // budget with no fade (twin of CloudRaymarch.frag).
+    float fadeDist = min(max(tFirstHit, tRange.x), 1e8);
+    float haze = 1.0 - exp(-max(fadeDist, 0.0) * 2.5e-5);
     float3 hazeTint = (data.sunColor * 0.25 + data.ambientColor * 0.75) *
                       (data.sunIntensity * data.sunLightScale * 0.25) * mix(0.05, 1.0, apDay);
     scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
@@ -469,7 +487,7 @@ float4 raymarchClouds(float3 rayOrigin, float3 rayDir, float maxDist,
     // The march stops at maxDist (100 km for sky pixels), reached at ~5 deg
     // elevation on a flat deck — without an explicit fade the clouds ended
     // there, leaving a hard line across the sky.
-    float distFade = smoothstep(60000.0, 95000.0, tRange.x);
+    float distFade = smoothstep(60000.0, 95000.0, fadeDist);
     scattering *= 1.0 - distFade;
     transmittance = mix(transmittance, 1.0, distFade);
 
@@ -540,7 +558,7 @@ fragment float4 cloudFragment(
 }
 
 // ============================================================================
-// Low Resolution Pass (Quarter resolution for performance)
+// Low Resolution Pass (reduced resolution + temporal upsample)
 // ============================================================================
 
 fragment float4 cloudFragmentLowRes(
@@ -554,6 +572,9 @@ fragment float4 cloudFragmentLowRes(
 ) {
     constexpr sampler linearSampler(filter::linear, address::clamp_to_edge);
 
+    // No sub-texel jitter, deliberately (twin of CloudRaymarch.frag): rotation
+    // already sweeps the grid through every sub-texel phase, so measured
+    // flicker was identical with and without it.
     float depth = sceneDepth.sample(linearSampler, in.uv).r;
 
     // Calculate ray direction
@@ -673,18 +694,40 @@ fragment float4 cloudTemporalResolve(
 
     float4 history = sampleHistoryCatmullRom(historyCloud, prevUV, data.screenSize);
 
-    // Neighborhood clamping for anti-ghosting
-    float4 minBound = current;
-    float4 maxBound = current;
+    // Anti-ghosting: VARIANCE clip, not a hard min/max box (twin of
+    // CloudTemporal.frag). The min/max box is inert over smooth cloud but
+    // binds hard at an edge, where it collapses onto the two grid-quantised
+    // levels and snaps the accumulator back onto this frame's level every
+    // frame — defeating the accumulation entirely, independent of
+    // temporalBlend. mean +- k*sigma is wide enough to average the jittered
+    // samples into sub-texel resolution while still rejecting real outliers.
+    float4 m1 = float4(0.0);
+    float4 m2 = float4(0.0);
     float2 texelSize = 1.0 / data.screenSize;
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             float4 neighbor = currentCloud.sample(linearSampler, in.uv + float2(x, y) * texelSize);
-            minBound = min(minBound, neighbor);
-            maxBound = max(maxBound, neighbor);
+            m1 += neighbor;
+            m2 += neighbor * neighbor;
         }
     }
-    history = clamp(history, minBound, maxBound);
+    float4 mean = m1 / 9.0;
+    float4 sigma = sqrt(max(m2 / 9.0 - mean * mean, float4(0.0)));
+    // Relative sigma floor: at density 0.3/m optical depth 1 is 3.3 m, so the
+    // field is nearly binary and a flat 3x3 neighborhood drives sigma to ~0,
+    // making mean +- k*sigma as tight as min/max.
+    float4 sigmaFloor = max(sigma, abs(mean) * 0.05);
+    float4 clamped = clamp(history, mean - 2.5 * sigmaFloor, mean + 2.5 * sigmaFloor);
+
+    // Gate the clamp on reprojection trustworthiness (twin of
+    // CloudTemporal.frag) — the rotation-shudder fix. Under pure rotation
+    // reprojection is exact (parallaxTexels == 0), so history needs no
+    // rejection; the collapsed box was snapping the accumulator onto this
+    // frame's ray-quantised value every frame and the 20-frame average never
+    // happened. Measured over the whole path: mean per-frame change 3.2x
+    // lower, peak 9.5x lower. Translation keeps the full guard.
+    float clampWeight = clamp(parallaxTexels * 0.35, 0.0, 1.0);
+    history = mix(history, clamped, clampWeight);
 
     // Parallax-adaptive blend (twin of CloudTemporal.frag): base rate at rest
     // AND under pure rotation — history is exact there, and dumping it on

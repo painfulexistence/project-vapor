@@ -379,7 +379,10 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     // sampling rate is view-angle independent; coarse steps (4x) skip the empty
     // air, keeping the total step count in the same budget as before.
     float baseFine = min(cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
-    uint maxIters = primarySteps * 2u;
+    // Inside the layer the ladder is finer (below) and there is far more of it
+    // in front of the eye, so give the fly-through a larger iteration budget.
+    bool insideLayer = (tRange.x <= 0.001);
+    uint maxIters = primarySteps * (insideLayer ? 3u : 2u);
 
     // The ladder itself is undithered; each segment is instead sampled at a
     // STRATIFIED point inside it (t + blueNoise * step). Two bugs this avoids:
@@ -390,6 +393,7 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     // probe hit — precisely the camera-inside-the-layer case (tRange.x == 0).
     float t = tRange.x;
     float tIntegrated = tRange.x;  // never integrate behind this (no double count)
+    float tFirstHit = 1e9;         // distance to the nearest contributing sample
     bool inCloud = false;
     int emptyRun = 0;
 
@@ -397,7 +401,17 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
         // Steps grow with distance, lagging the detail LOD fade above: by the
         // time only the 10 km base shape survives, 4x coarser still gives ~40
         // samples per feature.
-        float fineStep = baseFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
+        // Near-field LOD. baseFine is ~57 m at every view angle, but at the
+        // shipped density (0.3/m) optical depth 1 is reached in 3.3 m — so one
+        // 57 m step drives transmittance from 1.0 to 3e-8 and EVERY cloud
+        // boundary is a hard 57 m staircase. That, not the RT resolution, is
+        // what caps sharpness when the camera is in the layer. Ramp the step
+        // with distance instead (12 m at the eye, baseFine again by ~2.9 km),
+        // so the step keeps a roughly constant angular footprint. Beyond
+        // 2.9 km the ladder — and the ground view, which never enters this
+        // range — is bit-for-bit what it was.
+        float nearFine = min(max(t * 0.02, 12.0), baseFine);
+        float fineStep = nearFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
         float coarseStep = fineStep * 4.0;
 
         if (!inCloud) {
@@ -421,6 +435,7 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
         vec3 pos = rayOrigin + rayDir * (t + blueNoise * fineStep);
         float density = sampleCloudDensity(pos, false);
         if (density > 0.001) {
+            tFirstHit = min(tFirstHit, t);
             vec3 luminance = cloudLighting(pos, rayDir);
             float powder = beerPowderEnergy(density * fineStep * 10.0, cosTheta) * powderStrength +
                            (1.0 - powderStrength);
@@ -439,11 +454,16 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
 
     // Aerial perspective: distant decks sink into the horizon haze — the
     // in-scattered light fades toward a sky tint and the cloud loses opacity,
-    // instead of staying crisp all the way to the horizon (~40 km e-folding
-    // on the distance to the cloud entry). Tint follows the sun by day and
-    // nearly vanishes at night.
+    // instead of staying crisp all the way to the horizon (~40 km e-folding).
+    // Keyed on the distance to the nearest CONTRIBUTING sample, not to the
+    // layer entry: inside the layer the entry is 0 by definition, which
+    // switched the haze and the distance fade off entirely and left a
+    // near-horizontal in-layer ray ending dead at the iteration budget with
+    // no fade at all. Outside the layer tFirstHit >= tRange.x, so the ground
+    // view is unchanged in practice.
+    float fadeDist = min(max(tFirstHit, tRange.x), 1e8);
     float dayFactor = smoothstep(-0.12, 0.08, sunDirection.y);
-    float haze = 1.0 - exp(-max(tRange.x, 0.0) * 2.5e-5);
+    float haze = 1.0 - exp(-max(fadeDist, 0.0) * 2.5e-5);
     vec3 hazeTint = (sunColor * 0.25 + ambientColor * 0.75) *
                     (sunIntensity * sunLightScale * 0.25) * mix(0.05, 1.0, dayFactor);
     scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
@@ -453,7 +473,7 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     // is reached at ~5 deg elevation — without an explicit fade the clouds just
     // ended there, leaving a hard line across the sky. Fade the contribution
     // out before the cutoff so the deck dissolves into haze instead.
-    float distFade = smoothstep(60000.0, 95000.0, tRange.x);
+    float distFade = smoothstep(60000.0, 95000.0, fadeDist);
     scattering *= 1.0 - distFade;
     transmittance = mix(transmittance, 1.0, distFade);
 
@@ -461,6 +481,14 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
 }
 
 void main() {
+    // No sub-texel jitter here, deliberately. It is the textbook way to turn a
+    // reduced-res temporal pass into an upsampler, but measured against this
+    // pipeline it buys nothing: rotation already sweeps the sampling grid
+    // through every sub-texel phase (the drift is a non-integer number of
+    // texels per frame), so the phase diversity jitter would add is already
+    // there. Simulated flicker was identical with and without it, and on a
+    // hard edge it measured strictly worse. The clamp gate in
+    // CloudTemporal.frag is what actually lets the accumulation happen.
     float depth = texture(sceneDepth, tex_uv).r;
 
     // World-space view ray (same convention as VolumetricFog/Velocity).

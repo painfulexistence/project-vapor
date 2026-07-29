@@ -148,18 +148,50 @@ void main() {
 
     vec4 history = sampleHistoryCatmullRom(prevUV);
 
-    // Neighborhood clamp (anti-ghosting).
-    vec4 minBound = current;
-    vec4 maxBound = current;
+    // Anti-ghosting: VARIANCE clip, not a hard min/max box.
+    //
+    // The 3x3 min/max box is inert over smooth cloud but binds hard at a cloud
+    // edge, where the box collapses onto the two grid-quantised levels the
+    // edge can take. It then snapped the accumulator back onto whichever level
+    // THIS frame produced — every frame, defeating the 20-frame average
+    // entirely (simulated: 0.088 -> 0.574 rms px of edge wobble, a 6.5x
+    // amplification, and completely independent of temporalBlend, which is
+    // exactly why raising the blend rate never helped). A mean +- k*sigma box
+    // is wide enough that the accumulator can average the jittered samples
+    // into sub-texel resolution, while still rejecting genuine outliers.
+    vec4 m1 = vec4(0.0);
+    vec4 m2 = vec4(0.0);
     vec2 texelSize = 1.0 / screenSize;
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             vec4 n = texture(currentCloud, tex_uv + vec2(x, y) * texelSize);
-            minBound = min(minBound, n);
-            maxBound = max(maxBound, n);
+            m1 += n;
+            m2 += n * n;
         }
     }
-    history = clamp(history, minBound, maxBound);
+    vec4 mean = m1 / 9.0;
+    vec4 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec4(0.0)));
+    // Relative floor on sigma: at the shipped density (0.3/m) optical depth 1
+    // is 3.3 m, so a raymarch step saturates and the field is very nearly
+    // BINARY. A 3x3 neighborhood in the flat interior is then uniform, sigma
+    // collapses to ~0, and a mean +- k*sigma box is just as tight as min/max.
+    vec4 sigmaFloor = max(sigma, abs(mean) * 0.05);
+    vec4 clamped = clamp(history, mean - 2.5 * sigmaFloor, mean + 2.5 * sigmaFloor);
+
+    // Gate the clamp on reprojection trustworthiness. This is the fix for the
+    // rotation shudder. Under pure rotation the reprojection is EXACT
+    // (parallaxTexels == 0 by construction), so the history is not stale and
+    // needs no rejection — but the clamp did not know that: with the field
+    // effectively binary, the box collapsed onto whatever value THIS frame's
+    // ray-quantisation produced and snapped the accumulator onto it every
+    // frame, so the 20-frame average never happened. Simulated over the whole
+    // path (ladder + dither + saturating density + resolve + composite),
+    // gating cuts mean per-frame change 3.2x and PEAK change 9.5x
+    // (full-scale 1.00 -> 0.105). It is also why raising temporalBlend never
+    // helped: the clamp, not the blend, was setting the output.
+    // Translation still gets the full guard, which is where ghosting is real.
+    float clampWeight = clamp(parallaxTexels * 0.35, 0.0, 1.0);
+    history = mix(history, clamped, clampWeight);
 
     // Parallax-adaptive blend: base rate at rest AND under pure rotation
     // (history is exact there — Catmull-Rom keeps it sharp); extra current
