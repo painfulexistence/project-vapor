@@ -19,9 +19,12 @@ layout(location = 0) out vec4 outColor;
 
 // Detail-layer arrays (grass/rock/dirt/snow), world-space tiled — the same
 // two 2D arrays RHIMain.frag samples at set2 b13/b14, bound to this pipeline
-// by tessRenderPass. Default white array when no terrain is staged.
-layout(set = 0, binding = 4) uniform sampler2DArray terrainDetailAlbedo;
-layout(set = 0, binding = 5) uniform sampler2DArray terrainDetailNormal;
+// by tessRenderPass (setTexture slots 4/5 -> set 2 on Vulkan). Default white
+// array when no terrain is staged. Set 2 is the RHI's combined-image-sampler
+// set; set 0 is storage buffers, and declaring these there made pipeline
+// creation fail layout validation (VUID 07990) before the first frame.
+layout(set = 2, binding = 4) uniform sampler2DArray terrainDetailAlbedo;
+layout(set = 2, binding = 5) uniform sampler2DArray terrainDetailNormal;
 
 vec3 tessHashColor(uint x) {
     x = (x ^ 61u) ^ (x >> 16u);
