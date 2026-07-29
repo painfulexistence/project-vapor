@@ -2266,12 +2266,14 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
             depthAttachment.imageLayout = depthLayout;
         }
         // Load/store operations (loadDepth: true = load, false = clear). A
-        // read-only pass writes nothing, so nothing needs storing — DONT_CARE
-        // (core 1.0, unlike STORE_OP_NONE) is safe here because no later pass
-        // this frame samples the depth and the next frame re-clears it.
+        // read-only pass must use STORE_OP_NONE (core in the 1.3 baseline this
+        // backend requires): NONE means "not accessed for store", preserving
+        // the contents. DONT_CARE would be wrong here — it licenses a tiler
+        // (MoltenVK/Apple) to discard the depth, and HeightFog / VolumetricFog
+        // / LightScattering all sample this depth AFTER the water pass.
         depthAttachment.loadOp = desc.loadDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.storeOp =
-            desc.depthReadOnly ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+            desc.depthReadOnly ? VK_ATTACHMENT_STORE_OP_NONE : VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.clearValue.depthStencil = {desc.clearDepth, desc.clearStencil};
     }
 
