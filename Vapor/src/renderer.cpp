@@ -4739,6 +4739,14 @@ void Renderer::waterSimPass() {
 
     rhi->endComputePass();
     rhi->computeBarrier();  // sim writes -> vertex/fragment reads
+
+    // The normals/whitecap texture was written as a storage image (GENERAL);
+    // waterPass samples it. Move it to the sampled layout now, the same way the
+    // froxel-fog composite prepares its integrated volume — otherwise Vulkan
+    // sees a SHADER_READ_ONLY descriptor over a GENERAL image (a validation
+    // error, and undefined on a strict driver). No-op on Metal. The
+    // displacement stays a buffer (waterDispBuffer) and needs no layout move.
+    rhi->prepareTextureForSampling(waterSimNormalTex);
 }
 
 // Planar reflection: re-render every drawable through the mirrored camera
@@ -6388,6 +6396,9 @@ void Renderer::postProcessPass() {
     // Feed the animated-effect clock (VHS/CRT) using the same time base the
     // renderer uses elsewhere (frameCounter / 60). Uploaded to the GPU below.
     postProcessParams.time = float(frameCounter) / 60.0f;
+    // Mirror the live bloom strength so the Vulkan PostProcess composite uses
+    // the slider value (Metal's BloomComposite reads bloomStrength directly).
+    postProcessParams.bloomStrength = bloomStrength;
 
     // Create render pass descriptor for swapchain
     RenderPassDesc renderPassDesc;

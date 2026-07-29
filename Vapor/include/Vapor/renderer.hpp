@@ -798,6 +798,13 @@ private:
         // Edge view: replace the image with its gradient magnitude (outline
         // look). Distinct from Sobel, which overlays edges on the image.
         float enableEdges = 0.0f;
+        // Bloom composite strength on the Vulkan path (Metal composites bloom
+        // in its own BloomComposite pass and reads Renderer::bloomStrength
+        // directly). Defaults to the value Vulkan used to hardcode, so the
+        // default frame is unchanged; postProcessPass mirrors the live
+        // Renderer::bloomStrength here each frame so the slider drives both
+        // backends identically.
+        float bloomStrength = 0.8f;
     };
     PostProcessParams postProcessParams;
     BufferHandle postProcessParamsBuffer;  // Vulkan PostProcess.frag set1 b0
