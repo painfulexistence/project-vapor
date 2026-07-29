@@ -73,8 +73,13 @@ cmake --build --preset dev --target main -j4
 
 **Render a path-traced photo (Metal only)**
 ```bash
-# Warm up the scene, freeze it, trace 1024 spp, write linear EXR + tonemapped PNG, exit
-./build/Vaporware/Debug/main --photo shot.exr --spp 1024 --bounces 6
+# Compose mode: play to the moment, frame the shot (free cam on Hotkey1), press F9.
+# The world freezes, traces 1024 spp, writes linear EXR + tonemapped PNG, exits.
+./build/Vaporware/Debug/main --photo shot.exr --spp 1024 --bounces 6 --photo-wait
+
+# Unattended mode: auto-freezes after the warmup window (whatever is on screen then —
+# the demo boots into the main menu, so compose mode is the one you usually want).
+./build/Vaporware/Debug/main --photo shot.exr --spp 1024
 ```
 
 ### Testing

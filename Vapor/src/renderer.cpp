@@ -1469,6 +1469,14 @@ void Renderer::setupPhotoModeRenderGraph() {
         });
 
     addCompositePasses(photoRenderGraph);
+
+    // A photograph has no HUD: drop the RmlUi overlay from the photo frame
+    // (game UI keeps running and comes back the moment photo mode exits).
+    // The captured EXR/PNG never contained it — capture reads the accumulator,
+    // upstream of ALL UI compositing — so this is about the on-screen preview
+    // showing what the file will actually hold. The ImGui overlay stays: it is
+    // the photo mode's own control panel (and not part of the graph anyway).
+    photoRenderGraph.removePass("RmlUi");
 }
 
 void Renderer::setPhotoModeEnabled(bool enabled) {

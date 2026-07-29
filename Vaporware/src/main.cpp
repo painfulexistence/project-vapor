@@ -525,6 +525,12 @@ auto main(int argc, char* args[]) -> int {
     args::ValueFlag<Uint32> photoBounces(photoGroup, "number", "Photo max bounces", { "bounces" }, 4);
     args::ValueFlag<Uint32> photoWarmup(photoGroup, "number",
         "Frames to run before freezing for the photo (IBL capture, async loads)", { "photo-warmup" }, 60);
+    // The demo boots into the main menu, so an auto-timed freeze shoots
+    // whatever the boot state happens to look like. --photo-wait hands the
+    // trigger to the photographer instead: play to the moment, frame the shot
+    // (free camera on Hotkey1), press F9, and the trace starts from there.
+    args::Flag photoWait(photoGroup, "wait",
+        "Compose mode: instead of auto-starting after warmup, wait until F9 is pressed", { "photo-wait" });
     args::Group helpGroup(parser, "Help:");
     args::HelpFlag help(helpGroup, "help", "Display help menu", { "help" });
     if (argc > 1) {
@@ -809,6 +815,10 @@ auto main(int argc, char* args[]) -> int {
     PhotoCLI photoState = photoOut ? PhotoCLI::Warmup : PhotoCLI::Off;
     int photoExitCode = 0;
     float photoTraceStart = 0.0f;
+    bool photoStartRequested = false;  // F9 in --photo-wait compose mode
+    if (photoState == PhotoCLI::Warmup && photoWait) {
+        fmt::print("photo: compose mode — frame your shot, then press F9 to start tracing\n");
+    }
 
     auto& inputManager = engineCore->getInputManager();
 
@@ -856,6 +866,9 @@ auto main(int argc, char* args[]) -> int {
                 if (e.key.scancode == SDL_SCANCODE_F3) {
                     physics->setDebugEnabled(!physics->isDebugEnabled());
                     fmt::print("Physics Debug Renderer: {}\n", physics->isDebugEnabled() ? "Enabled" : "Disabled");
+                }
+                if (e.key.scancode == SDL_SCANCODE_F9) {
+                    photoStartRequested = true;  // no-op outside --photo-wait warmup
                 }
                 if (e.key.scancode == SDL_SCANCODE_RETURN) {
                     registry.view<ScrollTextQueueComponent>().each([](auto& q) { q.advanceRequested = true; });
@@ -1085,7 +1098,12 @@ auto main(int argc, char* args[]) -> int {
                 photoState = PhotoCLI::Done;
                 quit = true;
             } else if (photoState == PhotoCLI::Warmup) {
-                if (frameCount >= photoWarmup.Get()) {
+                // Auto mode arms on the warmup timer; compose mode arms on F9
+                // (warmup still applies underneath, so F9 mashed at frame 2
+                // cannot start a trace before IBL capture has happened).
+                const bool armed = frameCount >= photoWarmup.Get() &&
+                                   (photoWait ? photoStartRequested : true);
+                if (armed) {
                     auto& pt = rhiRenderer->getPathTracer();
                     pt.settings.maxSamples = std::max(1u, photoSpp.Get());
                     pt.settings.maxBounces = photoBounces.Get();
@@ -1097,6 +1115,10 @@ auto main(int argc, char* args[]) -> int {
                         photoState = PhotoCLI::Done;
                         quit = true;
                     } else {
+                        // The preview should show what the file will hold: the
+                        // photo graph already drops the game HUD, and the CLI
+                        // has no use for the engine panel either.
+                        renderer->setImGuiVisible(false);
                         photoTraceStart = time;
                         fmt::print("photo: tracing {} spp, {} bounces -> {}\n",
                                    pt.settings.maxSamples, pt.settings.maxBounces, photoOut.Get());
@@ -1142,6 +1164,13 @@ auto main(int argc, char* args[]) -> int {
         }
 
         frameCount++;
+    }
+
+    // A photo run that ends without writing files (window closed, ESC during
+    // compose) must not exit 0 — batch scripts read the code as "photo exists".
+    if (photoState != PhotoCLI::Off && photoState != PhotoCLI::Done) {
+        fmt::print(stderr, "photo: aborted before capture\n");
+        photoExitCode = 4;
     }
 
     // Shutdown subsystems
