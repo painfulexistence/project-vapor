@@ -4880,6 +4880,13 @@ void Renderer::waterPass() {
     rp.loadColor.push_back(true);
     rp.depthAttachment = depthStencilRT;
     rp.loadDepth = true;
+    // The water surface depth-tests against the scene (occluded by pillars) AND
+    // samples the same depth buffer for soft edges + refraction. The pipeline is
+    // depthWrite=off, so this is a legal read-only depth feedback loop — flag it
+    // so the Vulkan backend keeps the depth image in a read-only layout instead
+    // of tripping "sampled image in DEPTH_STENCIL_ATTACHMENT_OPTIMAL". No-op on
+    // Metal.
+    rp.depthReadOnly = true;
     rhi->beginRenderPass(rp);
     rhi->bindPipeline(waterPipeline);
 
