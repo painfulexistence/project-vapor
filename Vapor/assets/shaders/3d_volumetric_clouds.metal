@@ -678,6 +678,11 @@ fragment float4 cloudTemporalResolve(
         float2 uvN = pcN.xy / pcN.w, uvF = pcF.xy / pcF.w;
         parallaxTexels = length((uvN - uvF) * 0.5 * data.screenSize);
     } else {
+        // Geometry pixel: carries no cloud, and the horizon sweeps across it
+        // as the camera turns, so its history is stale sky. Maximally
+        // untrustworthy — leaving it 0 kept a low blend on every ground pixel
+        // (twin of CloudTemporal.frag).
+        parallaxTexels = 1e3;
         worldPos = data.invViewProj * float4(ndc, depth, 1.0);
         worldPos /= worldPos.w;
     }
@@ -713,21 +718,17 @@ fragment float4 cloudTemporalResolve(
     }
     float4 mean = m1 / 9.0;
     float4 sigma = sqrt(max(m2 / 9.0 - mean * mean, float4(0.0)));
-    // Relative sigma floor: at density 0.3/m optical depth 1 is 3.3 m, so the
-    // field is nearly binary and a flat 3x3 neighborhood drives sigma to ~0,
-    // making mean +- k*sigma as tight as min/max.
+    // WIDEN the box, never disable it (twin of CloudTemporal.frag). The floor
+    // is RELATIVE to the mean, which is what does the anti-ghosting: where the
+    // neighborhood is empty, mean and sigma are both 0 so the box collapses to
+    // [0,0] and stale history is forced to zero however wide k is. Where there
+    // is signal the box is mean +- 0.8*mean, loose enough for the accumulator
+    // to average instead of being snapped onto this frame's quantised value.
+    // A hard min/max box overwrote the accumulator every frame (the field is
+    // near-binary: optical depth 1 in 3.3 m); gating the clamp off under exact
+    // reprojection fixed that but smeared history across disocclusions.
     float4 sigmaFloor = max(sigma, abs(mean) * 0.05);
-    float4 clamped = clamp(history, mean - 2.5 * sigmaFloor, mean + 2.5 * sigmaFloor);
-
-    // Gate the clamp on reprojection trustworthiness (twin of
-    // CloudTemporal.frag) — the rotation-shudder fix. Under pure rotation
-    // reprojection is exact (parallaxTexels == 0), so history needs no
-    // rejection; the collapsed box was snapping the accumulator onto this
-    // frame's ray-quantised value every frame and the 20-frame average never
-    // happened. Measured over the whole path: mean per-frame change 3.2x
-    // lower, peak 9.5x lower. Translation keeps the full guard.
-    float clampWeight = clamp(parallaxTexels * 0.35, 0.0, 1.0);
-    history = mix(history, clamped, clampWeight);
+    history = clamp(history, mean - 16.0 * sigmaFloor, mean + 16.0 * sigmaFloor);
 
     // Parallax-adaptive blend (twin of CloudTemporal.frag): base rate at rest
     // AND under pure rotation — history is exact there, and dumping it on

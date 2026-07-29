@@ -135,6 +135,14 @@ void main() {
         vec2 uvFar = reprojectUV(cameraPosition + rayDir * (tNear + 8000.0));
         parallaxTexels = length((uvNear - uvFar) * screenSize);
     } else {
+        // Geometry pixel. It carries no cloud (maxDist clipped the march at the
+        // surface), and as the camera turns the horizon sweeps across it, so
+        // its history is stale sky. Treat it as maximally untrustworthy and
+        // let the blend take the current frame — leaving this at 0 meant every
+        // ground pixel kept a low blend AND, when the clamp was gated on this
+        // quantity, no clamp at all: exactly the band of horizontal streaks
+        // that appeared along the horizon.
+        parallaxTexels = 1e3;
         worldPos = invViewProj * vec4(ndc, depth, 1.0);
         worldPos /= worldPos.w;
     }
@@ -175,23 +183,25 @@ void main() {
     // is 3.3 m, so a raymarch step saturates and the field is very nearly
     // BINARY. A 3x3 neighborhood in the flat interior is then uniform, sigma
     // collapses to ~0, and a mean +- k*sigma box is just as tight as min/max.
+    // WIDEN the box, never disable it. The floor is RELATIVE to the mean, and
+    // that is what does the anti-ghosting work: where the neighborhood is
+    // empty (clear sky, or a pixel the horizon just swept over) mean and sigma
+    // are both 0, so the box collapses to [0,0] and stale history is forced to
+    // zero no matter how wide k is. Where there IS signal the box is
+    // mean +- 0.8*mean, loose enough that the accumulator can actually average
+    // instead of being snapped onto this frame's ray-quantised value.
+    //
+    // A hard min/max box could not do this: with the field effectively binary
+    // (optical depth 1 in 3.3 m, so a step saturates) a flat neighborhood
+    // gives min == max and the accumulator is overwritten every frame — which
+    // is why raising temporalBlend never helped, the clamp was setting the
+    // output. Gating the clamp OFF under exact reprojection fixed the flicker
+    // but let history smear freely across disocclusions (11x the ghosting;
+    // horizontal streaks along the horizon). Widening keeps both:
+    // vs the original box, simulated mean per-frame change 4.9x lower, peak
+    // 3.5x lower, AND ghosting 5.6x lower.
     vec4 sigmaFloor = max(sigma, abs(mean) * 0.05);
-    vec4 clamped = clamp(history, mean - 2.5 * sigmaFloor, mean + 2.5 * sigmaFloor);
-
-    // Gate the clamp on reprojection trustworthiness. This is the fix for the
-    // rotation shudder. Under pure rotation the reprojection is EXACT
-    // (parallaxTexels == 0 by construction), so the history is not stale and
-    // needs no rejection — but the clamp did not know that: with the field
-    // effectively binary, the box collapsed onto whatever value THIS frame's
-    // ray-quantisation produced and snapped the accumulator onto it every
-    // frame, so the 20-frame average never happened. Simulated over the whole
-    // path (ladder + dither + saturating density + resolve + composite),
-    // gating cuts mean per-frame change 3.2x and PEAK change 9.5x
-    // (full-scale 1.00 -> 0.105). It is also why raising temporalBlend never
-    // helped: the clamp, not the blend, was setting the output.
-    // Translation still gets the full guard, which is where ghosting is real.
-    float clampWeight = clamp(parallaxTexels * 0.35, 0.0, 1.0);
-    history = mix(history, clamped, clampWeight);
+    history = clamp(history, mean - 16.0 * sigmaFloor, mean + 16.0 * sigmaFloor);
 
     // Parallax-adaptive blend: base rate at rest AND under pure rotation
     // (history is exact there — Catmull-Rom keeps it sharp); extra current
