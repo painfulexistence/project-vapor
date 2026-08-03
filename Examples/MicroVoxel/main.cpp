@@ -37,6 +37,7 @@
 #include <SDL3/SDL.h>
 #include <array>
 #include <cstring>
+#include <iterator>  // std::size
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <glm/glm.hpp>
@@ -306,14 +307,94 @@ bool spawnFlora(entt::registry& registry,
     return true;
 }
 
+// The palette of props the T key spawns from, cycled in order — the same
+// fifteen the scene JSON used to author statically (MAX_VOXEL_VOLUMES is 16
+// and the terrain takes one slot). kind: 1=crate 2=boulder 3=crystal cluster;
+// yaw/tilt in degrees, tilt exercising the full OBB path. Position is decided
+// at spawn time from the camera, so there are no authored coordinates, and
+// pressing T repeatedly is the incremental load test that replaced the fixed
+// prop set.
+struct PropDef {
+    int kind;
+    int gridDim;
+    Uint32 seed;
+    Uint32 brickCapacity;
+    float yawDeg;
+    float tiltDeg;
+};
+constexpr PropDef kProps[] = {
+    { 1, 32, 1001u, 512u, 15.0f, 0.0f },  { 2, 48, 2001u, 1024u, 0.0f, 0.0f },  { 3, 24, 3001u, 384u, 0.0f, 0.0f },
+    { 1, 32, 1002u, 512u, 40.0f, 0.0f },  { 2, 32, 2002u, 512u, 30.0f, 0.0f },  { 3, 16, 3002u, 128u, 45.0f, 0.0f },
+    { 1, 24, 1003u, 256u, 70.0f, 8.0f },  { 2, 32, 2003u, 512u, 60.0f, 12.0f }, { 3, 24, 3003u, 384u, 15.0f, 0.0f },
+    { 1, 24, 1004u, 256u, 25.0f, 0.0f },  { 2, 24, 2004u, 256u, 90.0f, 0.0f },  { 3, 16, 3004u, 128u, 75.0f, 0.0f },
+    { 1, 32, 1005u, 512u, 55.0f, 0.0f },  { 2, 48, 2005u, 1024u, 45.0f, 0.0f }, { 1, 32, 1006u, 512u, 80.0f, 0.0f },
+};
+
+// Spawn the next prop from kProps ~5 m ahead of the camera. With physics on it
+// appears 2 m above the aim line and falls in (VoxelColliderSystem builds its
+// hull and body reactively once the volume finishes generating — late spawn is
+// the path it was built around, and the one fracture will use). With physics
+// off it is placed standing on the terrain surface as static decoration:
+// terrainHeight is a pure function of the column, valid without any voxels.
+void spawnNextProp(entt::registry& reg, const Vapor::VirtualCameraComponent& cam, bool physicsOn) {
+    static size_t next = 0;
+    if (next >= std::size(kProps)) {
+        fmt::print("All {} props spawned\n", std::size(kProps));
+        return;
+    }
+    const PropDef& pd = kProps[next];
+
+    const glm::vec3 fwd = cam.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+    glm::vec3 pos = cam.position + fwd * 5.0f;
+    if (physicsOn) {
+        pos.y += 2.0f;
+    } else {
+        auto view = reg.view<Vapor::VoxelVolumeComponent, Vapor::TransformComponent>();
+        for (auto e : view) {
+            auto& vv = view.get<Vapor::VoxelVolumeComponent>(e);
+            if (vv.kind != Vapor::VoxelKind::Terrain || !vv.world.value) continue;
+            const auto& tf = view.get<Vapor::TransformComponent>(e);
+            const Vapor::VoxelWorld& w = *vv.world.value;
+            const glm::vec3 ext = w.extent();
+            // World -> column indices: the grid is centred on the entity in
+            // x/z and rises from its base.
+            const int vx = static_cast<int>((pos.x - tf.position.x + ext.x * 0.5f) / w.voxelSizeMeters());
+            const int vz = static_cast<int>((pos.z - tf.position.z + ext.z * 0.5f) / w.voxelSizeMeters());
+            pos.y = tf.position.y + w.terrainHeight(vx, vz) * w.voxelSizeMeters();
+            break;
+        }
+    }
+
+    auto e = reg.create();
+    auto& tf = reg.emplace<Vapor::TransformComponent>(e);
+    tf.position = pos;
+    tf.rotation = glm::quat(glm::vec3(glm::radians(pd.tiltDeg), glm::radians(pd.yawDeg), 0.0f));
+    auto& vv = reg.emplace<Vapor::VoxelVolumeComponent>(e);
+    vv.gridDim = glm::ivec3(pd.gridDim);
+    vv.voxelSize = 0.05f;
+    vv.seed = pd.seed;
+    vv.brickCapacity = pd.brickCapacity;
+    vv.kind = static_cast<Vapor::VoxelKind>(pd.kind);
+    auto& rb = reg.emplace<Vapor::RigidbodyComponent>(e);
+    rb.motionType = Vapor::BodyMotionType::Dynamic;
+    reg.emplace<Vapor::VoxelColliderComponent>(e);
+    next++;
+    fmt::print("Prop {}/{} spawned{}\n", next, std::size(kProps), physicsOn ? "" : " (static: physics off)");
+}
+
 }  // namespace
 
 auto main(int argc, char* args[]) -> int {
-    bool wantVulkan = false, wantMetal = false, bigWorld = false;
+    bool wantVulkan = false, wantMetal = false, bigWorld = false, noPhysics = false;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(args[i], "--vulkan") == 0) wantVulkan = true;
         if (std::strcmp(args[i], "--metal") == 0) wantMetal = true;
         if (std::strcmp(args[i], "--big") == 0) bigWorld = true;
+        // Rendering-only profile: no Jolt instance, no bodies, no collider
+        // extraction (VoxelColliderSystem early-outs on the null), no stepping.
+        // Digging still works — carving never depended on physics — and props
+        // placed with T stand on the terrain as static decoration.
+        if (std::strcmp(args[i], "--no-physics") == 0) noPhysics = true;
     }
     (void)wantMetal;
 
@@ -360,7 +441,8 @@ auto main(int argc, char* args[]) -> int {
     // terrain collider and pile into each other. Jolt writes each body's pose
     // back to its TransformComponent, which is exactly what the OBB raymarch
     // reads — so a tumbling crate renders tumbling.
-    auto physics = std::make_unique<Vapor::Physics3D>();
+    std::unique_ptr<Vapor::Physics3D> physics;
+    if (!noPhysics) physics = std::make_unique<Vapor::Physics3D>();
 
     auto renderer = createRenderer(gfxBackend, window);
     if (!renderer) {
@@ -369,15 +451,16 @@ auto main(int argc, char* args[]) -> int {
         SDL_Quit();
         return 1;
     }
-    physics->init(engineCore->getTaskScheduler(), renderer->getDebugDraw());
+    if (physics) physics->init(engineCore->getTaskScheduler(), renderer->getDebugDraw());
 
-    // Declarative scene: the volumes (voxelVolume components), sun, sky and fly
-    // camera are all authored in the scene JSON — main.json is one 256^3 @ 5 cm
-    // terrain surrounded by 15 small prop volumes (crates / boulders / crystal
-    // clusters, 16-48 voxels/edge, most rotated), and big.json the single
-    // 51.2 x 12.8 x 51.2 m streaming world. The registry is populated by
-    // instantiate(); VoxelVolumeSystem generates the worlds on first sight,
-    // exactly as with code-spawned components.
+    // Declarative scene: the terrain volume, sun, sky and fly camera are
+    // authored in the scene JSON — main.json is the one 256^3 @ 5 cm terrain,
+    // big.json the single 51.2 x 12.8 x 51.2 m streaming world. Props are no
+    // longer authored: the T key spawns them at runtime from the kProps
+    // palette above (up to 15 crates / boulders / crystal clusters, 16-48
+    // voxels/edge). The registry is populated by instantiate();
+    // VoxelVolumeSystem generates the worlds on first sight, exactly as with
+    // code-spawned components — which is what makes runtime spawn free.
     auto scene = std::make_shared<RenderScene>("microvoxel");
     entt::registry registry;
     {
@@ -439,6 +522,7 @@ auto main(int argc, char* args[]) -> int {
 
     auto& inputManager = engineCore->getInputManager();
     bool quit = false;
+    bool physicsPaused = false, physicsStepOnce = false, spawnProp = false;
     float time = SDL_GetTicks() / 1000.0f;
 
     while (!quit) {
@@ -458,6 +542,18 @@ auto main(int argc, char* args[]) -> int {
                     break;
                 case SDL_EVENT_KEY_DOWN: {
                     if (e.key.scancode == SDL_SCANCODE_ESCAPE) quit = true;
+                    // T spawns the next prop ahead of the camera (deferred to
+                    // the gameplay section, where the camera is resolved);
+                    // Y pauses/resumes physics; M steps one fixed step while
+                    // paused. P/N/B were taken by render toggles long ago.
+                    if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_T) spawnProp = true;
+                    if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_Y && physics) {
+                        physicsPaused = !physicsPaused;
+                        fmt::print("Physics: {}\n", physicsPaused ? "paused (M steps once)" : "resumed");
+                    }
+                    if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_M && physics && physicsPaused) {
+                        physicsStepOnce = true;
+                    }
                     if (!e.key.repeat && e.key.scancode == SDL_SCANCODE_P) {
                         floraEnabled = !floraEnabled;
                         for (auto fe : floraEntities) {
@@ -564,6 +660,13 @@ auto main(int argc, char* args[]) -> int {
                                           cam.rotation * glm::vec3(0.0f, 0.0f, -1.0f),
                                           /*maxDist=*/60.0f, /*radius=*/0.25f);
         }
+        if (spawnProp) {
+            spawnProp = false;
+            if (activeCam != entt::null) {
+                const auto& cam = registry.get<Vapor::VirtualCameraComponent>(activeCam);
+                spawnNextProp(registry, cam, physics != nullptr);
+            }
+        }
 
         // ---- Engine + ECS systems ------------------------------------------
         engineCore->update(deltaTime);
@@ -571,7 +674,18 @@ auto main(int argc, char* args[]) -> int {
         // transform/voxel systems so a body's new pose reaches the raymarch on
         // the same frame it was integrated.
         Vapor::VoxelColliderSystem::update(registry, physics.get());
-        physics->process(registry, deltaTime);
+        if (physics) {
+            // Y freezes the world in place (bodies and contacts stay resident,
+            // stepping stops); M advances one fixed step while frozen. Skipping
+            // process() accumulates nothing, so resuming does not fast-forward
+            // through the pause.
+            if (!physicsPaused) {
+                physics->process(registry, deltaTime);
+            } else if (physicsStepOnce) {
+                physics->process(registry, 1.0f / 60.0f);
+            }
+            physicsStepOnce = false;
+        }
         Vapor::TransformSystem::update(registry);
         Vapor::LightGatherSystem::update(registry, scene.get());
         Vapor::SkySystem::update(registry, renderer.get());
@@ -608,7 +722,7 @@ auto main(int argc, char* args[]) -> int {
         renderer->endFrame();
     }
 
-    physics->deinit();
+    if (physics) physics->deinit();
     engineCore->shutdown();
     renderer->shutdown();
     SDL_DestroyWindow(window);

@@ -1,6 +1,6 @@
 {
   "name": "microvoxel",
-  "_comment": "One big 256^3 terrain (static voxel collider) plus small prop volumes as DYNAMIC rigid bodies whose convex hulls come from their own voxels: they drop onto the terrain and pile into each other, and Jolt's pose feeds the OBB raymarch so they render tumbling. kind: 0=terrain 1=crate 2=boulder 3=crystal cluster. 16 volumes = MAX_VOXEL_VOLUMES.",
+  "_comment": "One big 256^3 terrain (static voxel collider, 16^3 chunks). Props are no longer authored here: the T key spawns them at runtime from a palette in main.cpp, one per press — the incremental load test, and the same runtime-spawn path fracture will use. kind: 0=terrain 1=crate 2=boulder 3=crystal cluster. 16 volumes = MAX_VOXEL_VOLUMES, terrain takes one.",
   "entities": [
     {
       "name": "Volume.Terrain",
@@ -9,114 +9,6 @@
         "voxelVolume": { "gridDim": [256, 256, 256], "voxelSize": 0.05, "seed": 1337, "brickCapacity": 65536 },
         "rigidbody": { "motionType": "static" },
         "voxelCollider": { "chunkVoxels": 16 }
-      }
-    },
-
-    {
-      "name": "Crate.0", "position": [-4.2, 13.3, -3.6], "rotationEuler": [0, 15, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [32, 32, 32], "voxelSize": 0.05, "seed": 1001, "brickCapacity": 512, "kind": 1 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crate.1", "position": [-3.4, 14.4, -4.1], "rotationEuler": [0, 40, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [32, 32, 32], "voxelSize": 0.05, "seed": 1002, "brickCapacity": 512, "kind": 1 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crate.2", "position": [-3.8, 15.4, -3.0], "rotationEuler": [8, 70, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [24, 24, 24], "voxelSize": 0.05, "seed": 1003, "brickCapacity": 256, "kind": 1 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crate.3", "position": [2.6, 13.7, -4.0], "rotationEuler": [0, 25, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [24, 24, 24], "voxelSize": 0.05, "seed": 1004, "brickCapacity": 256, "kind": 1 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crate.4", "position": [3.3, 16.1, -3.3], "rotationEuler": [0, 55, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [32, 32, 32], "voxelSize": 0.05, "seed": 1005, "brickCapacity": 512, "kind": 1 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crate.5", "position": [-0.6, 16.5, 3.9], "rotationEuler": [0, 80, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [32, 32, 32], "voxelSize": 0.05, "seed": 1006, "brickCapacity": 512, "kind": 1 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-
-    {
-      "name": "Boulder.0", "position": [-1.8, 16.5, -2.2],
-      "components": {
-        "voxelVolume": { "gridDim": [48, 48, 48], "voxelSize": 0.05, "seed": 2001, "brickCapacity": 1024, "kind": 2 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Boulder.1", "position": [1.5, 14.1, -1.9], "rotationEuler": [0, 30, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [32, 32, 32], "voxelSize": 0.05, "seed": 2002, "brickCapacity": 512, "kind": 2 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Boulder.2", "position": [2.2, 15.1, 1.4], "rotationEuler": [12, 60, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [32, 32, 32], "voxelSize": 0.05, "seed": 2003, "brickCapacity": 512, "kind": 2 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Boulder.3", "position": [-2.6, 15.8, 1.8], "rotationEuler": [0, 90, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [24, 24, 24], "voxelSize": 0.05, "seed": 2004, "brickCapacity": 256, "kind": 2 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Boulder.4", "position": [4.4, 13.6, -0.8], "rotationEuler": [0, 45, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [48, 48, 48], "voxelSize": 0.05, "seed": 2005, "brickCapacity": 1024, "kind": 2 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-
-    {
-      "name": "Crystal.0", "position": [-1.0, 14.8, -4.4],
-      "components": {
-        "voxelVolume": { "gridDim": [24, 24, 24], "voxelSize": 0.05, "seed": 3001, "brickCapacity": 384, "kind": 3 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crystal.1", "position": [0.8, 16.4, -3.1], "rotationEuler": [0, 45, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [16, 16, 16], "voxelSize": 0.05, "seed": 3002, "brickCapacity": 128, "kind": 3 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crystal.2", "position": [3.9, 14.3, 4.1], "rotationEuler": [0, 15, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [24, 24, 24], "voxelSize": 0.05, "seed": 3003, "brickCapacity": 384, "kind": 3 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
-      }
-    },
-    {
-      "name": "Crystal.3", "position": [-3.2, 15.7, 4.3], "rotationEuler": [0, 75, 0],
-      "components": {
-        "voxelVolume": { "gridDim": [16, 16, 16], "voxelSize": 0.05, "seed": 3004, "brickCapacity": 128, "kind": 3 },
-        "rigidbody": { "motionType": "dynamic" }, "voxelCollider": {}
       }
     },
 
