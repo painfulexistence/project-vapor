@@ -798,6 +798,11 @@ bool VoxelWorld::carveSphere(const glm::vec3& localCenter, float radius, glm::iv
     outMin = glm::ivec3(0);
     outMax = glm::ivec3(-1);  // empty box until we know better
     if (pageTable.empty() || radius <= 0.0f) return false;
+    // Exclusive against collider extraction reading these voxels on a worker
+    // (see lockVoxelsShared): a carve can materialize bricks and grow the
+    // pool, which would reallocate the array a concurrent reader is walking.
+    // Uncontended unless an edit lands exactly during a rebuild stripe.
+    const std::unique_lock<std::shared_mutex> editLock(editMutex);
     const glm::vec3 c = localCenter / voxelSize;  // sphere center in voxels
     const float rv = radius / voxelSize;
     const glm::ivec3 lo = glm::clamp(glm::ivec3(glm::floor(c - rv)), glm::ivec3(0), gridDim - 1);

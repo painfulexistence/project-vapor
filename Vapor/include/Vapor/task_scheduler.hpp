@@ -56,12 +56,24 @@ namespace Vapor {
         std::vector<std::function<void()>> m_mainThreadQueue;
         std::mutex m_mainThreadMutex;
 
+        // Submitted lambda tasks. enkiTS never owns task objects, so each one
+        // must live somewhere until it completes; they park here and are
+        // reaped lazily (see submitTask) or in waitForAll. The old code new'd
+        // them and forgot them, which leaked not just the wrapper but
+        // everything its closure captured — a generation job pins its whole
+        // VoxelWorld, a collider bake its shapes. Declared BEFORE m_scheduler:
+        // members die in reverse order, and the scheduler's destructor (which
+        // waits out the queue) must run while these objects still exist.
+        class LambdaTask;
+        std::vector<std::unique_ptr<LambdaTask>> m_tasks;
+        std::mutex m_taskMutex;
+
         std::unique_ptr<enki::TaskScheduler> m_scheduler;
         std::atomic<bool> m_initialized{ false };
     };
 
     // Lambda task wrapper for enkiTS
-    class LambdaTask : public enki::ITaskSet {
+    class TaskScheduler::LambdaTask : public enki::ITaskSet {
     public:
         LambdaTask(std::function<void()> func) : m_func(std::move(func)) {
         }
@@ -81,8 +93,13 @@ namespace Vapor {
             return;
         }
 
-        auto task = new LambdaTask(std::forward<Func>(func));
-        m_scheduler->AddTaskSetToPipe(task);
+        std::lock_guard<std::mutex> lock(m_taskMutex);
+        // Reap what has finished before adding more — amortized cleanup with
+        // no per-frame hook. GetIsComplete() true means the scheduler is done
+        // touching the object, so deleting it here is safe.
+        std::erase_if(m_tasks, [](const std::unique_ptr<LambdaTask>& t) { return t->GetIsComplete(); });
+        m_tasks.push_back(std::make_unique<LambdaTask>(std::forward<Func>(func)));
+        m_scheduler->AddTaskSetToPipe(m_tasks.back().get());
     }
 
 }// namespace Vapor

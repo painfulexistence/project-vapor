@@ -342,6 +342,31 @@ void spawnNextProp(entt::registry& reg, const Vapor::VirtualCameraComponent& cam
         fmt::print("All {} props spawned\n", std::size(kProps));
         return;
     }
+    if (physicsOn) {
+        // The terrain collider now cooks asynchronously, so for the first few
+        // frames after load there is no ground body. A prop dropped in that
+        // window would fall straight through and tunnel forever — hold the
+        // spawn (without consuming the palette entry) until at least one
+        // terrain chunk body is live.
+        bool terrainReady = false;
+        auto tv = reg.view<Vapor::VoxelVolumeComponent, Vapor::VoxelColliderComponent, Vapor::RigidbodyComponent>();
+        for (auto e : tv) {
+            auto& tvv = tv.get<Vapor::VoxelVolumeComponent>(e);
+            if (tvv.kind != Vapor::VoxelKind::Terrain) continue;
+            auto& tvc = tv.get<Vapor::VoxelColliderComponent>(e);
+            for (const auto& h : tvc.chunkBodies)
+                if (h.valid()) {
+                    terrainReady = true;
+                    break;
+                }
+            if (!terrainReady && tv.get<Vapor::RigidbodyComponent>(e).body.valid()) terrainReady = true;
+            break;
+        }
+        if (!terrainReady) {
+            fmt::print("Terrain collider still building - try again in a moment\n");
+            return;
+        }
+    }
     const PropDef& pd = kProps[next];
 
     const glm::vec3 fwd = cam.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
@@ -722,6 +747,9 @@ auto main(int argc, char* args[]) -> int {
         renderer->endFrame();
     }
 
+    // Collider bakes may still be in flight on the scheduler, and their
+    // lambdas call into Physics3D — drain them before tearing it down.
+    engineCore->getTaskScheduler().waitForAll();
     if (physics) physics->deinit();
     engineCore->shutdown();
     renderer->shutdown();

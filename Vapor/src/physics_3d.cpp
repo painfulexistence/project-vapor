@@ -670,25 +670,7 @@ auto Physics3D::createBoxBody(
 }
 
 bool Physics3D::setConvexHullShape(BodyHandle handle, const std::vector<glm::vec3>& points) {
-    auto it = bodies.find(handle.rid);
-    if (it == bodies.end() || points.size() < 4) return false;
-
-    JPH::Array<JPH::Vec3> joltPoints;
-    joltPoints.reserve(points.size());
-    for (const auto& p : points) {
-        joltPoints.push_back(JPH::Vec3(p.x, p.y, p.z));
-    }
-    JPH::ConvexHullShapeSettings shapeSettings(joltPoints);
-    shapeSettings.SetEmbedded();
-    JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
-    if (shapeResult.HasError()) return false;
-
-    // inUpdateMassProperties: a carved prop is lighter and differently
-    // balanced, so mass and inertia are re-derived rather than carried over.
-    // Activate too — a sleeping body would sit on stale contacts and never
-    // notice that its shape moved out from under them.
-    bodyInterface->SetShape(it->second, shapeResult.Get(), /*inUpdateMassProperties=*/true, JPH::EActivation::Activate);
-    return true;
+    return setBodyShape(handle, bakeConvexHullShape(points));
 }
 
 void Physics3D::addBody(BodyHandle handle, bool activate) {
@@ -1141,6 +1123,12 @@ auto Physics3D::createCylinderBody(
     return BodyHandle{ nextBodyID++ };
 }
 
+// The opaque payload behind PhysicsShapeRef: one ref-counted Jolt shape. Kept
+// out of the header so JPH types stay confined to this file.
+struct PhysicsShape {
+    JPH::ShapeRefC ref;
+};
+
 // Ask Jolt to suppress ghost contacts on the internal edges of a mesh. A body
 // resting on a triangle soup generates contacts on the shared edges between
 // triangles, where the raw normal points along the edge rather than out of the
@@ -1167,17 +1155,27 @@ auto Physics3D::createMeshBody(
     const glm::quat& rotation,
     BodyMotionType motionType
 ) -> BodyHandle {
-    // Convert vertices to Jolt format
+    // Bake + wrap; kept as the convenient synchronous path. Callers that can
+    // afford to cook off-thread use bakeMeshShape + createBodyFromShape.
+    PhysicsShapeRef shape = bakeMeshShape(vertices, indices);
+    if (!shape.valid()) {
+        throw std::runtime_error("Failed to create mesh shape");
+    }
+    return createBodyFromShape(shape, position, rotation, motionType);
+}
+
+auto Physics3D::bakeMeshShape(const std::vector<glm::vec3>& vertices, const std::vector<Uint32>& indices) const
+    -> PhysicsShapeRef {
+    if (vertices.empty() || indices.size() < 3) return {};
+
     JPH::VertexList joltVertices;
     joltVertices.reserve(vertices.size());
     for (const auto& v : vertices) {
         joltVertices.push_back(JPH::Float3(v.x, v.y, v.z));
     }
-
-    // Convert indices to Jolt format (triangles)
     JPH::IndexedTriangleList joltTriangles;
     joltTriangles.reserve(indices.size() / 3);
-    for (size_t i = 0; i < indices.size(); i += 3) {
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
         JPH::IndexedTriangle triangle;
         triangle.mIdx[0] = indices[i];
         triangle.mIdx[1] = indices[i + 1];
@@ -1185,59 +1183,39 @@ auto Physics3D::createMeshBody(
         joltTriangles.push_back(triangle);
     }
 
-    // Create mesh shape
+    // Pure shape cooking (this is where Jolt builds the mesh's internal tree)
+    // — no physics state touched, safe on any thread.
     JPH::MeshShapeSettings shapeSettings(joltVertices, joltTriangles);
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
-    if (shapeResult.HasError()) {
-        throw std::runtime_error("Failed to create mesh shape");
-    }
-    JPH::ShapeRefC shape = shapeResult.Get();
-
-    // Mesh bodies are usually static
-    JPH::BodyCreationSettings bodySettings(
-        shape,
-        JPH::RVec3(position.x, position.y, position.z),
-        JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
-        convertMotionType(motionType),
-        Layers::nonMoving// Mesh shapes should be static
-    );
-    enableEnhancedInternalEdgeRemoval(bodySettings);
-
-    JPH::Body* body = bodyInterface->CreateBody(bodySettings);
-    if (!body) {
-        throw std::runtime_error("Failed to create mesh body");
-    }
-    bodies[nextBodyID] = body->GetID();
-    bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
-
-    return BodyHandle{ nextBodyID++ };
+    if (shapeResult.HasError()) return {};
+    auto payload = std::make_shared<PhysicsShape>();
+    payload->ref = shapeResult.Get();
+    return PhysicsShapeRef{ std::move(payload) };
 }
 
-auto Physics3D::createConvexHullBody(
-    const std::vector<glm::vec3>& points,
-    const glm::vec3& position,
-    const glm::quat& rotation,
-    BodyMotionType motionType
-) -> BodyHandle {
-    // Convert points to Jolt format
+auto Physics3D::bakeConvexHullShape(const std::vector<glm::vec3>& points) const -> PhysicsShapeRef {
+    if (points.size() < 4) return {};
     JPH::Array<JPH::Vec3> joltPoints;
     joltPoints.reserve(points.size());
     for (const auto& p : points) {
         joltPoints.push_back(JPH::Vec3(p.x, p.y, p.z));
     }
-
-    // Create convex hull shape
     JPH::ConvexHullShapeSettings shapeSettings(joltPoints);
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
-    if (shapeResult.HasError()) {
-        throw std::runtime_error("Failed to create convex hull shape");
-    }
-    JPH::ShapeRefC shape = shapeResult.Get();
+    if (shapeResult.HasError()) return {};
+    auto payload = std::make_shared<PhysicsShape>();
+    payload->ref = shapeResult.Get();
+    return PhysicsShapeRef{ std::move(payload) };
+}
 
+auto Physics3D::createBodyFromShape(
+    const PhysicsShapeRef& shape, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
+) -> BodyHandle {
+    if (!shape.valid()) return {};
     JPH::BodyCreationSettings bodySettings(
-        shape,
+        shape.shape->ref,
         JPH::RVec3(position.x, position.y, position.z),
         JPH::Quat(rotation.x, rotation.y, rotation.z, rotation.w),
         convertMotionType(motionType),
@@ -1246,13 +1224,33 @@ auto Physics3D::createConvexHullBody(
     enableEnhancedInternalEdgeRemoval(bodySettings);
 
     JPH::Body* body = bodyInterface->CreateBody(bodySettings);
-    if (!body) {
-        throw std::runtime_error("Failed to create convex hull body");
-    }
+    if (!body) return {};
     bodies[nextBodyID] = body->GetID();
     bodyIDToRid[body->GetID().GetIndexAndSequenceNumber()] = nextBodyID;
-
     return BodyHandle{ nextBodyID++ };
+}
+
+auto Physics3D::setBodyShape(BodyHandle handle, const PhysicsShapeRef& shape) -> bool {
+    auto it = bodies.find(handle.rid);
+    if (it == bodies.end() || !shape.valid()) return false;
+    // Update mass properties (a carved prop is lighter and differently
+    // balanced) and wake the body — asleep it would sit on stale contacts and
+    // never notice its shape moved.
+    bodyInterface->SetShape(it->second, shape.shape->ref, /*inUpdateMassProperties=*/true, JPH::EActivation::Activate);
+    return true;
+}
+
+auto Physics3D::createConvexHullBody(
+    const std::vector<glm::vec3>& points,
+    const glm::vec3& position,
+    const glm::quat& rotation,
+    BodyMotionType motionType
+) -> BodyHandle {
+    PhysicsShapeRef shape = bakeConvexHullShape(points);
+    if (!shape.valid()) {
+        throw std::runtime_error("Failed to create convex hull shape");
+    }
+    return createBodyFromShape(shape, position, rotation, motionType);
 }
 
 // ====== Trigger 創建方法 ======

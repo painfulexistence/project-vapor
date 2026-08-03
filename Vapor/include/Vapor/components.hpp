@@ -62,6 +62,8 @@ namespace Vapor {
         glm::vec3 halfSize = glm::vec3(0.5f);
     };
 
+    struct VoxelColliderBuild;// voxel_collider_build.hpp — in-flight async extraction
+
     // Derives a collider from the entity's VoxelVolumeComponent once that
     // volume has finished generating (VoxelColliderSystem builds it). The
     // paired RigidbodyComponent's motion type picks the shape: a Static body
@@ -119,6 +121,11 @@ namespace Vapor {
         // only reports it; what destruction means (despawn, spawn debris, swap
         // in a broken variant) is the game's call.
         bool destroyed = false;
+        // In-flight asynchronous extraction, if any (see
+        // voxel_collider_build.hpp). The tasks hold their own references to
+        // both the build and the VoxelWorld, so destroying this component
+        // mid-build is safe — the result is simply never applied.
+        Hidden<std::shared_ptr<VoxelColliderBuild>> build = {};
     };
 
     struct SphereColliderComponent {

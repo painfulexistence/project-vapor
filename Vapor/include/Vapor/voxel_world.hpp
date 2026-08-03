@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <glm/glm.hpp>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 namespace Vapor {
@@ -179,6 +180,20 @@ public:
     // `directions`.
     void buildConvexHullPoints(std::vector<glm::vec3>& outPoints, int directions = 64) const;
 
+    // The extractors above read the page table and brick pool without internal
+    // locking — meshing walks millions of cells, and a lock per voxel would be
+    // absurd. Anything reading them from another thread must hold this shared
+    // lock for the whole read instead; carveSphere takes the matching
+    // exclusive lock. This is not optional: a carve can MATERIALIZE uniform
+    // bricks, which may grow the brick pool and reallocate the very array a
+    // concurrent reader is walking — use-after-free, not just a torn value.
+    // Generation is not covered (it predates any collider build and writes
+    // disjoint chunks); the pair that matters is carve vs. post-generation
+    // extraction.
+    [[nodiscard]] std::shared_lock<std::shared_mutex> lockVoxelsShared() const {
+        return std::shared_lock<std::shared_mutex>(editMutex);
+    }
+
     // ---- Queries ---------------------------------------------------------
     Uint8 voxelAt(const glm::ivec3& cell) const;
     bool isInside(const glm::ivec3& cell) const {
@@ -268,6 +283,9 @@ private:
     glm::ivec3 occMax { -1 };                  // occMax < occMin => empty. Guarded by poolMutex.
 
     mutable std::mutex poolMutex;  // guards freeSlots, bricks growth, dirty state
+    // Carve-vs-reader lock; see lockVoxelsShared. Separate from poolMutex,
+    // which only covers slot bookkeeping, not the voxel bytes themselves.
+    mutable std::shared_mutex editMutex;
     std::vector<Uint32> dirtyBrickSlots;
     std::vector<bool> brickDirtyFlags;  // slot -> already in dirtyBrickSlots
     bool pageTableDirty = false;

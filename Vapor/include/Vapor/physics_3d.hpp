@@ -57,6 +57,20 @@ struct TriggerTag {};
 using BodyHandle = PhysicsHandle<BodyTag>;
 using TriggerHandle = PhysicsHandle<TriggerTag>;
 
+// A collision shape baked OFF the body. Baking runs only Jolt's shape cooking
+// (the mesh BVH build, hull construction) and touches no physics state, so it
+// is safe on any worker thread — which is the whole point: cooking is the
+// expensive half of a voxel collider rebuild, and this lets it leave the main
+// thread while body creation stays on it. Opaque so Jolt types stay out of
+// this header; the ref-counted payload lives in physics_3d.cpp.
+struct PhysicsShape;
+struct PhysicsShapeRef {
+    std::shared_ptr<const PhysicsShape> shape;
+    bool valid() const {
+        return shape != nullptr;
+    }
+};
+
 struct RaycastHit {
     glm::vec3 point;
     glm::vec3 normal;
@@ -144,6 +158,23 @@ public:
         const glm::quat& rotation,
         BodyMotionType motionType
     );
+
+    // ---- Baked shapes (see PhysicsShapeRef) ------------------------------
+    // The bake* pair is thread-safe and touches no body state; everything that
+    // takes the result runs on the main thread. bakeMeshShape returns an
+    // invalid ref for degenerate input instead of throwing, since workers are
+    // the callers.
+    PhysicsShapeRef bakeMeshShape(const std::vector<glm::vec3>& vertices, const std::vector<Uint32>& indices) const;
+    PhysicsShapeRef bakeConvexHullShape(const std::vector<glm::vec3>& points) const;
+    // Wrap a baked shape in a new body (not yet added to the world — pair with
+    // addBody, exactly like the create*Body calls, which are now thin wrappers
+    // over bake + this).
+    BodyHandle createBodyFromShape(
+        const PhysicsShapeRef& shape, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
+    );
+    // Swap a baked shape into an existing body, keeping its velocity and place
+    // in the world; mass properties are re-derived and the body is woken.
+    bool setBodyShape(BodyHandle body, const PhysicsShapeRef& shape);
 
     // Replace a body's shape in place, keeping the body itself — and with it
     // its velocity, its contacts and its place in the world. This is what a
