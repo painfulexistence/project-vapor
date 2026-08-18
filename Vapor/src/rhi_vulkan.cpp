@@ -1803,7 +1803,16 @@ void RHI_Vulkan::generateMipmaps(TextureHandle handle) {
         return;
     }
 
-    VkCommandBuffer cmd = ensureUploadCmd();
+    // Inside a frame, record on the FRAME command buffer: the upload stream is
+    // submitted BEFORE the frame's commands (see endFrame), so a mid-frame mip
+    // chain recorded there would read the texture before this frame's passes
+    // wrote it — and its layout transitions would run against last frame's
+    // layout (a validation error, since currentLayout is tracked at record
+    // time). The RT chain regenerates shadowRT/reflectionRT mips right after
+    // their compute passes, which is exactly this case. Load-time calls (no
+    // active frame) keep the batched upload stream.
+    VkCommandBuffer cmd = (currentCommandBuffer != VK_NULL_HANDLE) ? currentCommandBuffer
+                                                                   : ensureUploadCmd();
 
     // sync2 pairs stage + access per barrier, so each transition can scope
     // precisely (BLIT for the blit chain, FRAGMENT_SHADER for the final
