@@ -7,9 +7,20 @@
 #include "rhi_vulkan.hpp"
 #include "helper.hpp"
 #include "stats_log.hpp"
+// RenderDoc in-application capture API (captureFrame); resolved at runtime
+// only when the process was launched under RenderDoc.
+#include "renderdoc/renderdoc_app.h"
 #include <fmt/core.h>
 #include <cstring>
 #include <algorithm>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 using namespace Vapor;
 
@@ -50,8 +61,9 @@ bool RHI_Vulkan::initialize(SDL_Window* windowPtr) {
         return false;
     }
 
-    // Compute pipelines + resource binding are implemented; raytracing
-    // (VK_KHR_acceleration_structure) is not yet.
+    // capabilities.raytracing / meshShaders / bindlessTextures /
+    // multiDrawIndirect were set during createLogicalDevice from what the
+    // device actually enabled.
     capabilities.computeShaders = true;
     capabilities.gpuTimestamps = gpuTimingSupported;
 
@@ -448,17 +460,26 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
     fragmentBufferSetLayout = makeBufferSetLayout();
 
     {
-        VkDescriptorSetLayoutBinding bindings[TEXTURE_BINDINGS_PER_SET];
-        for (Uint32 i = 0; i < TEXTURE_BINDINGS_PER_SET; i++) {
+        // Runtime-sized (see textureBindingCount): 13 on MoltenVK, widened to
+        // TEXTURE_BINDINGS_MAX on desktop so the main pass can sample the RT
+        // outputs (b13-b17) and the task stage the Hi-Z pyramid (b18+, see
+        // setObjectTexture). Task/mesh visibility is added with mesh shaders so
+        // the meshlet cull can sample textures through this set.
+        VkShaderStageFlags textureStages = VK_SHADER_STAGE_FRAGMENT_BIT;
+        if (meshShadersEnabled) {
+            textureStages |= VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT;
+        }
+        VkDescriptorSetLayoutBinding bindings[TEXTURE_BINDINGS_MAX];
+        for (Uint32 i = 0; i < textureBindingCount; i++) {
             bindings[i] = {};
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             bindings[i].descriptorCount = 1;
-            bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bindings[i].stageFlags = textureStages;
         }
         VkDescriptorSetLayoutCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        info.bindingCount = TEXTURE_BINDINGS_PER_SET;
+        info.bindingCount = textureBindingCount;
         info.pBindings = bindings;
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &textureSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create texture descriptor set layout");
@@ -469,15 +490,18 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
     // array (partially bound + update-after-bind, so entries can be written
     // sparsely and after the set is bound) plus one immutable-ish sampler slot.
     if (descriptorIndexingEnabled) {
+        // COMPUTE visibility lets the same set layout serve as compute set 4
+        // (RT hit-shading samples per-material albedo from the table — the
+        // Vulkan twin of Metal's bindComputeTextureArgumentTable).
         VkDescriptorSetLayoutBinding b[2]{};
         b[0].binding = 0;
         b[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         b[0].descriptorCount = BINDLESS_TABLE_CAPACITY;
-        b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        b[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
         b[1].binding = 1;
         b[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
         b[1].descriptorCount = 1;
-        b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        b[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
 
         VkDescriptorBindingFlags flags[2] = {
             VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
@@ -560,10 +584,15 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         }
     }
 
-    // Compute set layouts + layout (same model, compute stage)
+    // Compute set layouts + layout (same model, compute stage).
+    //   set 0 = storage buffers (runtime-sized: 8 on MoltenVK, 16 on desktop —
+    //           the RT hit-shading kernels bind up to slot 11)
+    //   set 1 = storage images, set 2 = sampled textures (8 each)
+    //   set 3 = acceleration structures (raytracing only)
+    //   set 4 = bindless texture table (raytracing + descriptor indexing)
     {
-        VkDescriptorSetLayoutBinding bindings[BINDINGS_PER_SET];
-        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+        VkDescriptorSetLayoutBinding bindings[COMPUTE_BUFFER_BINDINGS_MAX];
+        for (Uint32 i = 0; i < computeBufferBindingCount; i++) {
             bindings[i] = {};
             bindings[i].binding = i;
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -572,7 +601,7 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         }
         VkDescriptorSetLayoutCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        info.bindingCount = BINDINGS_PER_SET;
+        info.bindingCount = computeBufferBindingCount;
         info.pBindings = bindings;
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeBufferSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create compute buffer set layout");
@@ -580,6 +609,7 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         }
+        info.bindingCount = BINDINGS_PER_SET;
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeImageSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create compute image set layout");
         }
@@ -592,9 +622,21 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeSampledSetLayout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create compute sampled set layout");
         }
+        // Set 3 = acceleration structures (setAccelerationStructure). Only
+        // created when RT is on — the AS descriptor type is invalid without
+        // the extension, and MoltenVK never reaches this.
+        if (raytracingEnabled) {
+            for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+                bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            }
+            if (vkCreateDescriptorSetLayout(device, &info, nullptr, &computeAccelSetLayout) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create compute accel set layout");
+            }
+        }
 
-        VkDescriptorSetLayout computeSets[3] = { computeBufferSetLayout, computeImageSetLayout,
-                                                 computeSampledSetLayout };
+        VkDescriptorSetLayout computeSets[5] = { computeBufferSetLayout, computeImageSetLayout,
+                                                 computeSampledSetLayout, computeAccelSetLayout,
+                                                 bindlessSetLayout };
         VkPushConstantRange computePush{};
         computePush.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         computePush.offset = 0;
@@ -602,6 +644,9 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         VkPipelineLayoutCreateInfo computeLayoutInfo{};
         computeLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         computeLayoutInfo.setLayoutCount = 3;
+        if (raytracingEnabled) {
+            computeLayoutInfo.setLayoutCount = descriptorIndexingEnabled ? 5 : 4;
+        }
         computeLayoutInfo.pSetLayouts = computeSets;
         computeLayoutInfo.pushConstantRangeCount = 1;
         computeLayoutInfo.pPushConstantRanges = &computePush;
@@ -619,15 +664,18 @@ void RHI_Vulkan::createDescriptorInfrastructure() {
         // full scene + RmlUI geometry churn. 4x the headroom (~2048 draws/frame).
         // Samplers sized for the 16-binding texture set (16 x 2048 = 32768);
         // storage buffers stay at 8-per-set headroom (8 x 2 x 2048 = 32768).
-        VkDescriptorPoolSize sizes[3] = {
+        VkDescriptorPoolSize sizes[4] = {
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 32768 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768 },
             { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096 },
+            // Compute flushes allocate a fresh AS set alongside the buffer/
+            // image/sampled trio while RT is on (8 slots per set).
+            { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 4096 },
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.maxSets = 16384;
-        poolInfo.poolSizeCount = 3;
+        poolInfo.poolSizeCount = raytracingEnabled ? 4 : 3;
         poolInfo.pPoolSizes = sizes;
         if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create descriptor pool");
@@ -650,7 +698,7 @@ void RHI_Vulkan::destroyDescriptorInfrastructure() {
     }
     for (VkDescriptorSetLayout* layout : { &vertexBufferSetLayout, &fragmentBufferSetLayout, &textureSetLayout,
                                            &computeBufferSetLayout, &computeImageSetLayout, &computeSampledSetLayout,
-                                           &bindlessSetLayout }) {
+                                           &computeAccelSetLayout, &bindlessSetLayout }) {
         if (*layout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device, *layout, nullptr);
             *layout = VK_NULL_HANDLE;
@@ -698,14 +746,14 @@ void RHI_Vulkan::flushDescriptors() {
     }
     statsDescriptorSets += 3;
 
-    // writeCount is bounded by 3 sets x BINDINGS_PER_SET; the arrays below are
-    // sized to exactly that. static_assert keeps them in sync if a 4th set is
-    // added or BINDINGS_PER_SET changes (else vkUpdateDescriptorSets corrupts).
-    // Write only the slots that have been bound; untouched slots stay
-    // undefined, which is fine as long as no bound shader statically uses them.
-    VkWriteDescriptorSet writes[BINDINGS_PER_SET * 2 + TEXTURE_BINDINGS_PER_SET];
+    // writeCount is bounded by 2 buffer sets + the texture set; the arrays are
+    // sized for the compile-time maxima (the runtime textureBindingCount never
+    // exceeds TEXTURE_BINDINGS_MAX). Write only the slots that have been bound;
+    // untouched slots stay undefined, which is fine as long as no bound shader
+    // statically uses them.
+    VkWriteDescriptorSet writes[BINDINGS_PER_SET * 2 + TEXTURE_BINDINGS_MAX];
     VkDescriptorBufferInfo bufferInfos[BINDINGS_PER_SET * 2];
-    VkDescriptorImageInfo imageInfos[TEXTURE_BINDINGS_PER_SET];
+    VkDescriptorImageInfo imageInfos[TEXTURE_BINDINGS_MAX];
     Uint32 writeCount = 0, bufferCount = 0, imageCount = 0;
 
     auto writeBuffers = [&](const BufferBinding* bindings, VkDescriptorSet set) {
@@ -726,7 +774,7 @@ void RHI_Vulkan::flushDescriptors() {
     writeBuffers(boundVertexBuffers, sets[0]);
     writeBuffers(boundFragmentBuffers, sets[1]);
 
-    for (Uint32 i = 0; i < TEXTURE_BINDINGS_PER_SET; i++) {
+    for (Uint32 i = 0; i < textureBindingCount; i++) {
         if (boundTextures[i].view == VK_NULL_HANDLE) continue;
         VkDescriptorImageInfo& info = imageInfos[imageCount++];
         info = { boundTextures[i].sampler, boundTextures[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -860,6 +908,26 @@ void RHI_Vulkan::shutdown() {
         // once in destroyDescriptorInfrastructure() — see the graphics loop above.
     }
     computePipelines.clear();
+
+    // Destroy acceleration structures + their backing/scratch/instance buffers
+    // (allocated directly through VMA, not in the `buffers` map). The device is
+    // idle here, so immediate destruction is safe.
+    for (auto& [id, res] : accelStructs) {
+        for (Uint32 s = 0; s < AccelStructResource::kTlasSlots; s++) {
+            if (res.accelSlots[s] != VK_NULL_HANDLE && pfnDestroyAccelStruct) {
+                pfnDestroyAccelStruct(device, res.accelSlots[s], nullptr);
+                res.accelSlots[s] = VK_NULL_HANDLE;
+            }
+            for (AccelBuffer* b : { &res.accelBufferSlots[s], &res.scratchSlots[s], &res.instanceSlots[s] }) {
+                if (b->buffer != VK_NULL_HANDLE) {
+                    vmaDestroyBuffer(allocator, b->buffer, b->allocation);
+                    b->buffer = VK_NULL_HANDLE;
+                    b->allocation = VK_NULL_HANDLE;
+                }
+            }
+        }
+    }
+    accelStructs.clear();
 
     destroyDescriptorInfrastructure();
 
@@ -1961,6 +2029,16 @@ void RHI_Vulkan::beginFrame() {
     // and endFrame() no-op while it stays null (skipped frame).
     currentCommandBuffer = VK_NULL_HANDLE;
 
+    // One-shot RenderDoc capture armed by captureFrame(): bracket this whole
+    // frame (ended after present in endFrame).
+    if (captureArmed) {
+        captureArmed = false;
+        if (auto* api = static_cast<RENDERDOC_API_1_1_2*>(rdocApi)) {
+            api->StartFrameCapture(nullptr, nullptr);
+            captureActive = true;
+        }
+    }
+
     // Submit any pending uploads first: same-queue submission order makes the
     // data visible to this frame's commands without a CPU wait.
     submitUploads(false);
@@ -2126,6 +2204,52 @@ void RHI_Vulkan::endFrame() {
 
     frameCounter++;  // retirement clock: this frame's work is now "in flight"
     currentFrameInFlight = (currentFrameInFlight + 1) % MAX_FRAMES_IN_FLIGHT;
+
+    // Close an active RenderDoc capture after present so the whole frame's
+    // submissions are in the capture file.
+    if (captureActive) {
+        captureActive = false;
+        if (auto* api = static_cast<RENDERDOC_API_1_1_2*>(rdocApi)) {
+            api->EndFrameCapture(nullptr, nullptr);
+            fmt::print("[VK] RenderDoc capture written (template: {})\n",
+                       api->GetCaptureFilePathTemplate());
+        }
+    }
+}
+
+void RHI_Vulkan::captureFrame(const char* outPath) {
+    // Only works when the process already runs under RenderDoc (its module is
+    // injected before instance creation); we never load the library ourselves
+    // — attaching RenderDoc late cannot hook an existing VkInstance.
+    if (!rdocResolved) {
+        rdocResolved = true;
+        pRENDERDOC_GetAPI getApi = nullptr;
+#ifdef _WIN32
+        if (HMODULE mod = GetModuleHandleA("renderdoc.dll")) {
+            getApi = (pRENDERDOC_GetAPI)(void*)GetProcAddress(mod, "RENDERDOC_GetAPI");
+        }
+#elif defined(__linux__)
+        if (void* mod = dlopen("librenderdoc.so", RTLD_NOW | RTLD_NOLOAD)) {
+            getApi = (pRENDERDOC_GetAPI)dlsym(mod, "RENDERDOC_GetAPI");
+        }
+#endif
+        if (getApi) {
+            void* api = nullptr;
+            if (getApi(eRENDERDOC_API_Version_1_1_2, &api) == 1) {
+                rdocApi = api;
+            }
+        }
+    }
+    if (!rdocApi) {
+        fmt::print("[VK] captureFrame: not running under RenderDoc — launch the app "
+                   "from RenderDoc (or with its injection) to capture\n");
+        return;
+    }
+    if (outPath && *outPath) {
+        // RenderDoc appends _frameN.rdc to the template.
+        static_cast<RENDERDOC_API_1_1_2*>(rdocApi)->SetCaptureFilePathTemplate(outPath);
+    }
+    captureArmed = true;  // consumed at the next beginFrame
 }
 
 VkImageView RHI_Vulkan::getDepthLayerView(TextureResource& tex, Uint32 layer) {
@@ -2464,7 +2588,7 @@ void RHI_Vulkan::setFragmentBytes(const void* data, size_t size, Uint32 binding)
 void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
     auto texIt = textures.find(texture.id);
     auto samplerIt = samplers.find(sampler.id);
-    if (texIt == textures.end() || samplerIt == samplers.end() || binding >= TEXTURE_BINDINGS_PER_SET) {
+    if (texIt == textures.end() || samplerIt == samplers.end() || binding >= textureBindingCount) {
         return;
     }
     TextureBinding& cur = boundTextures[binding];
@@ -2472,6 +2596,18 @@ void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, S
         cur = { texIt->second.view, samplerIt->second.sampler };
         descriptorsDirty = true;
     }
+}
+
+void RHI_Vulkan::setObjectTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) {
+    // Task/object-stage texture (the Hi-Z pyramid the meshlet cull samples).
+    // Metal has a separate object-stage texture namespace; on Vulkan the
+    // texture set is task/mesh-visible when mesh shaders are on, so object
+    // binding b maps to set 2 binding (OBJECT_TEXTURE_BASE + b). The GLSL task
+    // shader declares the Hi-Z sampler at that binding.
+    if (!meshShadersEnabled) return;
+    Uint32 slot = OBJECT_TEXTURE_BASE + binding;
+    if (slot >= textureBindingCount) return;  // set not widened (limits too low)
+    setTexture(2, slot, texture, sampler);
 }
 
 void RHI_Vulkan::draw(Uint32 vertexCount, Uint32 instanceCount, Uint32 firstVertex, Uint32 firstInstance) {
@@ -2590,6 +2726,21 @@ void RHI_Vulkan::bindTextureArgumentTable(BufferHandle table) {
     if (tit == bindlessTables.end() || currentCommandBuffer == VK_NULL_HANDLE) return;
     vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             globalPipelineLayout, /*firstSet=*/3, 1, &tit->second.set,
+                            0, nullptr);
+}
+
+void RHI_Vulkan::bindComputeTextureArgumentTable(BufferHandle table, Uint32 /*bufferIndex*/) {
+    // RT hit shading (reflection/refraction kernels) samples per-material
+    // albedo from the bindless table. The compute pipeline layout carries the
+    // bindless set at index 4 only while RT + descriptor indexing are both on;
+    // set-4 bindings persist across the sets 0-3 rebinds flushComputeDescriptors
+    // does (identical layouts => bind compatibility). Metal's bufferIndex has
+    // no meaning here — the GLSL kernels declare set = 4.
+    if (!raytracingEnabled || !descriptorIndexingEnabled) return;
+    auto tit = bindlessTables.find(table.id);
+    if (tit == bindlessTables.end() || currentCommandBuffer == VK_NULL_HANDLE) return;
+    vkCmdBindDescriptorSets(currentCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            computePipelineLayout, /*firstSet=*/4, 1, &tit->second.set,
                             0, nullptr);
 }
 
@@ -2833,6 +2984,14 @@ void RHI_Vulkan::createLogicalDevice() {
         VK_KHR_MAINTENANCE_2_EXTENSION_NAME,
         VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME
     };
+    // Raytracing feature structs must outlive the extension-detection scope —
+    // they are chained into VkDeviceCreateInfo::pNext below when supported.
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelStructFeatures{};
+    accelStructFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures{};
+    bdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
     {
         uint32_t extCount = 0;
         vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
@@ -2857,6 +3016,42 @@ void RHI_Vulkan::createLogicalDevice() {
             if (supported.taskShader && supported.meshShader) {
                 deviceExtensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
                 meshShadersEnabled = true;
+            }
+        }
+#endif
+        // Hardware raytracing (RenderGraph RT passes: shadows, stochastic
+        // shadows, reflections, refractions, GIBS). All consumption is inline
+        // ray queries from compute — VK_KHR_ray_query, not the RT pipeline
+        // extension — mirroring the Metal backend's intersector-in-kernel
+        // model. deferred_host_operations is a hard dependency of
+        // acceleration_structure; buffer_device_address is core 1.2 but its
+        // feature must be enabled explicitly. MoltenVK advertises none of
+        // these, so macOS-under-Vulkan cleanly keeps raytracing = false.
+#if defined(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && defined(VK_KHR_RAY_QUERY_EXTENSION_NAME)
+        if (has(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+            has(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+            has(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)) {
+            VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAccel{};
+            supportedAccel.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+            VkPhysicalDeviceRayQueryFeaturesKHR supportedRayQuery{};
+            supportedRayQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+            supportedRayQuery.pNext = &supportedAccel;
+            VkPhysicalDeviceBufferDeviceAddressFeatures supportedBda{};
+            supportedBda.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+            supportedBda.pNext = &supportedRayQuery;
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &supportedBda;
+            vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+            if (supportedAccel.accelerationStructure && supportedRayQuery.rayQuery &&
+                supportedBda.bufferDeviceAddress) {
+                deviceExtensions.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+                deviceExtensions.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+                deviceExtensions.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+                accelStructFeatures.accelerationStructure = VK_TRUE;
+                rayQueryFeatures.rayQuery = VK_TRUE;
+                bdaFeatures.bufferDeviceAddress = VK_TRUE;
+                raytracingEnabled = true;
             }
         }
 #endif
@@ -2933,6 +3128,12 @@ void RHI_Vulkan::createLogicalDevice() {
         descriptorIndexingFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &descriptorIndexingFeatures;
     }
+    if (raytracingEnabled) {
+        bdaFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        rayQueryFeatures.pNext = &bdaFeatures;
+        accelStructFeatures.pNext = &rayQueryFeatures;
+        deviceInfo.pNext = &accelStructFeatures;
+    }
     const VkDeviceQueueCreateInfo queueCreateInfos[2] = { graphicsQueueInfo, presentQueueInfo };
     deviceInfo.pQueueCreateInfos = queueCreateInfos;
     // Same family: one queue info — listing a family twice is invalid (VUID-02802).
@@ -2962,8 +3163,32 @@ void RHI_Vulkan::createLogicalDevice() {
         // Cap at 1.3 (our target); MoltenVK may report lower — VMA scales its
         // feature use (dedicated allocations etc.) to whatever this says.
         allocatorInfo.vulkanApiVersion = std::min(props.apiVersion, VK_API_VERSION_1_3);
+        // The bufferDeviceAddress feature was enabled above (RT builds read
+        // vertex/index/instance data by VkDeviceAddress); VMA asserts on any
+        // SHADER_DEVICE_ADDRESS buffer unless it is told the feature is on.
+        if (raytracingEnabled) {
+            allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+        }
         if (vmaCreateAllocator(&allocatorInfo, &allocator) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create VMA allocator");
+        }
+    }
+
+    // Runtime descriptor-set sizes, widened from the MoltenVK-safe defaults
+    // when the device limits allow (see the constants in the header): the RT
+    // compute passes bind storage buffers up to slot 11, and the main pass
+    // samples the RT outputs at texture slots 13-17 (+ Hi-Z at 18 for the
+    // task stage).
+    {
+        VkPhysicalDeviceProperties limitProps{};
+        vkGetPhysicalDeviceProperties(physicalDevice, &limitProps);
+        const VkPhysicalDeviceLimits& limits = limitProps.limits;
+        computeBufferBindingCount = std::min<Uint32>(COMPUTE_BUFFER_BINDINGS_MAX,
+                                                     limits.maxPerStageDescriptorStorageBuffers);
+        computeBufferBindingCount = std::max(computeBufferBindingCount, BINDINGS_PER_SET);
+        if (limits.maxPerStageDescriptorSamplers >= TEXTURE_BINDINGS_MAX &&
+            limits.maxPerStageDescriptorSampledImages >= TEXTURE_BINDINGS_MAX) {
+            textureBindingCount = TEXTURE_BINDINGS_MAX;
         }
     }
 
@@ -2994,6 +3219,36 @@ void RHI_Vulkan::createLogicalDevice() {
             (PFN_vkCmdDrawMeshTasksIndirectEXT)vkGetDeviceProcAddr(device, "vkCmdDrawMeshTasksIndirectEXT");
         capabilities.meshShaders = pfnCmdDrawMeshTasks != nullptr;
         meshShadersEnabled = capabilities.meshShaders;
+    }
+
+    if (raytracingEnabled) {
+        pfnCreateAccelStruct =
+            (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR");
+        pfnDestroyAccelStruct =
+            (PFN_vkDestroyAccelerationStructureKHR)vkGetDeviceProcAddr(device, "vkDestroyAccelerationStructureKHR");
+        pfnGetAccelBuildSizes = (PFN_vkGetAccelerationStructureBuildSizesKHR)vkGetDeviceProcAddr(
+            device, "vkGetAccelerationStructureBuildSizesKHR");
+        pfnGetAccelDeviceAddress = (PFN_vkGetAccelerationStructureDeviceAddressKHR)vkGetDeviceProcAddr(
+            device, "vkGetAccelerationStructureDeviceAddressKHR");
+        pfnCmdBuildAccelStructs = (PFN_vkCmdBuildAccelerationStructuresKHR)vkGetDeviceProcAddr(
+            device, "vkCmdBuildAccelerationStructuresKHR");
+        pfnGetBufferDeviceAddress =
+            (PFN_vkGetBufferDeviceAddress)loadDeviceProc("vkGetBufferDeviceAddress", "vkGetBufferDeviceAddressKHR");
+        raytracingEnabled = pfnCreateAccelStruct && pfnDestroyAccelStruct && pfnGetAccelBuildSizes &&
+                            pfnGetAccelDeviceAddress && pfnCmdBuildAccelStructs && pfnGetBufferDeviceAddress;
+        if (raytracingEnabled) {
+            VkPhysicalDeviceAccelerationStructurePropertiesKHR accelProps{};
+            accelProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+            VkPhysicalDeviceProperties2 props2{};
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &accelProps;
+            vkGetPhysicalDeviceProperties2(physicalDevice, &props2);
+            accelScratchAlignment = std::max<Uint32>(accelProps.minAccelerationStructureScratchOffsetAlignment, 1);
+        }
+        // Mirrors the Metal backend's CI guard: virtualized CI GPUs may
+        // advertise the extensions but fail AS builds.
+        if (std::getenv("GITHUB_ACTIONS")) raytracingEnabled = false;
+        capabilities.raytracing = raytracingEnabled;
     }
 }
 
@@ -3299,15 +3554,26 @@ VkBufferUsageFlags RHI_Vulkan::convertBufferUsage(BufferUsage usage) {
     // copies. Uniform also carries STORAGE because the RHI binding model
     // exposes every buffer binding as an SSBO (std430) — see the descriptor
     // binding model notes in rhi_vulkan.hpp.
+    //
+    // With raytracing enabled, Vertex and Index also become BLAS build inputs
+    // (read by device address during vkCmdBuildAccelerationStructuresKHR), and
+    // Index gains STORAGE so the RT hit-shading kernels can fetch triangle
+    // indices from the merged index buffer — Metal buffers are usage-agnostic,
+    // so this is where the parity cost lands on Vulkan.
+    const VkBufferUsageFlags rtInput = raytracingEnabled
+        ? (VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)
+        : 0;
     switch (usage) {
         case BufferUsage::Vertex:
             // STORAGE so mesh shaders (and any vertex-pulling path) can read
             // vertex buffers as SSBOs — the meshlet path samples the merged
             // vertex buffer from the mesh stage.
             return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                   VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT | rtInput;
         case BufferUsage::Index:
-            return VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            return VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                   (raytracingEnabled ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT : 0) | rtInput;
         case BufferUsage::Uniform:
             return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -3389,30 +3655,409 @@ void RHI_Vulkan::destroyComputePipeline(ComputePipelineHandle handle) {
 }
 
 // ============================================================================
-// Acceleration Structures (Stub - requires VK_KHR_acceleration_structure)
+// Acceleration Structures (VK_KHR_acceleration_structure, consumed by
+// VK_KHR_ray_query from compute kernels)
+//
+// Semantics mirror the Metal backend exactly:
+//  - BLAS: all geometries accumulate into ONE structure; position = float3 at
+//    offset 0 of the vertex struct, uint32 indices, no per-geometry transform,
+//    opaque geometry. Built once at registration on a one-off submission after
+//    a blocking upload flush (building over not-yet-copied vertex data would
+//    silently produce an empty BLAS).
+//  - TLAS: full rebuild per updateAccelerationStructure into a rotating slot
+//    (rebuilding in place while an in-flight frame's rays traverse it is a GPU
+//    hazard on every vendor). Built on the frame command buffer when inside a
+//    frame (ordered before the frame's RT dispatches), else one-off + wait.
+//  - Divergence Vulkan requires: VkTransformMatrixKHR is row-major [3][4], so
+//    the column-major glm transform is transposed here (Metal copies columns
+//    verbatim into PackedFloat4x3); instanceID lands in the 24-bit
+//    instanceCustomIndex (gl_RayQueryInstanceCustomIndexEXT) instead of
+//    Metal's 32-bit userID.
+//  - A TLAS is built with zero instances at creation so its descriptor is
+//    always valid — rays miss until the first real build, matching the null-
+//    TLAS fallback the Metal kernels implement.
 // ============================================================================
 
+VkDeviceAddress RHI_Vulkan::getBufferAddress(VkBuffer buffer) const {
+    VkBufferDeviceAddressInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    info.buffer = buffer;
+    return pfnGetBufferDeviceAddress(device, &info);
+}
+
+void RHI_Vulkan::ensureAccelBuffer(AccelBuffer& slot, VkDeviceSize size, VkBufferUsageFlags usage,
+                                   bool hostVisible, VkDeviceSize alignment) {
+    if (slot.buffer != VK_NULL_HANDLE && slot.size >= size) return;  // grow-only
+    releaseAccelBuffer(slot);
+
+    VkBufferCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.size = size;
+    info.usage = usage;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VmaAllocationCreateInfo allocCreate{};
+    allocCreate.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    if (hostVisible) {
+        allocCreate.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                            VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        allocCreate.requiredFlags =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    }
+    VmaAllocationInfo allocResult{};
+    VkResult r;
+    if (alignment > 1) {
+        r = vmaCreateBufferWithAlignment(allocator, &info, &allocCreate, alignment,
+                                         &slot.buffer, &slot.allocation, &allocResult);
+    } else {
+        r = vmaCreateBuffer(allocator, &info, &allocCreate, &slot.buffer, &slot.allocation, &allocResult);
+    }
+    if (r != VK_SUCCESS) {
+        slot.buffer = VK_NULL_HANDLE;
+        slot.allocation = VK_NULL_HANDLE;
+        slot.size = 0;
+        slot.mapped = nullptr;
+        throw std::runtime_error("Failed to allocate acceleration structure buffer");
+    }
+    slot.size = size;
+    slot.mapped = hostVisible ? allocResult.pMappedData : nullptr;
+}
+
+void RHI_Vulkan::releaseAccelBuffer(AccelBuffer& slot) {
+    if (slot.buffer == VK_NULL_HANDLE) return;
+    // Defer: a prior frame (or the last TLAS slot round) may still reference it.
+    VmaAllocator alloc = allocator;
+    VkBuffer buf = slot.buffer;
+    VmaAllocation a = slot.allocation;
+    deferDestroy([alloc, buf, a]() { vmaDestroyBuffer(alloc, buf, a); });
+    slot.buffer = VK_NULL_HANDLE;
+    slot.allocation = VK_NULL_HANDLE;
+    slot.size = 0;
+    slot.mapped = nullptr;
+}
+
 AccelStructHandle RHI_Vulkan::createAccelerationStructure(const AccelStructDesc& desc) {
-    // Vulkan ray tracing not implemented yet
-    // This is a stub for API compatibility
-    fmt::print("Warning: Vulkan acceleration structures not yet implemented\n");
-
     Uint32 id = nextAccelStructId++;
-    accelStructs[id] = {VK_NULL_HANDLE, VK_NULL_HANDLE, nullptr};
+    AccelStructResource res;
+    res.type = desc.type;
+    res.geometries = desc.geometries;
+    res.instances = desc.instances;
+    auto [it, inserted] = accelStructs.emplace(id, std::move(res));
+    (void)inserted;
 
+    if (raytracingEnabled && desc.type == AccelStructType::TopLevel) {
+        // Initial zero-instance build: the TLAS descriptor must always be
+        // valid once the renderer starts binding it (see setAccelerationStructure).
+        buildTLAS(it->second);
+    }
     return AccelStructHandle{id};
 }
 
 void RHI_Vulkan::destroyAccelerationStructure(AccelStructHandle handle) {
-    accelStructs.erase(handle.id);
+    auto it = accelStructs.find(handle.id);
+    if (it == accelStructs.end()) return;
+    AccelStructResource& res = it->second;
+    for (Uint32 s = 0; s < AccelStructResource::kTlasSlots; s++) {
+        // Unbind any slot's AS that is still bound so a later flush never
+        // writes a destroyed structure (rotation means an older slot can be
+        // the one left in the bind state).
+        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+            if (boundComputeAccels[i] != VK_NULL_HANDLE && boundComputeAccels[i] == res.accelSlots[s]) {
+                boundComputeAccels[i] = VK_NULL_HANDLE;
+                computeDescriptorsDirty = true;
+            }
+        }
+        if (res.accelSlots[s] != VK_NULL_HANDLE) {
+            VkDevice dev = device;
+            VkAccelerationStructureKHR as = res.accelSlots[s];
+            auto destroyFn = pfnDestroyAccelStruct;
+            deferDestroy([dev, as, destroyFn]() { if (destroyFn) destroyFn(dev, as, nullptr); });
+            res.accelSlots[s] = VK_NULL_HANDLE;
+        }
+        releaseAccelBuffer(res.accelBufferSlots[s]);
+        releaseAccelBuffer(res.scratchSlots[s]);
+        releaseAccelBuffer(res.instanceSlots[s]);
+    }
+    accelStructs.erase(it);
+}
+
+void RHI_Vulkan::buildBLAS(AccelStructResource& res) {
+    // The geometry buffers were filled through the batched upload stream;
+    // building before those copies land bakes zeroed vertices into the BLAS
+    // (the Metal backend documents this exact failure). Blocking flush first.
+    submitUploads(true);
+
+    std::vector<VkAccelerationStructureGeometryKHR> geoms;
+    std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges;
+    std::vector<Uint32> primCounts;
+    geoms.reserve(res.geometries.size());
+    for (const auto& g : res.geometries) {
+        auto vbIt = buffers.find(g.vertexBuffer.id);
+        auto ibIt = buffers.find(g.indexBuffer.id);
+        if (vbIt == buffers.end() || ibIt == buffers.end()) continue;  // Metal parity: skip silently
+
+        VkAccelerationStructureGeometryKHR geom{};
+        geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+        geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;  // Metal's default (setOpaque never cleared)
+        auto& tris = geom.geometry.triangles;
+        tris.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        tris.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;  // position float3 at offset 0
+        tris.vertexData.deviceAddress = getBufferAddress(vbIt->second.buffer);
+        tris.vertexStride = g.vertexStride;
+        tris.maxVertex = g.vertexCount > 0 ? g.vertexCount - 1 : 0;
+        tris.indexType = VK_INDEX_TYPE_UINT32;
+        tris.indexData.deviceAddress = getBufferAddress(ibIt->second.buffer);
+        tris.transformData.deviceAddress = 0;  // Metal never reads geom.transformBuffer
+        geoms.push_back(geom);
+
+        VkAccelerationStructureBuildRangeInfoKHR range{};
+        range.primitiveCount = g.indexCount / 3;
+        ranges.push_back(range);
+        primCounts.push_back(range.primitiveCount);
+    }
+    if (geoms.empty()) return;  // all geometries dropped: leave accel null (Metal parity)
+
+    VkAccelerationStructureBuildGeometryInfoKHR build{};
+    build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    build.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build.geometryCount = static_cast<Uint32>(geoms.size());
+    build.pGeometries = geoms.data();
+
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    pfnGetAccelBuildSizes(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build,
+                          primCounts.data(), &sizes);
+
+    // Slot 0 only — a BLAS is built once, never rebuilt.
+    AccelBuffer& backing = res.accelBufferSlots[0];
+    AccelBuffer& scratch = res.scratchSlots[0];
+    ensureAccelBuffer(backing, sizes.accelerationStructureSize,
+                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                      false);
+    ensureAccelBuffer(scratch, sizes.buildScratchSize,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                      false, accelScratchAlignment);
+
+    VkAccelerationStructureCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+    createInfo.buffer = backing.buffer;
+    createInfo.size = sizes.accelerationStructureSize;
+    createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    if (pfnCreateAccelStruct(device, &createInfo, nullptr, &res.accelSlots[0]) != VK_SUCCESS) {
+        fmt::print("[VK] BLAS creation failed\n");
+        return;
+    }
+    build.dstAccelerationStructure = res.accelSlots[0];
+    build.scratchData.deviceAddress = getBufferAddress(scratch.buffer);
+
+    // One-off blocking build (registration-time; matches Metal's
+    // commit + waitUntilCompleted).
+    VkCommandBufferAllocateInfo cmdAlloc{};
+    cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAlloc.commandPool = commandPool;
+    cmdAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAlloc.commandBufferCount = 1;
+    VkCommandBuffer cmd;
+    if (vkAllocateCommandBuffers(device, &cmdAlloc, &cmd) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate BLAS build command buffer");
+    }
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &begin);
+    const VkAccelerationStructureBuildRangeInfoKHR* pRanges = ranges.data();
+    pfnCmdBuildAccelStructs(cmd, 1, &build, &pRanges);
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    vkQueueSubmit(graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue);
+    vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+
+    res.accel = res.accelSlots[0];
+    VkAccelerationStructureDeviceAddressInfoKHR addrInfo{};
+    addrInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    addrInfo.accelerationStructure = res.accel;
+    res.deviceAddress = pfnGetAccelDeviceAddress(device, &addrInfo);
+
+    // Scratch is only needed during the build; a BLAS is never rebuilt.
+    releaseAccelBuffer(scratch);
+}
+
+void RHI_Vulkan::buildTLAS(AccelStructResource& res) {
+    // Rotate slots: never rebuild the TLAS a still-in-flight frame traverses.
+    const Uint32 slot = res.nextSlot;
+    res.nextSlot = (res.nextSlot + 1) % AccelStructResource::kTlasSlots;
+
+    // Fill the instance staging buffer (host-visible, persistently mapped).
+    std::vector<VkAccelerationStructureInstanceKHR> instanceData;
+    instanceData.reserve(res.instances.size());
+    for (const auto& inst : res.instances) {
+        auto blasIt = accelStructs.find(inst.blas.id);
+        if (blasIt == accelStructs.end() || blasIt->second.accel == VK_NULL_HANDLE) {
+            continue;  // BLAS missing or never built: skip (Metal parity)
+        }
+        VkAccelerationStructureInstanceKHR d{};
+        // glm::mat4 is column-major; VkTransformMatrixKHR is row-major [3][4]:
+        // transpose the upper 3x4 (Metal's PackedFloat4x3 takes the columns
+        // verbatim — copying that loop here would silently transpose the scene).
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 4; c++)
+                d.transform.matrix[r][c] = inst.transform[c][r];
+        d.instanceCustomIndex = inst.instanceID & 0xFFFFFFu;  // 24-bit on Vulkan
+        d.mask = inst.mask;
+        d.instanceShaderBindingTableRecordOffset = 0;
+        d.flags = VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;  // Metal hardcodes Opaque
+        d.accelerationStructureReference = blasIt->second.deviceAddress;
+        instanceData.push_back(d);
+    }
+    const Uint32 instanceCount = static_cast<Uint32>(instanceData.size());
+
+    AccelBuffer& instBuf = res.instanceSlots[slot];
+    const VkDeviceSize instBytes =
+        std::max<VkDeviceSize>(instanceCount, 1) * sizeof(VkAccelerationStructureInstanceKHR);
+    ensureAccelBuffer(instBuf, instBytes,
+                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                      true);
+    if (instanceCount > 0) {
+        std::memcpy(instBuf.mapped, instanceData.data(),
+                    instanceCount * sizeof(VkAccelerationStructureInstanceKHR));
+    }
+
+    VkAccelerationStructureGeometryKHR geom{};
+    geom.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geom.geometry.instances.arrayOfPointers = VK_FALSE;
+    geom.geometry.instances.data.deviceAddress = getBufferAddress(instBuf.buffer);
+
+    VkAccelerationStructureBuildGeometryInfoKHR build{};
+    build.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    // The TLAS is fully rebuilt every frame — favor build speed (BLASes carry
+    // the trace-quality burden and are built once with PREFER_FAST_TRACE).
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build.geometryCount = 1;
+    build.pGeometries = &geom;
+
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    pfnGetAccelBuildSizes(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build,
+                          &instanceCount, &sizes);
+
+    AccelBuffer& backing = res.accelBufferSlots[slot];
+    AccelBuffer& scratch = res.scratchSlots[slot];
+    const bool backingFits = backing.buffer != VK_NULL_HANDLE && backing.size >= sizes.accelerationStructureSize;
+    ensureAccelBuffer(backing, sizes.accelerationStructureSize,
+                      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+                          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                      false);
+    ensureAccelBuffer(scratch, sizes.buildScratchSize,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                      false, accelScratchAlignment);
+
+    // The slot's AS object is reused only while its backing buffer fits;
+    // otherwise recreate it over the grown buffer.
+    if (res.accelSlots[slot] == VK_NULL_HANDLE || !backingFits) {
+        if (res.accelSlots[slot] != VK_NULL_HANDLE) {
+            VkDevice dev = device;
+            VkAccelerationStructureKHR as = res.accelSlots[slot];
+            auto destroyFn = pfnDestroyAccelStruct;
+            deferDestroy([dev, as, destroyFn]() { destroyFn(dev, as, nullptr); });
+            res.accelSlots[slot] = VK_NULL_HANDLE;
+        }
+        VkAccelerationStructureCreateInfoKHR createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+        createInfo.buffer = backing.buffer;
+        createInfo.size = sizes.accelerationStructureSize;
+        createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        if (pfnCreateAccelStruct(device, &createInfo, nullptr, &res.accelSlots[slot]) != VK_SUCCESS) {
+            fmt::print("[VK] TLAS creation failed\n");
+            return;
+        }
+    }
+    build.dstAccelerationStructure = res.accelSlots[slot];
+    build.scratchData.deviceAddress = getBufferAddress(scratch.buffer);
+
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = instanceCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+
+    if (currentCommandBuffer != VK_NULL_HANDLE) {
+        // Inside a frame: build on the frame command buffer, ordered before
+        // this frame's ray dispatches, then make the write visible to compute.
+        pfnCmdBuildAccelStructs(currentCommandBuffer, 1, &build, &pRange);
+        VkMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        VkDependencyInfo dep{};
+        dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &barrier;
+        pfnCmdPipelineBarrier2(currentCommandBuffer, &dep);
+    } else {
+        // Outside a frame (initial empty build, loading phase): one-off + wait.
+        VkCommandBufferAllocateInfo cmdAlloc{};
+        cmdAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cmdAlloc.commandPool = commandPool;
+        cmdAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cmdAlloc.commandBufferCount = 1;
+        VkCommandBuffer cmd;
+        if (vkAllocateCommandBuffers(device, &cmdAlloc, &cmd) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate TLAS build command buffer");
+        }
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &begin);
+        pfnCmdBuildAccelStructs(cmd, 1, &build, &pRange);
+        vkEndCommandBuffer(cmd);
+        VkSubmitInfo submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        vkQueueSubmit(graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+        vkQueueWaitIdle(graphicsQueue);
+        vkFreeCommandBuffers(device, commandPool, 1, &cmd);
+    }
+
+    // Re-point the bind alias at this slot's freshly built structure.
+    res.accel = res.accelSlots[slot];
 }
 
 void RHI_Vulkan::buildAccelerationStructure(AccelStructHandle handle) {
-    // Stub
+    if (!raytracingEnabled) return;
+    auto it = accelStructs.find(handle.id);
+    if (it == accelStructs.end()) return;
+    if (it->second.type == AccelStructType::BottomLevel) {
+        buildBLAS(it->second);
+    } else {
+        buildTLAS(it->second);
+    }
 }
 
-void RHI_Vulkan::updateAccelerationStructure(AccelStructHandle handle, const std::vector<AccelStructInstance>& instances) {
-    // Stub
+void RHI_Vulkan::updateAccelerationStructure(AccelStructHandle handle,
+                                             const std::vector<AccelStructInstance>& instances) {
+    if (!raytracingEnabled) return;
+    auto it = accelStructs.find(handle.id);
+    if (it == accelStructs.end()) return;
+    AccelStructResource& res = it->second;
+    res.instances = instances;
+    if (res.type == AccelStructType::TopLevel && !res.instances.empty()) {
+        buildTLAS(res);  // always a full rebuild (Metal parity — no refit)
+    }
+    // BottomLevel: instances stored only, no rebuild (Metal parity).
 }
 
 // ============================================================================
@@ -3457,7 +4102,7 @@ void RHI_Vulkan::bindComputePipeline(ComputePipelineHandle pipeline) {
 
 void RHI_Vulkan::setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t offset, size_t range) {
     auto it = buffers.find(buffer.id);
-    if (it == buffers.end() || binding >= BINDINGS_PER_SET) {
+    if (it == buffers.end() || binding >= computeBufferBindingCount) {
         return;
     }
     BufferBinding nb = { it->second.buffer, offset, range > 0 ? range : VK_WHOLE_SIZE };
@@ -3469,11 +4114,15 @@ void RHI_Vulkan::setComputeBuffer(Uint32 binding, BufferHandle buffer, size_t of
 }
 
 void RHI_Vulkan::setComputeBytes(const void* data, size_t size, Uint32 binding) {
-    // Compute push constants, mirroring the graphics-bytes convention:
-    // 16-byte slot at (binding % 4) * 16 within the compute push range.
+    // Compute push constants: 16-byte slot at (binding % 8) * 16, using the
+    // whole 128-byte range. Eight slots instead of the graphics-side four —
+    // the RT passes push at Metal buffer indices up to 10 (10 % 8 = slot 2)
+    // and the %4 fold made 3/7 and 6/10 clobber each other. Bindings 0-3 map
+    // identically to the old convention, so pre-RT compute shaders
+    // (GpuCull/FroxelInject/MicroVoxelAtrous) are unaffected.
     if (currentCommandBuffer == VK_NULL_HANDLE || !data || size == 0) return;
-    Uint32 offset = (binding % 4) * 16;
-    Uint32 clamped = static_cast<Uint32>(std::min<size_t>(size, 64 - offset));
+    Uint32 offset = (binding % 8) * 16;
+    Uint32 clamped = static_cast<Uint32>(std::min<size_t>(size, 128 - offset));
     vkCmdPushConstants(currentCommandBuffer, computePipelineLayout,
                        VK_SHADER_STAGE_COMPUTE_BIT, offset, clamped, data);
 }
@@ -3526,13 +4175,12 @@ void RHI_Vulkan::flushComputeDescriptors() {
     }
     computeDescriptorsDirty = false;
 
-    VkDescriptorSetLayout layouts[3] = { computeBufferSetLayout, computeImageSetLayout,
-                                         computeSampledSetLayout };
-    constexpr Uint32 kComputeSetCount = sizeof(layouts) / sizeof(layouts[0]);
-    static_assert(kComputeSetCount == 3,
-                  "writes[] below is sized for this many sets; keep the multiplier in "
-                  "sync with the set count to avoid a silent overflow");
-    VkDescriptorSet sets[kComputeSetCount];
+    // Sets 0-2 always; set 3 (acceleration structures) only while RT is on.
+    // The layout array matches the compute pipeline layout's set order.
+    VkDescriptorSetLayout layouts[4] = { computeBufferSetLayout, computeImageSetLayout,
+                                         computeSampledSetLayout, computeAccelSetLayout };
+    const Uint32 kComputeSetCount = raytracingEnabled ? 4 : 3;
+    VkDescriptorSet sets[4];
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descriptorPools[currentFrameInFlight];
@@ -3549,13 +4197,14 @@ void RHI_Vulkan::flushComputeDescriptors() {
     }
     statsDescriptorSets += kComputeSetCount;
 
-    VkWriteDescriptorSet writes[BINDINGS_PER_SET * kComputeSetCount];
-    VkDescriptorBufferInfo bufferInfos[BINDINGS_PER_SET];
+    VkWriteDescriptorSet writes[COMPUTE_BUFFER_BINDINGS_MAX + BINDINGS_PER_SET * 3];
+    VkDescriptorBufferInfo bufferInfos[COMPUTE_BUFFER_BINDINGS_MAX];
     VkDescriptorImageInfo imageInfos[BINDINGS_PER_SET];
     VkDescriptorImageInfo sampledInfos[BINDINGS_PER_SET];
-    Uint32 writeCount = 0, bufferCount = 0, imageCount = 0, sampledCount = 0;
+    VkWriteDescriptorSetAccelerationStructureKHR accelInfos[BINDINGS_PER_SET];
+    Uint32 writeCount = 0, bufferCount = 0, imageCount = 0, sampledCount = 0, accelCount = 0;
 
-    for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+    for (Uint32 i = 0; i < computeBufferBindingCount; i++) {
         if (boundComputeBuffers[i].buffer == VK_NULL_HANDLE) continue;
         VkDescriptorBufferInfo& info = bufferInfos[bufferCount++];
         info = { boundComputeBuffers[i].buffer, boundComputeBuffers[i].offset, boundComputeBuffers[i].range };
@@ -3595,6 +4244,24 @@ void RHI_Vulkan::flushComputeDescriptors() {
         w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w.pImageInfo = &info;
     }
+    if (raytracingEnabled) {
+        for (Uint32 i = 0; i < BINDINGS_PER_SET; i++) {
+            if (boundComputeAccels[i] == VK_NULL_HANDLE) continue;
+            VkWriteDescriptorSetAccelerationStructureKHR& info = accelInfos[accelCount++];
+            info = {};
+            info.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+            info.accelerationStructureCount = 1;
+            info.pAccelerationStructures = &boundComputeAccels[i];
+            VkWriteDescriptorSet& w = writes[writeCount++];
+            w = {};
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.pNext = &info;
+            w.dstSet = sets[3];
+            w.dstBinding = i;
+            w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        }
+    }
 
     if (writeCount > 0) {
         vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
@@ -3604,8 +4271,24 @@ void RHI_Vulkan::flushComputeDescriptors() {
 }
 
 void RHI_Vulkan::setAccelerationStructure(Uint32 binding, AccelStructHandle accelStruct) {
-    // TODO: Implement acceleration structure binding
-    // For now, this is a stub
+    // The renderer binds the TLAS at per-pass compute "buffer" indices (Metal's
+    // flat namespace: 2/4/5/6/7). On Vulkan the same index becomes set 3
+    // binding N — the GLSL ray-query kernels declare
+    // `layout(set = 3, binding = N) uniform accelerationStructureEXT` with the
+    // matching N, so pass code stays backend-agnostic.
+    if (!raytracingEnabled || binding >= BINDINGS_PER_SET) return;
+    auto it = accelStructs.find(accelStruct.id);
+    VkAccelerationStructureKHR as = (it != accelStructs.end()) ? it->second.accel : VK_NULL_HANDLE;
+    // Always valid once created: a TLAS gets an initial zero-instance build at
+    // creation (see createAccelerationStructure), so rays simply miss until the
+    // first real build — the same graceful fallback Metal reaches through
+    // is_null_instance_acceleration_structure. Statically-used descriptors must
+    // be valid on Vulkan even behind runtime branches, so a null bind here
+    // (destroyed handle) leaves the slot unwritten and the pass must not
+    // dispatch — the renderer's TLAS handle lives for the whole session.
+    if (boundComputeAccels[binding] == as) return;
+    boundComputeAccels[binding] = as;
+    computeDescriptorsDirty = true;
 }
 
 void RHI_Vulkan::dispatch(Uint32 groupCountX, Uint32 groupCountY, Uint32 groupCountZ) {
@@ -3659,6 +4342,10 @@ void RHI_Vulkan::computeBarrier() {
                      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
     b.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT |
                       VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+    if (raytracingEnabled) {
+        // Ray-query dispatches also read acceleration structures.
+        b.dstAccessMask |= VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    }
     VkDependencyInfo dep{};
     dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dep.memoryBarrierCount = 1;

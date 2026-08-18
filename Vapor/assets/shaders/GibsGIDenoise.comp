@@ -1,0 +1,60 @@
+#version 460
+// SVGF-lite step 2 for GIBS GI — GLSL twin of gibs_gi_denoise.metal:
+// edge-aware a-trous wavelet filter over the temporally-accumulated GI. Taps
+// across a geometric edge are rejected by the depth/normal stops; taps across
+// a surfel-disc seam on the same surface are averaged. Run iteratively with
+// stride 1, 2, (4, ...). src is RGBA16F (RGB = GI, A = view-space depth).
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D src;
+layout(set = 1, binding = 1) uniform writeonly image2D dst;
+layout(set = 2, binding = 2) uniform sampler2D normalTexture;
+
+// setComputeBytes slot 0 -> push offset 0.
+layout(push_constant) uniform PC {
+    layout(offset = 0) uint stride;
+};
+
+const float kAtrousKernel1D[5] = float[5](1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0);
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(dst);
+    uint w = uint(outDim.x);
+    uint h = uint(outDim.y);
+    if (tid.x >= w || tid.y >= h) return;
+
+    ivec2 fullDim = textureSize(normalTexture, 0);
+    uvec2 scale = max(uvec2(fullDim) / uvec2(w, h), uvec2(1u));
+
+    vec4 center = texelFetch(src, ivec2(tid), 0);
+    float centerZ = center.a;
+    ivec2 centerFull = ivec2(min(tid * scale, uvec2(fullDim) - 1u));
+    vec3 centerN = normalize(texelFetch(normalTexture, centerFull, 0).xyz);
+
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            ivec2 tap = ivec2(tid) + ivec2(dx, dy) * int(stride);
+            if (tap.x < 0 || tap.y < 0 || tap.x >= int(w) || tap.y >= int(h)) continue;
+
+            vec4 sVal = texelFetch(src, tap, 0);
+            ivec2 tapFull = ivec2(min(uvec2(tap) * scale, uvec2(fullDim) - 1u));
+            vec3 n = normalize(texelFetch(normalTexture, tapFull, 0).xyz);
+
+            float wKernel = kAtrousKernel1D[dx + 2] * kAtrousKernel1D[dy + 2];
+            float wZ = exp(-abs(sVal.a - centerZ) / (0.05 * max(abs(centerZ), 1.0)));
+            float wN = pow(max(0.0, dot(centerN, n)), 32.0);
+
+            float weight = wKernel * wZ * wN;
+            sum += sVal.rgb * weight;
+            weightSum += weight;
+        }
+    }
+    vec3 gi = weightSum > 1e-6 ? sum / weightSum : center.rgb;
+    imageStore(dst, ivec2(tid), vec4(gi, centerZ));
+}

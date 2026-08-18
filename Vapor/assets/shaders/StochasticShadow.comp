@@ -1,0 +1,157 @@
+#version 460
+// Stochastic light shadow pass (MegaLights-style) — GLSL ray-query twin of
+// 3d_stochastic_shadow.metal, covering EVERY analytic light type. Per pixel:
+//   R = point-light visibility (2 lights picked from the tile cluster)
+//   G = rect AREA light visibility — a random point is sampled on the quad
+//       each frame, so temporal accumulation converges to a true soft penumbra
+//   B = spot-light visibility (1 ray to the picked spot's position)
+// Channels for absent light types stay 1.0 (fully lit). Temporal accumulation
+// denoises all three channels together.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#include "include/rt_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D depthTexture;
+layout(set = 2, binding = 1) uniform sampler2D normalTexture;
+layout(set = 1, binding = 2) uniform writeonly image2D shadowTexture;
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData camera; };
+layout(std430, set = 0, binding = 1) readonly buffer PointLightBuf { PointLight pointLights[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ClusterBuf { Cluster clusters[]; };
+layout(set = 3, binding = 6) uniform accelerationStructureEXT TLAS;
+layout(std430, set = 0, binding = 8) readonly buffer SpotLightBuf { SpotLight spotLights[]; };
+layout(std430, set = 0, binding = 9) readonly buffer RectLightBuf { RectLight rectLights[]; };
+
+// setComputeBytes slots 3/4/5/7/10 -> push offsets 48/64/80/112/32.
+layout(push_constant) uniform PC {
+    layout(offset = 32) uvec2 extraCounts;  // x=rectCount, y=spotCount (slot 10)
+    layout(offset = 48) vec2 screenSize;    // (slot 3)
+    layout(offset = 64) uvec3 gridDims;     // (slot 4, pushed as uvec4)
+    layout(offset = 80) uint frameIndex;    // (slot 5)
+    layout(offset = 112) uint debugMode;    // (slot 7) 0=visibility, 1=tile heatmap
+};
+
+bool occlusionRayHit(vec3 origin, vec3 dir, float tMax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, TLAS,
+                          gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                          0xFF, origin, 0.001, dir, tMax);
+    rayQueryProceedEXT(rq);
+    return rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(shadowTexture);
+    uint w = uint(outDim.x);
+    uint h = uint(outDim.y);
+    if (tid.x >= w || tid.y >= h) return;
+
+    float depth = texelFetch(depthTexture, ivec2(tid), 0).r;
+    if (depth >= 1.0) {
+        imageStore(shadowTexture, ivec2(tid), vec4(debugMode == 1u ? 0.0 : 1.0));
+        return;
+    }
+
+    // Reconstruct world position (matches the Metal kernel: uv WITHOUT the
+    // half-texel offset).
+    vec2 uv = vec2(tid) / vec2(w, h);
+    vec2 ndcXY = vec2(uv.x, 1.0 - uv.y) * 2.0 - 1.0;
+    vec4 ndc = vec4(ndcXY, depth, 1.0);
+    vec4 viewPos = camera.invProj * ndc;
+    viewPos /= viewPos.w;
+    vec3 worldPos = (camera.invView * viewPos).xyz;
+    vec3 worldNormal = normalize(texelFetch(normalTexture, ivec2(tid), 0).xyz);
+
+    // Find the 3D cluster — match the PBR shader convention exactly (Y flipped,
+    // logarithmic depth slice).
+    uint gridX = gridDims.x;
+    uint gridY = gridDims.y;
+    uint tileX = uint(uv.x * float(gridX));
+    uint tileY = uint((1.0 - uv.y) * float(gridY));
+    float depthVS = -viewPos.z;  // RH: forward = -z
+    uint tileZ = uint(clamp(
+        log(max(depthVS, camera.nearPlane) / camera.nearPlane)
+            / log(camera.farPlane / camera.nearPlane) * float(gridDims.z),
+        0.0, float(gridDims.z) - 1.0));
+
+    uint clusterIdx = tileX + tileY * gridX + tileZ * gridX * gridY;
+    uint lightCount = clusters[clusterIdx].lightCount;
+
+    // Debug: visualize per-tile light count (0 lights = black, 8+ = white)
+    if (debugMode == 1u) {
+        imageStore(shadowTexture, ivec2(tid), vec4(float(lightCount) / 8.0));
+        return;
+    }
+
+    uint seed = tid.x * 1973u + tid.y * 9277u + frameIndex * 26699u;
+
+    // --- R: point lights (2 picks from the tile cluster) -------------------
+    float pointVis = 1.0;
+    if (lightCount > 0u) {
+        vec2 r0 = rand2(seed);
+        vec2 r1 = rand2(seed + 1u);
+        uint lightA = clusters[clusterIdx].lightIndices[uint(r0.x * float(lightCount)) % lightCount];
+        uint lightB = clusters[clusterIdx].lightIndices[uint(r1.x * float(lightCount)) % lightCount];
+
+        float visibility = 0.0;
+        uint sampleCount = (lightA == lightB) ? 1u : 2u;
+        for (uint s = 0u; s < sampleCount; s++) {
+            uint li = (s == 0u) ? lightA : lightB;
+            PointLight light = pointLights[li];
+
+            vec3 toLight = light.position - worldPos;
+            float dist = length(toLight);
+            if (dist >= light.radius) { visibility += 1.0; continue; }
+
+            vec3 dir = toLight / dist;
+            // Skip lights behind the surface
+            if (dot(dir, worldNormal) <= 0.0) { visibility += 1.0; continue; }
+
+            visibility += occlusionRayHit(worldPos + worldNormal * 0.005, dir, dist - 0.01)
+                              ? 0.0 : 1.0;
+        }
+        pointVis = visibility / float(sampleCount);
+    }
+
+    // --- G: rect AREA lights (random point on the quad -> soft penumbra) ---
+    float rectVis = 1.0;
+    if (extraCounts.x > 0u) {
+        uint ri = uint(rand2(seed + 2u).x * float(extraCounts.x)) % extraCounts.x;
+        RectLight rl = rectLights[ri];
+        vec2 rq = rand2(seed + 3u) * 2.0 - 1.0;   // uniform on the quad
+        vec3 target = rl.position + rl.rright * (rq.x * rl.halfWidth)
+                                  + rl.up * (rq.y * rl.halfHeight);
+        vec3 toLight = target - worldPos;
+        float dist = length(toLight);
+        if (dist > 0.01) {
+            vec3 dir = toLight / dist;
+            if (dot(dir, worldNormal) > 0.0) {
+                rectVis = occlusionRayHit(worldPos + worldNormal * 0.005, dir, dist - 0.01)
+                              ? 0.0 : 1.0;
+            }
+        }
+    }
+
+    // --- B: spot lights (1 ray to the picked spot's apex) ------------------
+    float spotVis = 1.0;
+    if (extraCounts.y > 0u) {
+        uint si = uint(rand2(seed + 4u).x * float(extraCounts.y)) % extraCounts.y;
+        SpotLight sl = spotLights[si];
+        vec3 toLight = sl.position - worldPos;
+        float dist = length(toLight);
+        if (dist < sl.radius && dist > 0.01) {
+            vec3 dir = toLight / dist;
+            // Only shade pixels the cone can reach and that face the light.
+            bool inCone = dot(-dir, sl.direction) > sl.cosOuter;
+            if (inCone && dot(dir, worldNormal) > 0.0) {
+                spotVis = occlusionRayHit(worldPos + worldNormal * 0.005, dir, dist - 0.01)
+                              ? 0.0 : 1.0;
+            }
+        }
+    }
+
+    imageStore(shadowTexture, ivec2(tid), vec4(pointVis, rectVis, spotVis, 1.0));
+}

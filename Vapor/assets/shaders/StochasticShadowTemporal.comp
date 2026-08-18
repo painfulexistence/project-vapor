@@ -1,0 +1,71 @@
+#version 460
+// Temporal accumulation denoiser for the stochastic RT shadows — GLSL twin of
+// 3d_stochastic_shadow_temporal.metal (point / rect / spot in R/G/B). Velocity
+// reprojection + adaptive-alpha (SVGF history-length) accumulation; the frame
+// count rides in the history's alpha channel. See the Metal kernel for the
+// full derivation of the reset/motion-cap heuristics.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D currentShadow;
+layout(set = 2, binding = 1) uniform sampler2D historyShadow;
+layout(set = 2, binding = 2) uniform sampler2D velocityTexture;
+layout(set = 1, binding = 3) uniform writeonly image2D outputShadow;
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(outputShadow);
+    uint w = uint(outDim.x);
+    uint h = uint(outDim.y);
+    if (tid.x >= w || tid.y >= h) return;
+
+    vec2 screenSize = vec2(w, h);
+    vec2 uv = (vec2(tid) + 0.5) / screenSize;
+
+    vec3 current = texelFetch(currentShadow, ivec2(tid), 0).rgb;
+
+    // Velocity is (currNDC - prevNDC) * 0.5 in y-up NDC space; convert to
+    // y-down texture UV by negating the y component.
+    vec2 velocity = texelFetch(velocityTexture, ivec2(tid), 0).rg;
+    vec2 prevUV = uv - vec2(velocity.x, -velocity.y);
+
+    // 3x3 mean of the current frame — used only to decide whether the SHADOW
+    // changed, robust to single-ray flips.
+    vec3 mean = vec3(0.0);
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 nc = clamp(ivec2(tid) + ivec2(dx, dy), ivec2(0), ivec2(w - 1u, h - 1u));
+            mean += texelFetch(currentShadow, nc, 0).rgb;
+        }
+    }
+    mean /= 9.0;
+
+    // Adaptive temporal accumulation: alpha = 1/(N+1), N in the history alpha.
+    vec4 hist = texture(historyShadow, prevUV);
+    // Sanitize uninitialized/NaN history before it feeds back.
+    vec3 history = clamp(hist.rgb, 0.0, 1.0);
+    float histLen = clamp(hist.a, 0.0, 256.0);
+
+    // History-shortening resets:
+    //  - Off-screen reproject = disocclusion, unambiguous -> HARD reset.
+    //  - VALUE change (shadow moved on static geometry) -> capped at 0.5 so a
+    //    static penumbra sampling spike can't flash a noise band.
+    bool onScreen = all(greaterThanEqual(prevUV, vec2(0.0))) && all(lessThanEqual(prevUV, vec2(1.0)));
+    vec3 d = abs(mean - history);
+    float changed = max(d.r, max(d.g, d.b));
+    float valueReset = clamp((changed - 0.30) / 0.25, 0.0, 1.0) * 0.5;
+    float reset = onScreen ? valueReset : 1.0;
+    histLen *= (1.0 - reset);
+
+    // Motion caps history length instead of hard-resetting (see Metal twin).
+    float pxMotion = length(velocity * screenSize);
+    float maxHistLen = mix(256.0, 1.0, clamp((pxMotion - 0.5) * 0.5, 0.0, 1.0));
+    histLen = min(histLen, maxHistLen);
+
+    float alpha = max(1.0 / (histLen + 1.0), 0.04);  // floor: stay responsive
+    vec3 result = mix(history, current, alpha);
+    histLen = min(histLen + 1.0, 256.0);
+    imageStore(outputShadow, ivec2(tid), vec4(result, histLen));
+}

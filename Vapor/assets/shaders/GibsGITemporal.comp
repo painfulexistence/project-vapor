@@ -1,0 +1,77 @@
+#version 460
+// SVGF-lite step 1 for GIBS GI — GLSL twin of gibs_gi_temporal.metal: temporal
+// reprojection over the screen-space gather output. Reproject via the velocity
+// buffer, disocclusion-check against the view-space depth stored in history
+// alpha, and EMA-blend. History texture is RGBA16F: RGB = GI, A = view depth.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D giRaw;
+layout(set = 2, binding = 1) uniform sampler2D historyIn;
+layout(set = 1, binding = 2) uniform writeonly image2D historyOut;
+layout(set = 2, binding = 3) uniform sampler2D velocityTexture;
+layout(set = 2, binding = 4) uniform sampler2D depthTexture;
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData camera; };
+
+// setComputeBytes slots 1 (prevView mat4, 64 B) + 2 (historyValid): the mat4
+// spans push offsets [16, 80), so historyValid moves to slot 5 (offset 80) —
+// the Metal flat-index layout can't be mirrored exactly here.
+layout(push_constant) uniform PC {
+    layout(offset = 16) mat4 prevView;
+    layout(offset = 80) uint historyValid;
+};
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(historyOut);
+    uint w = uint(outDim.x);
+    uint h = uint(outDim.y);
+    if (tid.x >= w || tid.y >= h) return;
+
+    // Resolution-agnostic: depth/velocity are full-res, the GI chain runs at
+    // the GIBS resolution scale.
+    ivec2 fullDim = textureSize(depthTexture, 0);
+    uvec2 scale = max(uvec2(fullDim) / uvec2(w, h), uvec2(1u));
+    ivec2 fullTid = ivec2(min(tid * scale, uvec2(fullDim) - 1u));
+
+    vec3 gi = texelFetch(giRaw, ivec2(tid), 0).rgb;
+    float depth = texelFetch(depthTexture, fullTid, 0).r;
+
+    // Sky: no GI, park the history at far depth.
+    if (depth >= 0.999999) {
+        imageStore(historyOut, ivec2(tid), vec4(0.0, 0.0, 0.0, -camera.farPlane));
+        return;
+    }
+
+    // Reconstruct world position (same convention as the raytrace kernels).
+    vec2 texUV = (vec2(tid) + 0.5) / vec2(w, h);
+    vec2 uvYUp = vec2(texUV.x, 1.0 - texUV.y);
+    vec4 ndc = vec4(uvYUp * 2.0 - 1.0, depth, 1.0);
+    vec4 viewPos = camera.invProj * ndc;
+    viewPos /= viewPos.w;
+    vec3 worldPos = (camera.invView * viewPos).xyz;
+    float viewZ = viewPos.z;
+
+    vec3 blended = gi;
+    if (historyValid != 0u) {
+        vec2 vel = texelFetch(velocityTexture, fullTid, 0).rg;  // y-up NDC*0.5 units
+        vec2 prevUVyUp = uvYUp - vel;
+        vec2 prevTexUV = vec2(prevUVyUp.x, 1.0 - prevUVyUp.y);
+
+        bool inBounds = prevTexUV == clamp(prevTexUV, vec2(0.0), vec2(1.0));
+        if (inBounds) {
+            vec4 hist = texture(historyIn, prevTexUV);
+
+            // Where should this surface have been in the previous view?
+            float expectedPrevZ = (prevView * vec4(worldPos, 1.0)).z;
+            bool depthMatches = abs(hist.a - expectedPrevZ) < 0.05 * max(abs(expectedPrevZ), 1.0);
+            if (depthMatches) {
+                blended = mix(hist.rgb, gi, 0.1);
+            }
+        }
+    }
+    imageStore(historyOut, ivec2(tid), vec4(blended, viewZ));
+}
