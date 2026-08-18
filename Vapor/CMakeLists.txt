@@ -224,6 +224,12 @@ if(APPLE)
 endif()
 
 if(WIN32)
+    # Windows header hygiene for every TU that transitively sees windows.h:
+    # NOGDI stops wingdi.h, whose OPAQUE/TRANSPARENT/ERROR macros collide with
+    # engine enumerators (AlphaMode::OPAQUE); NOMINMAX and LEAN_AND_MEAN cut
+    # the rest of the classic macro surface. PUBLIC so the app and tests get
+    # the same protection.
+    target_compile_definitions(Vapor PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX NOGDI)
     target_link_libraries(Vapor PRIVATE
         Microsoft::DirectX-Headers
         Microsoft::DirectXShaderCompiler
