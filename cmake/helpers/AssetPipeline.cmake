@@ -229,6 +229,23 @@ function(vapor_flatten_metal_shaders TARGET)
         return()
     endif()
 
+    # Newer Xcode installs ship WITHOUT the Metal toolchain ("cannot execute
+    # tool 'metal' due to missing Metal Toolchain") until
+    # `xcodebuild -downloadComponent MetalToolchain` has run. Probe once at
+    # configure and degrade to a warning instead of failing ~60 .air steps
+    # deep into the build.
+    execute_process(
+        COMMAND xcrun metal --version
+        RESULT_VARIABLE _metal_probe_result
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if(NOT _metal_probe_result EQUAL 0)
+        message(WARNING "[Vapor] `xcrun metal` is not runnable (missing Metal toolchain?) — "
+                        "Metal shader validation skipped. Install it with: "
+                        "sudo xcodebuild -downloadComponent MetalToolchain")
+        return()
+    endif()
+
     # Validation inputs are the ENGINE's shader sources (VAPOR_ASSETS_DIR) —
     # identical for every caller, unlike the flatten above, which writes into
     # each target's own Res/. So build the validation graph ONCE and have every
