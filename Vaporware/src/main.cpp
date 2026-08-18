@@ -510,6 +510,7 @@ auto main(int argc, char* args[]) -> int {
     args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::AtMostOne);
     args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", { "metal" });
     args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", { "vulkan" });
+    args::Flag useDX12(graphicsGroup, "DirectX 12", "Use Direct3D 12 backend (Windows)", { "dx12" });
     args::Group debugGroup(parser, "Debug:");
     args::Flag statsFlag(debugGroup, "stats", "Enable per-frame telemetry log (stderr + vapor_stats.log)", { "stats" });
     args::Group helpGroup(parser, "Help:");
@@ -550,6 +551,17 @@ auto main(int argc, char* args[]) -> int {
         winTitle = "Project Vapor (Metal)";
         winFlags |= SDL_WINDOW_METAL;
         gfxBackend = GraphicsBackend::Metal;
+    }
+#elif defined(_WIN32)
+    if (useDX12) {
+        // D3D12 presents through DXGI on the plain Win32 HWND — no SDL surface
+        // flag needed (SDL_WINDOW_VULKAN would force a Vulkan surface).
+        winTitle = "Project Vapor (Direct3D 12)";
+        gfxBackend = GraphicsBackend::D3D12;
+    } else {
+        winTitle = "Project Vapor (Vulkan)";
+        winFlags |= SDL_WINDOW_VULKAN;
+        gfxBackend = GraphicsBackend::Vulkan;
     }
 #else
     winTitle = "Project Vapor (Vulkan)";

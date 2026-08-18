@@ -17,7 +17,12 @@
 #   compile-check the engine's Metal shaders at build time. APPLE-only.
 
 function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
-    find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED)
+    # HINTS cover Windows, where glslang comes from vcpkg's tools dir (not on
+    # the default program path) or a Vulkan SDK install.
+    find_program(GLSL_VALIDATOR "glslangValidator" REQUIRED
+        HINTS "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/glslang"
+              "$ENV{VULKAN_SDK}/Bin"
+    )
 
     # CONFIGURE_DEPENDS re-globs at build time and auto-reconfigures when the
     # set of shader sources changes. Without it, a shader added after the last
@@ -305,4 +310,33 @@ function(vapor_copy_game_assets TARGET ASSETS_DIR)
     endif()
 
     add_dependencies(${TARGET} ${_copy_target})
+endfunction()
+
+# vapor_deploy_d3d12_runtime(TARGET)
+#   Copy the DirectX Shader Compiler runtime (dxcompiler.dll + the dxil.dll
+#   validator/signer) from vcpkg next to TARGET's executable. The D3D12
+#   backend LoadLibrary's dxcompiler.dll at initialize() for the load-time
+#   SPIR-V -> HLSL -> DXIL cross-compile; without dxil.dll the produced DXIL
+#   is unsigned and rejected outside developer mode. WIN32-only no-op.
+function(vapor_deploy_d3d12_runtime TARGET)
+    if(NOT WIN32)
+        return()
+    endif()
+    set(_dxc_tool_dir "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/tools/directx-dxc")
+    foreach(_dll dxcompiler.dll dxil.dll)
+        find_file(VAPOR_DXC_${_dll} "${_dll}"
+            HINTS "${_dxc_tool_dir}"
+                  "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
+        )
+        if(VAPOR_DXC_${_dll})
+            add_custom_command(TARGET ${TARGET} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${VAPOR_DXC_${_dll}}" "$<TARGET_FILE_DIR:${TARGET}>"
+                COMMENT "Deploying ${_dll} for the D3D12 backend"
+            )
+        else()
+            message(WARNING "vapor_deploy_d3d12_runtime: ${_dll} not found — "
+                            "the D3D12 backend needs it beside the executable")
+        endif()
+    endforeach()
 endfunction()

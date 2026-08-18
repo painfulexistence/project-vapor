@@ -3,6 +3,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("Metal Backend Window Support", "[backend][metal]") {
+#ifndef __APPLE__
+    SKIP("Metal windows only exist on Apple platforms");
+#else
     REQUIRE(SDL_Init(SDL_INIT_VIDEO));
 
     SDL_Window* window = SDL_CreateWindow("Metal Backend Test", 100, 100, SDL_WINDOW_METAL | SDL_WINDOW_HIDDEN);
@@ -10,6 +13,7 @@ TEST_CASE("Metal Backend Window Support", "[backend][metal]") {
 
     SDL_DestroyWindow(window);
     SDL_Quit();
+#endif
 }
 
 TEST_CASE("Vulkan Backend Window Support", "[backend][vulkan]") {
@@ -38,3 +42,16 @@ TEST_CASE("Vulkan Backend Window Support", "[backend][vulkan]") {
     SDL_Vulkan_UnloadLibrary();
     SDL_Quit();
 }
+#ifdef _WIN32
+TEST_CASE("D3D12 Backend Window Support", "[backend][d3d12]") {
+    // D3D12 presents through DXGI on a plain Win32 window — no SDL surface
+    // flag involved, so window creation succeeding is all SDL must provide.
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SKIP("SDL_INIT_VIDEO failed: " << SDL_GetError());
+    }
+    SDL_Window* window = SDL_CreateWindow("D3D12 Backend Test", 100, 100, SDL_WINDOW_HIDDEN);
+    REQUIRE(window != nullptr);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+}
+#endif
