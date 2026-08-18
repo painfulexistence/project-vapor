@@ -126,6 +126,15 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install cmake ccache
 
+      # Newer Xcode runner images ship without the Metal toolchain, which the
+      # build-time shader validation needs (`xcrun metal`).
+      - name: Ensure Metal toolchain
+        if: matrix.os == 'macos-latest'
+        run: |
+          if ! xcrun metal --version >/dev/null 2>&1; then
+            sudo xcodebuild -downloadComponent MetalToolchain
+          fi
+
       - name: Set ccache dir
         run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
 
