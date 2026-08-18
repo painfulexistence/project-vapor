@@ -1448,6 +1448,10 @@ private:
         BufferHandle rootBuffer;      // TessRootGpu[]
         BufferHandle argsBuffer;      // TessArgs (GPU-written indirect args)
         BufferHandle leafDataBuffer;  // TessLeafDataGpu[maxLeaves] (compute path)
+        // Vulkan-only: TessParamsGpu (112 B) exceeds a 16-byte push slot, so
+        // it rides a per-instance host-visible buffer (updated once per frame
+        // in tessUpdatePass; Metal keeps setBytes).
+        BufferHandle paramsBuffer;
     };
     std::vector<TessInstance> m_tessInstances;
     Uint32 m_nextTessMeshId = 1;

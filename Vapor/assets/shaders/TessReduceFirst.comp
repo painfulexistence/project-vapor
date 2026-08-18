@@ -1,0 +1,23 @@
+#version 460
+// Tess reduction step 1 — GLSL twin of tessReduceFirst: popcount each
+// bitfield word into the deepest count level (maxDepth - 5).
+// Push constants mirror Metal's TessReduceParams at setComputeBytes slot 4
+// (16 bytes -> push offset 64).
+#extension GL_GOOGLE_include_directive : require
+#include "include/tess_common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer TessCbtBuf { uint cbt[]; };
+
+layout(push_constant) uniform PC {
+    layout(offset = 64) uint maxDepth;
+    layout(offset = 68) uint level;  // unused here (tessReduceLevel's field)
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint s = maxDepth - 5u;
+    if (tid >= (1u << s)) return;
+    cbt[(1u << s) - 1u + tid] = uint(bitCount(cbt[tessBitfieldOffset(maxDepth) + tid]));
+}
