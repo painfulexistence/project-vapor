@@ -1,12 +1,22 @@
 #version 450
-// Depth + normal + albedo pre-pass (RHI renderer, Vulkan backend). Consumes a
-// subset of RHIMain.vert's outputs (matching locations). Output 0 = world
-// normal (RGBA16F normalRT), output 1 = base color (RGBA8 albedoRT) — the
-// inputs future SSAO/GIBS-style passes need; depth is written by the pipeline.
+// Depth + normal + albedo pre-pass (RHI renderer, Vulkan/D3D12 backends).
+// Pairs with RHIMain.vert. Output 0 = world normal (RGBA16F normalRT),
+// output 1 = base color (RGBA8 albedoRT) — the inputs future SSAO/GIBS-style
+// passes need; depth is written by the pipeline.
+//
+// All six RHIMain.vert outputs are declared even though only 1/2/4 are read:
+// Vulkan links varyings by location, but the D3D12 backend cross-compiles to
+// HLSL where DXC packs each stage's registers sequentially over *declared*
+// varyings — skipping locations 0/3/5 here would put TEXCOORD1/2/4 at
+// different registers than the vertex stage and fail PSO creation
+// (SHADER_LINKAGE_REGISTERINDEX).
 
+layout(location = 0) in vec3 fragPos;
 layout(location = 1) in vec2 fragUV;
 layout(location = 2) in vec3 worldNormal;
+layout(location = 3) in vec4 worldTangent;
 layout(location = 4) flat in uint fragMaterialID;
+layout(location = 5) in vec4 instanceColor;
 
 layout(location = 0) out vec4 outNormal;
 layout(location = 1) out vec4 outAlbedo;

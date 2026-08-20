@@ -305,6 +305,8 @@ D3D12_RENDER_TARGET_BLEND_DESC convertBlendMode(BlendMode mode) {
 
 class RHI_D3D12 : public RHI {
 public:
+    ~RHI_D3D12() override;
+
     // ------------------------------------------------------------------------
     // Sizing constants (renderer-visible ones mirror rhi_vulkan.hpp)
     // ------------------------------------------------------------------------
@@ -622,9 +624,20 @@ private:
         Uint64 fenceValue;
         ID3D12Resource* resource;   // owned; Released on retire
     };
+    // While the frame list is open, a deferred resource may be referenced by
+    // commands already recorded into it (updateBuffer/updateTexture staging
+    // copies, destroy of a resource drawn earlier in the frame). The frame's
+    // signal value isn't known yet — loading-path submits (submitUploads,
+    // executeImmediate) interleave and consume fence values, and their
+    // retireZombies would free the resource before the frame list ever
+    // executes (use-after-free -> DEVICE_HUNG). Stamp such zombies with a
+    // sentinel no fence can reach, and re-stamp them in endFrame once the
+    // frame's signal value is assigned. shutdown() releases unconditionally
+    // after waitIdle, so a sentinel left at teardown cannot leak.
+    static constexpr Uint64 kFencePendingFrame = UINT64_MAX;
     std::vector<Zombie> zombies;
     void deferRelease(ID3D12Resource* r) {
-        if (r) zombies.push_back({nextFenceValue, r});
+        if (r) zombies.push_back({frameListOpen ? kFencePendingFrame : nextFenceValue, r});
     }
 
     // Descriptor heaps
@@ -850,6 +863,20 @@ bool RHI_D3D12::initialize(SDL_Window* sdlWindow) {
     // to OutputDebugString.
     if (DxPtr<ID3D12InfoQueue1> infoQueue;
         SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(infoQueue.put())))) {
+        // Clear-value mismatch is a performance note, not a correctness error,
+        // and clear colors here are runtime data (per-pass RenderPassDesc,
+        // including one editable in the Engine window) — no single optimized
+        // clear value chosen at resource creation can match them all. Filter
+        // the two IDs rather than pretending we could.
+        D3D12_MESSAGE_ID denied[] = {
+            D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+            D3D12_MESSAGE_ID_CLEARDEPTHSTENCILVIEW_MISMATCHINGCLEARVALUE,
+        };
+        D3D12_INFO_QUEUE_FILTER filter{};
+        filter.DenyList.NumIDs = static_cast<UINT>(std::size(denied));
+        filter.DenyList.pIDList = denied;
+        infoQueue->AddStorageFilterEntries(&filter);
+
         DWORD cookie = 0;
         infoQueue->RegisterMessageCallback(
             [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id,
@@ -1198,6 +1225,18 @@ void RHI_D3D12::ensureSwapchain() {
         backbufferState[i] = D3D12_RESOURCE_STATE_PRESENT;
     }
     backbufferIndex = swapchain->GetCurrentBackBufferIndex();
+}
+
+RHI_D3D12::~RHI_D3D12() {
+    // Renderer::shutdown() destroys renderer-owned resources but never calls
+    // rhi->shutdown(). Every one of those destroys lands in `zombies` — raw
+    // owned pointers the default destructor would not Release — and the same
+    // goes for commandSigCache and mipgenPsoCache. Each leaked child holds a
+    // device reference, keeping the device alive to process exit (the
+    // several-hundred-object live dump from the debug layer). shutdown() is
+    // idempotent (null/empty guards throughout), so an earlier explicit call
+    // stays harmless.
+    shutdown();
 }
 
 void RHI_D3D12::shutdown() {
@@ -2664,6 +2703,11 @@ void RHI_D3D12::endFrame() {
     swapchain->Present(1, 0);
 
     frameFenceValues[frameIndex] = nextFenceValue;
+    // Zombies deferred while this frame was recording now belong to this
+    // frame's signal (see deferRelease).
+    for (Zombie& z : zombies) {
+        if (z.fenceValue == kFencePendingFrame) z.fenceValue = nextFenceValue;
+    }
     queue->Signal(fence, nextFenceValue++);
     insideFrame = false;
 
