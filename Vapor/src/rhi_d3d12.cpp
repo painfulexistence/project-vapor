@@ -842,6 +842,31 @@ bool RHI_D3D12::initialize(SDL_Window* sdlWindow) {
     }
     device->QueryInterface(IID_PPV_ARGS(device5.put()));  // optional (DXR)
 
+#ifndef NDEBUG
+    // EnableDebugLayer alone reports through OutputDebugString, which nothing
+    // sees without a debugger attached — so validation errors are invisible in a
+    // plain terminal run and in CI. Mirror them to stderr instead. The callback
+    // dies with the info queue, so the teardown live-object dump still only goes
+    // to OutputDebugString.
+    if (DxPtr<ID3D12InfoQueue1> infoQueue;
+        SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(infoQueue.put())))) {
+        DWORD cookie = 0;
+        infoQueue->RegisterMessageCallback(
+            [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY severity, D3D12_MESSAGE_ID id,
+               LPCSTR description, void*) {
+                const char* level = nullptr;
+                switch (severity) {
+                    case D3D12_MESSAGE_SEVERITY_CORRUPTION: level = "CORRUPTION"; break;
+                    case D3D12_MESSAGE_SEVERITY_ERROR:      level = "ERROR";      break;
+                    case D3D12_MESSAGE_SEVERITY_WARNING:    level = "WARNING";    break;
+                    default: return;  // INFO/MESSAGE are per-call chatter
+                }
+                fmt::print(stderr, "D3D12 {} #{}: {}\n", level, static_cast<int>(id), description);
+            },
+            D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+    }
+#endif
+
     // Feature detection → RHICapabilities
     D3D12_FEATURE_DATA_SHADER_MODEL smQuery{ D3D_SHADER_MODEL_6_8 };
     if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &smQuery, sizeof(smQuery)))) {
@@ -2428,8 +2453,14 @@ void RHI_D3D12::generateMipmaps(TextureHandle handle) {
                                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, list);
         list->SetPipelineState(pso);
         list->SetGraphicsRootSignature(mipgenRootSig);
-        ID3D12DescriptorHeap* heaps[] = {gpuSrvHeap.p};
-        list->SetDescriptorHeaps(1, heaps);
+        // Mipgen samples through a static sampler and needs no sampler heap of
+        // its own, but this lambda is also recorded onto the shared frameList
+        // below. SetDescriptorHeaps replaces the entire set rather than adding
+        // to it, so binding only the SRV heap here would unbind the sampler heap
+        // beginFrame set, and every sampler root table for the rest of the frame
+        // would fail with SET_DESCRIPTOR_TABLE_INVALID.
+        ID3D12DescriptorHeap* heaps[] = {gpuSrvHeap.p, gpuSamplerHeap.p};
+        list->SetDescriptorHeaps(2, heaps);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
         for (Uint32 layer = 0; layer < layers; layer++) {
