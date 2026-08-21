@@ -829,6 +829,18 @@ bool RHI_D3D12::initialize(SDL_Window* sdlWindow) {
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debug.put())))) {
             debug->EnableDebugLayer();
             factoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+            // GPU-based validation instruments the shaders themselves, catching
+            // what the CPU-side layer cannot: out-of-bounds descriptor and
+            // buffer access, resource state mismatches seen by the GPU. Costs
+            // roughly an order of magnitude in frame time, so it is opt-in.
+            if (const char* gbv = std::getenv("VAPOR_D3D12_GBV"); gbv && gbv[0] == '1') {
+                DxPtr<ID3D12Debug1> debug1;
+                if (SUCCEEDED(debug->QueryInterface(IID_PPV_ARGS(debug1.put())))) {
+                    debug1->SetEnableGPUBasedValidation(TRUE);
+                    debug1->SetEnableSynchronizedCommandQueueValidation(TRUE);
+                    fmt::print(stderr, "RHI_D3D12: GPU-based validation enabled\n");
+                }
+            }
         }
     }
 #endif
@@ -1655,6 +1667,14 @@ std::vector<Uint8> RHI_D3D12::compileSpirvToDxil(const void* spirv, size_t size,
         hlsl = compiler.compile();
     } catch (const std::exception& e) {
         throw std::runtime_error(fmt::format("RHI_D3D12: spirv-cross failed: {}", e.what()));
+    }
+
+    // VAPOR_DUMP_HLSL=1 writes the cross-compiled HLSL beside its DXIL cache
+    // entry. Register/semantic assignment is what stage-linkage bugs turn on,
+    // and it is otherwise invisible — the backend only ever keeps the DXIL.
+    if (const char* d = std::getenv("VAPOR_DUMP_HLSL"); d && d[0] == '1') {
+        std::ofstream h(shaderCacheDir / fmt::format("{:016x}.hlsl", key));
+        if (h) h << hlsl;
     }
 
     // --- HLSL → DXIL ---
@@ -3083,6 +3103,29 @@ void RHI_D3D12::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, Sa
         boundTextures[binding] = nb;
         graphicsDescriptorsDirty = true;
     }
+
+    // Mirror setComputeSampledTexture: anything sampled by the pixel stage must
+    // sit in a shader-resource state first. beginRenderPass leaves depth targets
+    // in DEPTH_WRITE, and sampling a depth buffer in that state returns its
+    // hardware-compressed representation rather than depth values — which is
+    // what put the blocky black/white tiles over the scene.
+    //
+    // Attachments of the pass currently recording are excluded: they are
+    // legitimately bound for write, and moving them to a read state here would
+    // both break the pass and be an invalid barrier.
+    TextureResource* tex = resolveTexture(texture.id);
+    if (!tex || !frameListOpen) return;
+    if (insideRenderPass) {
+        if (currentPassDesc.depthAttachment.isValid() &&
+            resolveTexture(currentPassDesc.depthAttachment.id) == tex) {
+            return;
+        }
+        for (const TextureHandle& att : currentPassDesc.colorAttachments) {
+            if (att.isValid() && resolveTexture(att.id) == tex) return;
+        }
+    }
+    transitionTexture(*tex, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, frameList);
 }
 
 void RHI_D3D12::setVertexBytes(const void* data, size_t size, Uint32 binding) {
