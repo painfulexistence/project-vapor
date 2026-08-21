@@ -45,7 +45,7 @@
         <tr><td>3D Batch Rendering</td><td>World-space batch rendering with depth testing.</td></tr>
         <tr><td>Sprite / Texture Quad</td><td>Textured quad rendering with rotation and tint.</td></tr>
         <tr><td>Bitmap Font Rendering</td><td>2D screen-space and 3D world-space text.</td></tr>
-        <tr><td>Multi-backend</td><td>Metal (macOS), Vulkan (cross-platform), and Direct3D 12 (Windows) sharing the same API surface; D3D12 cross-compiles the Vulkan SPIR-V corpus to DXIL at load.</td></tr>
+        <tr><td>Multi-backend</td><td>Metal (macOS) and Vulkan (cross-platform) sharing the same API surface.</td></tr>
       </tbody>
     </table>
 
@@ -194,7 +194,7 @@
         <tr><td>CMake 3.24+ Build</td><td>Preset-based configure and build.</td></tr>
         <tr><td>vcpkg Dependency Management</td><td>All dependencies declared in <code>vcpkg.json</code>.</td></tr>
         <tr><td>SPIR-V Shader Compilation</td><td>GLSL shaders compiled to SPIR-V via glslangValidator.</td></tr>
-        <tr><td>Multi-platform Graphics</td><td>Same engine API — Metal, Vulkan, or Direct3D 12 selected at runtime.</td></tr>
+        <tr><td>Multi-platform Graphics</td><td>Same engine API, Metal or Vulkan selected at runtime.</td></tr>
         <tr><td>CI/CD</td><td>GitHub Actions on macos-15. Runs tests on every push, ccache for speed.</td></tr>
         <tr><td>Automated Tests</td><td>Catch2 v3. 76 tests across 5 binaries.</td></tr>
       </tbody>

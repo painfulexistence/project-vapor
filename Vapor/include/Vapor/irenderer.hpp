@@ -66,9 +66,7 @@ struct VoxelVolumeDraw {
 // Graphics backend selection
 enum class GraphicsBackend {
     Metal,
-    Vulkan,
-    D3D12   // Windows only (rhi_d3d12.cpp); shares the Vulkan renderer path
-            // and SPIR-V shader corpus (cross-compiled to DXIL at load).
+    Vulkan
 };
 
 // Render path selection

@@ -102,7 +102,7 @@ namespace BroadPhaseLayers {
     static constexpr JPH::BroadPhaseLayer nonMoving(0);
     static constexpr JPH::BroadPhaseLayer moving(1);
     static constexpr JPH::BroadPhaseLayer trigger(2);
-    static constexpr JPH::uint numLayers(3);
+    static constexpr uint numLayers(3);
 };// namespace BroadPhaseLayers
 
 class BPLayerInterfaceImpl final : public JPH::BroadPhaseLayerInterface {
@@ -113,7 +113,7 @@ public:
         mObjectToBroadPhase[Layers::trigger] = BroadPhaseLayers::trigger;
     }
 
-    virtual auto GetNumBroadPhaseLayers() const -> JPH::uint override {
+    virtual auto GetNumBroadPhaseLayers() const -> uint override {
         return BroadPhaseLayers::numLayers;
     }
 
@@ -259,10 +259,10 @@ void Physics3D::init(Vapor::TaskScheduler& taskScheduler, std::shared_ptr<Vapor:
         JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1
     );
 
-    const JPH::uint cMaxBodies = 1024;
-    const JPH::uint cNumBodyMutexes = 0;
-    const JPH::uint cMaxBodyPairs = 1024;
-    const JPH::uint cMaxContactConstraints = 1024;
+    const uint cMaxBodies = 1024;
+    const uint cNumBodyMutexes = 0;
+    const uint cMaxBodyPairs = 1024;
+    const uint cMaxContactConstraints = 1024;
     broadPhaseLayerInterface = std::make_unique<BPLayerInterfaceImpl>();
     objectVsBroadphaseLayerFilter = std::make_unique<ObjectVsBroadPhaseLayerFilterImpl>();
     objectVsObjectLayerFilter = std::make_unique<ObjectLayerPairFilterImpl>();

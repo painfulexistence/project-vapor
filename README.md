@@ -9,7 +9,7 @@
 <br />
 <br />
 
-A modern 3D game engine built from scratch in C++, targeting Metal, Vulkan, and Direct3D 12. Solo project — GPU-driven rendering, ECS, physics, and a working demo game as the proving ground.
+A modern 3D game engine built from scratch in C++, targeting Metal and Vulkan. Solo project — GPU-driven rendering, ECS, physics, and a working demo game as the proving ground.
 
 ### Blog
 [Arcane Realms](https://painfulexistence.substack.com/)
@@ -31,7 +31,7 @@ The result is that I get the throughput benefits of agentic coding without cedin
 ### Main Features
 
 #### Rendering
-- Metal-cpp, Vulkan, and Direct3D 12 backends with feature parity tracking
+- Metal-cpp and Vulkan backends with feature parity tracking
 - Physically-based rendering with Disney BRDF
 - GLTF scene loading
 - Tiled Forward rendering
@@ -69,16 +69,6 @@ cmake --build --preset dev --target main -j4
 cmake --build --preset dev --target main -j4
 ./build/Vaporware/Debug/main --vulkan
 ```
-
-**Build & Run (Direct3D 12, Windows)**
-```powershell
-cmake --build --preset dev --target main -j4
-.\build\Vaporware\Debug\main.exe --dx12
-```
-The D3D12 backend consumes the same SPIR-V shaders as Vulkan, cross-compiled
-to DXIL at load time (spirv-cross + dxc, disk-cached). Hardware ray tracing,
-mesh shaders, and GPU-driven MDI light up per device capability (Shader
-Model 6.8 for MDI/bindless).
 
 ### Testing
 

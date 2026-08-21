@@ -9,5 +9,3 @@ vapor_copy_game_assets(main "${CMAKE_CURRENT_SOURCE_DIR}/assets")
 # so GPU-trace replay can recompile them without the app's CWD. APPLE-only no-op
 # elsewhere. Runs POST_BUILD, i.e. after the asset copies above.
 vapor_flatten_metal_shaders(main)
-# D3D12 backend runtime (dxcompiler/dxil DLLs beside the exe). WIN32-only no-op.
-vapor_deploy_d3d12_runtime(main)

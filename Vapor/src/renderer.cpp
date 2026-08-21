@@ -7,9 +7,6 @@
 #ifdef __APPLE__
 #include "rhi_metal.hpp"
 #endif
-#ifdef _WIN32
-#include "rhi_d3d12_imgui.hpp"  // windows.h-free ImGui glue for the D3D12 backend
-#endif
 #include "helper.hpp"
 #include "components.hpp"
 #include "graphics_effects.hpp"  // VolumetricFogData / VolumetricFogVolumeGPU (froxel kernel layouts)
@@ -695,11 +692,6 @@ void Renderer::shutdown() {
                 ImGui_ImplVulkan_Shutdown();
                 ImGui_ImplSDL3_Shutdown();
                 break;
-#ifdef _WIN32
-            case GraphicsBackend::D3D12:
-                imguiD3D12Shutdown();
-                break;
-#endif
             default:
                 break;
         }
@@ -1106,11 +1098,6 @@ void Renderer::beginFrame(const CameraRenderData& camera) {
     if (backend == GraphicsBackend::Vulkan) {
         ImGui_ImplVulkan_NewFrame();
     }
-#ifdef _WIN32
-    if (backend == GraphicsBackend::D3D12) {
-        imguiD3D12NewFrame();
-    }
-#endif
 
     currentCamera = camera;
     frameDrawables.clear();
@@ -1484,20 +1471,6 @@ void Renderer::endFrame() {
                 }
                 break;
             }
-#ifdef _WIN32
-            case GraphicsBackend::D3D12: {
-                // Same shape as Vulkan: draw on top of the swapchain inside a
-                // pass on the frame command list.
-                RenderPassDesc imguiPassDesc;
-                imguiPassDesc.name = "ImGui";
-                imguiPassDesc.colorAttachments.push_back(TextureHandle{0});  // swapchain
-                imguiPassDesc.loadColor.push_back(true);  // draw on top
-                rhi->beginRenderPass(imguiPassDesc);
-                imguiD3D12RenderDrawData(rhi.get());
-                rhi->endRenderPass();
-                break;
-            }
-#endif
             default:
                 break;
         }
@@ -1879,7 +1852,7 @@ void Renderer::mainRenderPass() {
     rhi->setTexture(0, 13, whiteTex, defaultSampler);
     rhi->setTexture(0, 14, blackTex, defaultSampler);
 
-    if (backend != GraphicsBackend::Metal) {
+    if (backend == GraphicsBackend::Vulkan) {
         // PSSM cascaded shadow (Vulkan binding budget is 8 slots/set, so the
         // Metal contract slots 9/12 above are no-ops here): cascade data at
         // set1 b2, cascade depth array at set2 b6. Vulkan ONLY — on Metal,
@@ -2017,7 +1990,7 @@ void Renderer::mainRenderPass() {
     // multi-draw), and on Metal via the RHI's per-command loop (correct, though
     // single-call there needs an Indirect Command Buffer — a Metal-internal
     // follow-up). Both backends share this renderer path.
-    const bool mdiBackendOk = (backend != GraphicsBackend::Metal && capabilities.multiDrawIndirect) ||
+    const bool mdiBackendOk = (backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
                               backend == GraphicsBackend::Metal;
     const bool useMDI = useGpuDriven && gpuDrivenMDI && mdiBackendOk &&
                         mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
@@ -2347,7 +2320,7 @@ void Renderer::mainRenderPass() {
         // just splits a run.) Metal keeps per-object draws: its vertexMain
         // takes [[base_instance]], not [[instance_id]], so every instance of a
         // batched draw would read the same InstanceData.
-        const bool canBatchRuns = backend != GraphicsBackend::Metal && !useGpuDriven;
+        const bool canBatchRuns = backend == GraphicsBackend::Vulkan && !useGpuDriven;
         for (size_t di = 0; di < drawableIndices.size();) {
             const Uint32 drawableIdx = drawableIndices[di];
             const Drawable& drawable = frameDrawables[drawableIdx];
@@ -2701,7 +2674,7 @@ void Renderer::prePass() {
         prepassCullArgsBuffer.isValid() &&
         mergedVertexBuffer.isValid() && mergedIndexBuffer.isValid() &&
         !m_materialRanges.empty() &&
-        ((backend != GraphicsBackend::Metal && capabilities.multiDrawIndirect) ||
+        ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
          backend == GraphicsBackend::Metal);
     if (prePassIndirect) {
         rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
@@ -2725,7 +2698,7 @@ void Renderer::prePass() {
     // gl_InstanceIndex]), so the same-mesh consecutive-slot run batching the
     // Main pass does applies here too (see mainRenderPass). Metal stays
     // per-object ([[base_instance]] semantics).
-    const bool preBatchRuns = backend != GraphicsBackend::Metal;
+    const bool preBatchRuns = backend == GraphicsBackend::Vulkan;
     for (size_t vi = 0; vi < visibleDrawables.size();) {
         const Uint32 drawableIdx = visibleDrawables[vi];
         const Drawable& drawable = frameDrawables[drawableIdx];
@@ -3152,7 +3125,7 @@ void Renderer::raytraceShadowPass() {
     // path (RHIMain.frag never samples shadowRT), so tracing it here is pure
     // waste. Skip it — the near map + SSCS provide the near shadow. (The dead
     // Metal-via-RHI branch still consumes shadowRT at b7, so keep it for Metal.)
-    if (backend != GraphicsBackend::Metal) return;
+    if (backend == GraphicsBackend::Vulkan) return;
     if (!raytraceShadowPipeline.isValid() || !sceneTLAS.isValid() || !shadowRT.isValid()) return;
     // Half-res: shadowRT is half-res, the kernel derives UV from its own dims.
     Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;
@@ -6550,7 +6523,7 @@ void Renderer::createRenderPipeline() {
     std::string vertShaderCode;
     std::string fragShaderCode;
 
-    if (backend != GraphicsBackend::Metal) {
+    if (backend == GraphicsBackend::Vulkan) {
         vertShaderCode = readFile("shaders/RHIMain.vert.spv");
         fragShaderCode = readFile("shaders/RHIMain.frag.spv");
     } else if (backend == GraphicsBackend::Metal) {
@@ -6635,7 +6608,7 @@ void Renderer::createRenderPipeline() {
         bDesc.fragmentShader = fragmentShaderBindless;
         bDesc.supportsICB = true;
         mainPipelineBindless = rhi->createPipeline(bDesc);
-    } else if (backend != GraphicsBackend::Metal && capabilities.bindlessTextures) {
+    } else if (backend == GraphicsBackend::Vulkan && capabilities.bindlessTextures) {
         std::string bindlessFragCode = readFile("shaders/RHIMainBindless.frag.spv");
         if (!bindlessFragCode.empty()) {
             ShaderDesc bfd;
@@ -6656,7 +6629,7 @@ void Renderer::createRenderPipeline() {
     // the native renderer). Activating this makes mainRenderPass() route to
     // colorRT and postProcessPass() composite to the swapchain.
     // ------------------------------------------------------------------------
-    if (backend != GraphicsBackend::Metal) {
+    if (backend == GraphicsBackend::Vulkan) {
         std::string ppVertCode = readFile("shaders/FullScreen.vert.spv");
         std::string ppFragCode = readFile("shaders/PostProcess.frag.spv");
         if (!ppVertCode.empty() && !ppFragCode.empty()) {
@@ -7146,7 +7119,7 @@ void Renderer::createRenderPipeline() {
         std::string ppv, ppf;
         const char* entryV = "main";
         const char* entryF = "main";
-        if (backend != GraphicsBackend::Metal) {
+        if (backend == GraphicsBackend::Vulkan) {
             ppv = readFile("shaders/RHIMain.vert.spv");
             ppf = readFile("shaders/PrePass.frag.spv");
         } else if (backend == GraphicsBackend::Metal) {
@@ -7680,7 +7653,7 @@ void Renderer::createRenderPipeline() {
         std::string sfv, sff;
         const char* entryV = "main";
         const char* entryF = "main";
-        if (backend != GraphicsBackend::Metal) {
+        if (backend == GraphicsBackend::Vulkan) {
             sfv = readFile("shaders/FullScreen.vert.spv");
             sff = readFile("shaders/SunFlare.frag.spv");
         } else if (backend == GraphicsBackend::Metal) {
@@ -7847,11 +7820,6 @@ std::unique_ptr<IRenderer> Vapor::createRenderer(GraphicsBackend backend, SDL_Wi
             rhi = std::unique_ptr<RHI>(createRHIMetal());
             break;
 #endif
-#ifdef _WIN32
-        case GraphicsBackend::D3D12:
-            rhi = std::unique_ptr<RHI>(createRHID3D12());
-            break;
-#endif
         default:
             return nullptr;
     }
@@ -7924,11 +7892,6 @@ std::unique_ptr<IRenderer> Vapor::createRenderer(GraphicsBackend backend, SDL_Wi
             }
             break;
         }
-#ifdef _WIN32
-        case GraphicsBackend::D3D12:
-            imguiD3D12Init(rhi.get(), window);
-            break;
-#endif
         default:
             break;
     }
@@ -8263,13 +8226,6 @@ void* Renderer::getImGuiTextureID(TextureHandle handle) {
         return rhi->getBackendTexture(handle);
     }
 #endif
-#ifdef _WIN32
-    if (backend == GraphicsBackend::D3D12) {
-        // ImGui's DX12 backend takes a shader-visible GPU descriptor handle
-        // as the texture ID; the glue keeps one persistent slot per texture.
-        return reinterpret_cast<void*>(imguiD3D12TextureID(rhi.get(), handle));
-    }
-#endif
     if (backend == GraphicsBackend::Vulkan) {
         auto it = imguiTextureCache.find(handle.id);
         if (it != imguiTextureCache.end()) {
@@ -8543,7 +8499,7 @@ void Renderer::drawGraphicsImGui() {
         // multi-draw per material over the merged scene buffers; Vulkan
         // native, Metal per-command loop). Bindless MDI is its own mode above.
         const bool mdiAvailable = gpuDrivenMode == GpuDrivenMode::Indirect &&
-            ((backend != GraphicsBackend::Metal && capabilities.multiDrawIndirect) ||
+            ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
              backend == GraphicsBackend::Metal);
         ImGui::BeginDisabled(!mdiAvailable);
         ImGui::Checkbox("  -> MDI (per material)", &gpuDrivenMDI);
@@ -10021,7 +9977,7 @@ void Renderer::renderToTexture(
         // built for the MAIN camera's screen tiles, meaningless in this view.
         Uint32 rttDebugFlags = mainDebugFlags | 1u;
 
-        if (backend != GraphicsBackend::Metal) {
+        if (backend == GraphicsBackend::Vulkan) {
             // RHIMain.frag contract (see mainRenderPass for the slot notes).
             if (pssmDataBuffer.isValid()) rhi->setFragmentBuffer(2, pssmDataBuffer, 0, sizeof(PSSMRenderData));
             if (pssmShadowArrayTexture.isValid()) rhi->setTexture(0, 6, pssmShadowArrayTexture, shadowSampler);
@@ -10233,7 +10189,7 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
     std::string vertShaderCode;
     std::string fragShaderCode;
 
-    if (backend != GraphicsBackend::Metal) {
+    if (backend == GraphicsBackend::Vulkan) {
         // Load SPIR-V shaders
         vertShaderCode = readFile("shaders/RHIBatch.vert.spv");
         fragShaderCode = readFile("shaders/RHIBatch.frag.spv");

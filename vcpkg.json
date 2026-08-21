@@ -33,18 +33,6 @@
     "entt",
     "catch2",
     "nlohmann-json",
-    "boost-pfr",
-    {
-      "name": "directx-headers",
-      "platform": "windows"
-    },
-    {
-      "name": "directx-dxc",
-      "platform": "windows"
-    },
-    {
-      "name": "spirv-cross",
-      "platform": "windows"
-    }
+    "boost-pfr"
   ]
 }

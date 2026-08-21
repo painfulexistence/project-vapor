@@ -96,23 +96,9 @@ vec3 hashColor(uint x) {
 
 void main() {
     // Synthetic-triangle probe (errorThreshold <= -1.5): one hardcoded clip-space
-    // triangle (mirror of 3d_meshlet.metal's meshMain).
-    // SetMeshOutputsEXT sits in the entry block with branchlessly-selected
-    // counts: DXIL (the D3D12 cross-compile of this shader) requires exactly
-    // one dominating call, and any branch above it gets jump-threaded by the
-    // DXIL optimizer into one call per path, which its validator rejects. The
-    // meshlets[] read going unconditional changes nothing on Vulkan — static
-    // use already required the descriptor to be valid in probe mode, and the
-    // probe's counts ignore the fetched value.
-    // (Arithmetic selects, not ?:, because glslang lowers ?: to branches.)
-    const bool probe = errorThreshold <= -1.5;
-    uint real = uint(!probe);  // 0 in probe mode, 1 otherwise
-    uint mi = payload.meshletIndices[gl_WorkGroupID.x] * real;
-    Meshlet m = meshlets[mi];
-    SetMeshOutputsEXT(m.vertexCount * real + 3u * (1u - real),
-                      m.triangleCount * real + (1u - real));
-
-    if (probe) {
+    // triangle, no buffer reads (mirror of 3d_meshlet.metal's meshMain).
+    if (errorThreshold <= -1.5) {
+        SetMeshOutputsEXT(3u, 1u);
         if (gl_LocalInvocationIndex == 0u) {
             gl_MeshVerticesEXT[0].gl_Position = vec4(-0.9, -0.9, 0.5, 1.0);
             gl_MeshVerticesEXT[1].gl_Position = vec4( 0.9, -0.9, 0.5, 1.0);
@@ -124,6 +110,10 @@ void main() {
         }
         return;
     }
+
+    uint mi = payload.meshletIndices[gl_WorkGroupID.x];
+    Meshlet m = meshlets[mi];
+    SetMeshOutputsEXT(m.vertexCount, m.triangleCount);
 
     mat4 model = instances[instanceID].model;
     mat4 mvp = cam.proj * cam.view * model;
