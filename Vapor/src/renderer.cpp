@@ -1889,7 +1889,8 @@ void Renderer::mainRenderPass() {
         // pushing here would corrupt it (the old billions-of-iterations hang).
         rhi->setFragmentBytes(&mainDebugFlags, sizeof(Uint32), 2);
         // Spot lights: buffer at set1 b6; rect area lights at set1 b7 (analytic
-        // eval in RHIMain.frag, unshadowed — the RT area shadow is Metal-only).
+        // eval in RHIMain.frag; the RT variants shadow them from the stochastic
+        // pass's G/B channels).
         // Loop bounds travel together at push offset 80 (binding 1).
         // (IBL maps already bound at b10/11/12 above.)
         if (spotLightBuffer.isValid())
@@ -1898,6 +1899,29 @@ void Renderer::mainRenderPass() {
         glm::uvec2 spotRectCounts(static_cast<Uint32>(spotLights.size()),
                                   static_cast<Uint32>(rectLights.size()));
         rhi->setFragmentBytes(&spotRectCounts, sizeof(glm::uvec2), 1);
+        // RT-output samplers for the RHIMainRT variants (set2 b13-b17). Every
+        // binding the RT shader statically uses must hold a VALID descriptor,
+        // so neutral fallbacks are bound whenever a product is missing —
+        // white = unshadowed, black = no GI/reflection/refraction. The
+        // composite gates live in LightCullData.rtFlags/intensities (see
+        // lightCullingPass), same division of labor as Metal's params.
+        if (capabilities.raytracing) {
+            TextureHandle pointShadowTex = whiteTex;
+            if (stochasticShadowsEnabled && stochasticShadowHistoryWritten &&
+                stochasticShadowHistoryRT.isValid()) {
+                pointShadowTex = (stochasticShadowDenoiseRan && stochasticShadowDenoisedRT.isValid())
+                                     ? stochasticShadowDenoisedRT : stochasticShadowHistoryRT;
+            }
+            rhi->setTexture(0, 13, pointShadowTex, clampSampler);
+            rhi->setTexture(0, 14, (gibsEnabled && giResultTexture.isValid()) ? giResultTexture : blackTex,
+                            clampSampler);
+            rhi->setTexture(0, 15, (rtSunShadowWritten && shadowRT.isValid()) ? shadowRT : whiteTex,
+                            clampSampler);
+            bool reflOnVk = rtReflectionsEnabled && reflectionRT.isValid();
+            rhi->setTexture(0, 16, reflOnVk ? reflectionRT : blackTex, clampSampler);
+            bool refrOnVk = rtRefractionsEnabled && sceneHasTransmission && refractionRT.isValid();
+            rhi->setTexture(0, 17, refrOnVk ? refractionRT : blackTex, clampSampler);
+        }
     } else {
         // Perf-isolation debug flags for the Metal PBR shader at buffer(12)
         // (buffer(2) is the cluster buffer here — see the Vulkan note above —
@@ -1959,10 +1983,11 @@ void Renderer::mainRenderPass() {
         // ALIAS dirLightCount(binding 11 -> 112), spotRectCounts(binding 1 -> 80)
         // and mainDebugFlags(binding 2 -> 96) — clobbering real lighting fields
         // (corrupt directional/spot counts -> green ghosting when RT reflection is
-        // on). RHIMain.frag doesn't read these params (RT composite is Metal-only;
-        // the GLSL spot count comes from spotRectCounts@80), so push them on Metal
-        // only. The stochastic-shadow flag bit0 says whether the point-shadow
-        // texture carries the RGB channel format (R point / G rect / B spot).
+        // on). The Vulkan RT variants read the same values from LightCullData
+        // (rtFlags/intensities, filled in lightCullingPass), so push them on
+        // Metal only. The stochastic-shadow flag bit0 says whether the
+        // point-shadow texture carries the RGB channel format (R/G/B =
+        // point/rect/spot).
         if (backend == GraphicsBackend::Metal) {
             glm::vec2  reflParams(reflOn ? 1.0f : 0.0f, rtReflectionIntensity);
             glm::uvec2 spotRectParams(static_cast<Uint32>(spotLights.size()),
@@ -2158,15 +2183,20 @@ void Renderer::mainRenderPass() {
         // HiZBuild) produced the depth, so the pyramid is complete; the object
         // shader culls meshlets whose bounds are fully behind it. Enabled follows
         // the "Hi-Z occlusion" toggle — this is what makes it affect Meshlet mode.
-        // Metal only (object-stage textures; Vulkan meshlet is inactive).
-        if (backend == GraphicsBackend::Metal) {
+        // Both backends: Metal object texture 0, Vulkan set2 b18 (Meshlet.task's
+        // hizTex — statically used there, so a neutral fallback is bound while
+        // the pyramid doesn't exist; occ.enabled gates the actual test).
+        {
             struct MeshletOccParams { Uint32 enabled, mipCount; float hizW, hizH; } occ;
             occ.enabled = (gpuOcclusionCulling && hizTexture.isValid()) ? 1u : 0u;
             occ.mipCount = hizMipCount;
             occ.hizW = float(hizWidth);
             occ.hizH = float(hizHeight);
             rhi->setVertexBytes(&occ, sizeof(occ), 10);  // -> object + mesh stage buffer(10)
-            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
+            TextureHandle hizBind = hizTexture.isValid() ? hizTexture
+                                                         : textures[defaultWhiteTexture].handle;
+            SamplerHandle hizSmp = hizSampler.isValid() ? hizSampler : clampSampler;
+            if (hizBind.isValid()) rhi->setObjectTexture(0, hizBind, hizSmp);
         }
 
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
@@ -2621,12 +2651,16 @@ void Renderer::prePass() {
         rhi->setVertexBuffer(7, mergedVertexBuffer, 0, 0);
         // Occlusion OFF in the pre-pass: it must render EVERY frustum-visible
         // meshlet so the Hi-Z it feeds is complete (occlusion-culling here would
-        // punch holes in the pyramid). objectMain reads occ at buffer(10), so it
-        // must be bound; bind the pyramid too to avoid an unbound-texture arg.
-        if (backend == GraphicsBackend::Metal) {
+        // punch holes in the pyramid). The task stage reads occ + the pyramid
+        // statically on both backends, so bind them with enabled = 0 (neutral
+        // fallback texture while the pyramid doesn't exist yet).
+        {
             struct MeshletOccParams { Uint32 enabled, mipCount; float hizW, hizH; } occ{ 0u, 0u, 0.0f, 0.0f };
             rhi->setVertexBytes(&occ, sizeof(occ), 10);
-            if (hizTexture.isValid()) rhi->setObjectTexture(0, hizTexture, hizSampler);
+            TextureHandle hizBind = hizTexture.isValid() ? hizTexture
+                                                         : textures[defaultWhiteTexture].handle;
+            SamplerHandle hizSmp = hizSampler.isValid() ? hizSampler : clampSampler;
+            if (hizBind.isValid()) rhi->setObjectTexture(0, hizBind, hizSmp);
         }
         const float threshold = meshletLodPixelError / std::max(1.0f, float(rhi->getSwapchainHeight()));
         struct MeshletParams { Uint32 instanceID; Uint32 meshletOffset; Uint32 meshletCount; float errorThreshold; };
@@ -2802,6 +2836,21 @@ void Renderer::lightCullingPass() {
         lc.lightCount = pointLightCount;
         lc.cullSpotCount = static_cast<Uint32>(spotLights.size());
         lc.cullRectCount = static_cast<Uint32>(rectLights.size());
+        // RT composite params for the RHIMainRT.frag variants (the Metal PBR
+        // receives the same values as fragment bytes 15/17/18). These predicate
+        // on what the RT passes will produce THIS frame — they all run between
+        // LightCulling and Main in the graph.
+        if (capabilities.raytracing) {
+            if (stochasticShadowsEnabled) lc.rtFlags |= 1u;
+            if (gibsEnabled && giResultTexture.isValid()) lc.rtFlags |= 2u;
+            if (raytraceShadowPipeline.isValid() && sceneTLAS.isValid() && shadowRT.isValid())
+                lc.rtFlags |= 4u;
+            if (rtReflectionsEnabled && raytraceReflectionPipeline.isValid() && reflectionRT.isValid())
+                lc.rtReflectionIntensity = rtReflectionIntensity;
+            if (rtRefractionsEnabled && sceneHasTransmission &&
+                raytraceRefractionPipeline.isValid() && refractionRT.isValid())
+                lc.rtRefractionIntensity = rtRefractionIntensity;
+        }
         rhi->updateBuffer(lightCullDataBuffer, &lc, 0, sizeof(lc));
         rhi->beginComputePass("LightCulling");
         rhi->bindComputePipeline(vkTileCullPipeline);
@@ -3120,12 +3169,11 @@ void Renderer::sunFlarePass() {
 
 // Ray-traced near-field directional shadow into shadowRT (mips regenerated for
 // the PBR shader's soft lookup). Mirrors the native RaytraceShadowPass 1:1.
+// Runs on both RT backends now: Metal consumes shadowRT at texture b7, the
+// Vulkan RHIMainRT variant at set2 b15 (replacing the near-map sample, so the
+// raster near-field map pass is skipped — see shadowPass).
 void Renderer::raytraceShadowPass() {
-    // The independent near-field shadow map owns the near region on the Vulkan
-    // path (RHIMain.frag never samples shadowRT), so tracing it here is pure
-    // waste. Skip it — the near map + SSCS provide the near shadow. (The dead
-    // Metal-via-RHI branch still consumes shadowRT at b7, so keep it for Metal.)
-    if (backend == GraphicsBackend::Vulkan) return;
+    rtSunShadowWritten = false;
     if (!raytraceShadowPipeline.isValid() || !sceneTLAS.isValid() || !shadowRT.isValid()) return;
     // Half-res: shadowRT is half-res, the kernel derives UV from its own dims.
     Uint32 w = (rhi->getSwapchainWidth() + 1) / 2;
@@ -3133,8 +3181,8 @@ void Renderer::raytraceShadowPass() {
     glm::vec2 screenSize(w, h);
     rhi->beginComputePass("RaytraceShadow");
     rhi->bindComputePipeline(raytraceShadowPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
     rhi->setComputeTexture(2, shadowRT);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setComputeBuffer(1, directionalLightBuffer, 0, sizeof(DirectionalLightData) * maxDirectionalLights);
@@ -3148,7 +3196,10 @@ void Renderer::raytraceShadowPass() {
     rhi->setComputeBytes(&sunParams, sizeof(sunParams), 5);
     rhi->dispatch(w, h, 1);  // native dispatches w*h groups of 1x1
     rhi->endComputePass();
+    // In-frame mip regen (Vulkan records this on the frame command buffer and
+    // hands the image to SHADER_READ; Metal's tracked hazards cover it).
     rhi->generateMipmaps(shadowRT);
+    rtSunShadowWritten = true;
 }
 
 // RT mirror reflections: one closest-hit ray per (half-res) pixel; hits shade
@@ -3191,10 +3242,10 @@ void Renderer::raytraceReflectionPass() {
 
     rhi->beginComputePass("RaytraceReflection");
     rhi->bindComputePipeline(raytraceReflectionPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
     rhi->setComputeTexture(2, reflectionRT);
-    rhi->setComputeTexture(3, prefilterMap);
+    setComputeInputTexture(3, prefilterMap);  // samplerCube on Vulkan (mip sampled)
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setComputeBuffer(1, surfelBuffer, 0, surfelBytes);
     rhi->setComputeBuffer(2, cellHeadBuffer);
@@ -3262,10 +3313,10 @@ void Renderer::raytraceRefractionPass() {
 
     rhi->beginComputePass("RaytraceRefraction");
     rhi->bindComputePipeline(raytraceRefractionPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
     rhi->setComputeTexture(2, refractionRT);
-    rhi->setComputeTexture(3, prefilterMap);
+    setComputeInputTexture(3, prefilterMap);  // samplerCube on Vulkan
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setComputeBuffer(1, surfelBuffer, 0, surfelBytes);
     rhi->setComputeBuffer(2, cellHeadBuffer);
@@ -3286,6 +3337,7 @@ void Renderer::raytraceRefractionPass() {
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     rhi->computeBarrier();  // refraction writes -> fragment reads in Main
+    rhi->prepareTextureForSampling(refractionRT);  // Vulkan: GENERAL -> SHADER_READ (no mip chain here)
 }
 
 // AO raygen into the noisy aoRawRT; the temporal + à-trous passes below
@@ -3296,9 +3348,12 @@ void Renderer::raytraceRefractionPass() {
 void Renderer::raytraceAOPass() {
     if (!aoEnabled || !aoRawRT.isValid()) return;
 
-    if (backend == GraphicsBackend::Metal) {
-        bool useRT = aoMethod == 0 && capabilities.raytracing &&
-                     raytraceAOPipeline.isValid() && sceneTLAS.isValid();
+    // RT AO raygen runs on either RT backend (aoMethod 0 + caps + pipeline +
+    // TLAS); the Metal path falls back to its SSAO kernel, the Vulkan path to
+    // the SSAO fullscreen-fragment twin below.
+    bool useRT = aoMethod == 0 && capabilities.raytracing &&
+                 raytraceAOPipeline.isValid() && sceneTLAS.isValid();
+    if (backend == GraphicsBackend::Metal || useRT) {
         ComputePipelineHandle pipe = useRT ? raytraceAOPipeline : ssaoPipeline;
         if (!pipe.isValid()) return;
 
@@ -3312,14 +3367,17 @@ void Renderer::raytraceAOPass() {
         Uint32 h = (rhi->getSwapchainHeight() + 1) / 2;
         rhi->beginComputePass("RaytraceAO");
         rhi->bindComputePipeline(pipe);
-        rhi->setComputeTexture(0, depthStencilRT);
-        rhi->setComputeTexture(1, normalRT);
+        setComputeInputTexture(0, depthStencilRT);
+        setComputeInputTexture(1, normalRT);
         rhi->setComputeTexture(2, aoRawRT);
         rhi->setComputeBuffer(0, frameDataBuffer, 0, sizeof(FrameData));
         rhi->setComputeBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         if (useRT) rhi->setAccelerationStructure(2, sceneTLAS);
         rhi->dispatch(w, h, 1);
         rhi->endComputePass();
+        // The AO temporal/denoise stages on Vulkan are fragment passes sampling
+        // aoRawRT — hand the storage image over to SHADER_READ first.
+        rhi->prepareTextureForSampling(aoRawRT);
     } else {
         // Vulkan: SSAO.frag into aoRawRT (frameNumber via push-constant slot 0).
         if (!vkSsaoPipeline.isValid() || !depthStencilRT.isValid() || !normalRT.isValid()) return;
@@ -3514,8 +3572,8 @@ void Renderer::stochasticShadowPass() {
     Uint32 debugMode = stochasticShadowDebugMode;  // panel "Point shadow view"
     rhi->beginComputePass(renderGraph.activePassName().c_str());
     rhi->bindComputePipeline(stochasticShadowPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
     rhi->setComputeTexture(2, stochasticShadowRT);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
@@ -3614,12 +3672,19 @@ bool Renderer::restirShadowPass() {
     // serializes them via hazard tracking; separate encoders cost nothing over
     // the single-encoder version and buy the per-kernel breakdown.
     const std::string base = renderGraph.activePassName() + " (ReSTIR ";
+    // The 80-byte param struct exceeds a 16-byte push slot on Vulkan: it rides
+    // the host-visible restirParamsBuffer there, bound at the same slot index
+    // (both ReSTIR kernels read the same content, at slots 7 and 8).
+    if (backend == GraphicsBackend::Vulkan && restirParamsBuffer.isValid()) {
+        rhi->updateBuffer(restirParamsBuffer, &p, 0, sizeof(p));
+    }
+
     rhi->beginComputePass((base + "candidates)").c_str());
     // Pass 1 (half grid): fresh candidates + temporal reservoir merge.
     rhi->bindComputePipeline(restirShadowTemporalPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
-    rhi->setComputeTexture(2, velocityRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
+    setComputeInputTexture(2, velocityRT);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
     rhi->setComputeBuffer(2, clusterBuffer);
@@ -3627,7 +3692,8 @@ bool Renderer::restirShadowPass() {
     rhi->setComputeBuffer(4, rectLightBuffer);
     rhi->setComputeBuffer(5, restirReservoirHistory);
     rhi->setComputeBuffer(6, restirReservoirScratch);
-    rhi->setComputeBytes(&p, sizeof(p), 7);
+    if (backend == GraphicsBackend::Metal) rhi->setComputeBytes(&p, sizeof(p), 7);
+    else rhi->setComputeBuffer(7, restirParamsBuffer, 0, sizeof(p));
     rhi->dispatch((halfW + 7) / 8, (halfH + 7) / 8, 1);
     rhi->endComputePass();
 
@@ -3636,8 +3702,8 @@ bool Renderer::restirShadowPass() {
     // scratch reservoirs, writes the half-res raw target + the history buffer
     // consumed next frame.
     rhi->bindComputePipeline(restirShadowResolvePipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
     rhi->setComputeTexture(2, stochasticShadowHalfRT);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->setComputeBuffer(1, pointLightBuffer, 0, sizeof(PointLightData) * maxPointLights);
@@ -3647,7 +3713,8 @@ bool Renderer::restirShadowPass() {
     rhi->setComputeBuffer(5, restirReservoirScratch);
     rhi->setComputeBuffer(6, restirReservoirHistory);
     rhi->setAccelerationStructure(7, sceneTLAS);
-    rhi->setComputeBytes(&p, sizeof(p), 8);
+    if (backend == GraphicsBackend::Metal) rhi->setComputeBytes(&p, sizeof(p), 8);
+    else rhi->setComputeBuffer(8, restirParamsBuffer, 0, sizeof(p));
     rhi->dispatch((halfW + 7) / 8, (halfH + 7) / 8, 1);
     rhi->endComputePass();
 
@@ -3655,9 +3722,9 @@ bool Renderer::restirShadowPass() {
     // Pass 3 (full grid): joint bilateral upsample into the raw target the
     // temporal accumulator reads.
     rhi->bindComputePipeline(stochasticShadowUpsamplePipeline);
-    rhi->setComputeTexture(0, stochasticShadowHalfRT);
-    rhi->setComputeTexture(1, depthStencilRT);
-    rhi->setComputeTexture(2, normalRT);
+    setComputeInputTexture(0, stochasticShadowHalfRT);
+    setComputeInputTexture(1, depthStencilRT);
+    setComputeInputTexture(2, normalRT);
     rhi->setComputeTexture(3, stochasticShadowRT);
     rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
@@ -3770,13 +3837,20 @@ void Renderer::gibsPass() {
     gp.maxNewSurfels = std::max(gibsMaxSurfels / 100, 1000u);
     gp.frameIndex = frameCounter;
     rhi->bindComputePipeline(surfelGenPipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
-    rhi->setComputeTexture(2, albedoRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
+    setComputeInputTexture(2, albedoRT);
     rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
     rhi->setComputeBuffer(1, surfelCounterBuffer, 0, 4 * sizeof(Uint32));
     rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
-    rhi->setComputeBytes(&gp, sizeof(gp), 3);
+    // 96-byte param struct: push bytes on Metal, host-visible buffer at the
+    // same slot on Vulkan (exceeds a 16-byte push slot).
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setComputeBytes(&gp, sizeof(gp), 3);
+    } else {
+        rhi->updateBuffer(gibsGenParamsBuffer, &gp, 0, sizeof(gp));
+        rhi->setComputeBuffer(3, gibsGenParamsBuffer, 0, sizeof(gp));
+    }
     rhi->setComputeBuffer(4, cellHeadBuffer);
     rhi->setComputeBuffer(5, surfelNextBuffer);
     rhi->setComputeBuffer(6, surfelFreeListBuffer);  // pop reclaimed slots
@@ -3844,13 +3918,18 @@ void Renderer::gibsPass() {
     sp.normalWeight = 1.0f;
     sp.distanceWeight = 1.0f;
     rhi->bindComputePipeline(giSamplePipeline);
-    rhi->setComputeTexture(0, depthStencilRT);
-    rhi->setComputeTexture(1, normalRT);
+    setComputeInputTexture(0, depthStencilRT);
+    setComputeInputTexture(1, normalRT);
     rhi->setComputeTexture(2, denoise ? giRawRT : giResultTexture);
     rhi->setComputeBuffer(0, surfelBuffer, 0, surfelBytes);
     rhi->setComputeBuffer(1, cellHeadBuffer);
     rhi->setComputeBuffer(2, gibsDataBuffer, 0, sizeof(GIBSData));
-    rhi->setComputeBytes(&sp, sizeof(sp), 3);
+    if (backend == GraphicsBackend::Metal) {
+        rhi->setComputeBytes(&sp, sizeof(sp), 3);
+    } else {
+        rhi->updateBuffer(gibsSampleParamsBuffer, &sp, 0, sizeof(sp));
+        rhi->setComputeBuffer(3, gibsSampleParamsBuffer, 0, sizeof(sp));
+    }
     rhi->setComputeBuffer(4, surfelNextBuffer);
     rhi->dispatch((Uint32(giResolution.x) + 7) / 8, (Uint32(giResolution.y) + 7) / 8, 1);
     rhi->endComputePass();
@@ -3871,30 +3950,34 @@ void Renderer::gibsPass() {
 
         rhi->beginComputePass("GIBSDenoise");
         rhi->bindComputePipeline(giTemporalPipeline);
-        rhi->setComputeTexture(0, giRawRT);
-        rhi->setComputeTexture(1, giHistoryChainRT[histIn]);
+        setComputeInputTexture(0, giRawRT);
+        setComputeInputTexture(1, giHistoryChainRT[histIn]);
         rhi->setComputeTexture(2, giHistoryChainRT[histOut]);
-        rhi->setComputeTexture(3, velocityRT);
-        rhi->setComputeTexture(4, depthStencilRT);
+        setComputeInputTexture(3, velocityRT);
+        setComputeInputTexture(4, depthStencilRT);
         rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setComputeBytes(&giPrevView, sizeof(glm::mat4), 1);
-        rhi->setComputeBytes(&histValid, sizeof(Uint32), 2);
+        // The mat4 at slot 1 spans push offsets [16, 80) on Vulkan, covering
+        // slot 2 — historyValid moves to slot 5 (offset 80) there; the Metal
+        // kernel keeps its flat buffer(2).
+        rhi->setComputeBytes(&histValid, sizeof(Uint32),
+                             backend == GraphicsBackend::Metal ? 2 : 5);
         rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
         rhi->computeBarrier();
 
         Uint32 stride = 1;
         rhi->bindComputePipeline(giDenoisePipeline);
-        rhi->setComputeTexture(0, giHistoryChainRT[histOut]);
+        setComputeInputTexture(0, giHistoryChainRT[histOut]);
         rhi->setComputeTexture(1, giScratchRT);
-        rhi->setComputeTexture(2, normalRT);
+        setComputeInputTexture(2, normalRT);
         rhi->setComputeBytes(&stride, sizeof(Uint32), 0);
         rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
         rhi->computeBarrier();
 
         stride = 2;
-        rhi->setComputeTexture(0, giScratchRT);
+        setComputeInputTexture(0, giScratchRT);
         rhi->setComputeTexture(1, giResultTexture);
-        rhi->setComputeTexture(2, normalRT);
+        setComputeInputTexture(2, normalRT);
         rhi->setComputeBytes(&stride, sizeof(Uint32), 0);
         rhi->dispatch((giW + 7) / 8, (giH + 7) / 8, 1);
         rhi->endComputePass();
@@ -3904,6 +3987,9 @@ void Renderer::gibsPass() {
         giHistoryValid = true;
         giPrevView = currentCamera.view;
     }
+    // The PBR fragment samples giResultTexture (set2 b14 on the Vulkan RT
+    // variants) — hand the storage image over to SHADER_READ.
+    rhi->prepareTextureForSampling(giResultTexture);
 }
 
 // Temporal point-shadow resolve. Native copies denoised->history with a blit;
@@ -3920,13 +4006,16 @@ void Renderer::stochasticShadowTemporalPass() {
     Uint32 h = rhi->getSwapchainHeight();
     rhi->beginComputePass(renderGraph.activePassName().c_str());
     rhi->bindComputePipeline(stochasticShadowTemporalPipeline);
-    rhi->setComputeTexture(0, stochasticShadowRT);
-    rhi->setComputeTexture(1, stochasticShadowHistoryRT);
-    rhi->setComputeTexture(2, velocityRT);
+    setComputeInputTexture(0, stochasticShadowRT);
+    setComputeInputTexture(1, stochasticShadowHistoryRT);
+    setComputeInputTexture(2, velocityRT);
     rhi->setComputeTexture(3, stochasticShadowDenoisedRT);
     rhi->dispatch((w + 7) / 8, (h + 7) / 8, 1);
     rhi->endComputePass();
     std::swap(stochasticShadowDenoisedRT, stochasticShadowHistoryRT);
+    // Post-swap, historyRT holds the fresh accumulation — that's what the PBR
+    // binds when the denoise pass doesn't run (Vulkan: hand it to SHADER_READ).
+    rhi->prepareTextureForSampling(stochasticShadowHistoryRT);
     stochasticShadowHistoryWritten = true;
 }
 
@@ -3956,9 +4045,9 @@ void Renderer::stochasticShadowDenoisePass() {
     rhi->beginComputePass(renderGraph.activePassName().c_str());
     rhi->bindComputePipeline(stochasticShadowDenoisePipeline);
     for (const Iter& it : iters) {
-        rhi->setComputeTexture(0, it.src);
-        rhi->setComputeTexture(1, depthStencilRT);
-        rhi->setComputeTexture(2, normalRT);
+        setComputeInputTexture(0, it.src);
+        setComputeInputTexture(1, depthStencilRT);
+        setComputeInputTexture(2, normalRT);
         rhi->setComputeTexture(3, it.dst);
         rhi->setComputeBuffer(0, cameraUniformBuffer, 0, sizeof(CameraRenderData));
         rhi->setComputeBytes(&it.stride, sizeof(Uint32), 1);
@@ -3966,6 +4055,8 @@ void Renderer::stochasticShadowDenoisePass() {
         rhi->computeBarrier();  // pass 2 reads what pass 1 wrote (stochasticShadowRT)
     }
     rhi->endComputePass();
+    // The PBR samples the filtered copy when this pass ran (Vulkan handoff).
+    rhi->prepareTextureForSampling(stochasticShadowDenoisedRT);
     stochasticShadowDenoiseRan = true;
 }
 
@@ -4195,8 +4286,10 @@ void Renderer::shadowPass() {
 
     // Render the independent near-field shadow map into its own texture. The VS
     // selects nearLightMatrix when cascadeIndex == 3 (Vulkan) / receives it via
-    // vertex bytes (Metal).
-    if (rtEnd > nearClip && nearShadowMap.isValid()) {
+    // vertex bytes (Metal). Skipped when the ray-traced sun shadow covered the
+    // near region this frame (the RHIMainRT variant samples shadowRT at b15
+    // instead of the near map — same as Metal's RT path, which has no near map).
+    if (rtEnd > nearClip && nearShadowMap.isValid() && !rtSunShadowWritten) {
         RenderPassDesc rp;
         rp.name = "NearShadow";
         rp.depthAttachment = nearShadowMap;
@@ -6525,7 +6618,13 @@ void Renderer::createRenderPipeline() {
 
     if (backend == GraphicsBackend::Vulkan) {
         vertShaderCode = readFile("shaders/RHIMain.vert.spv");
-        fragShaderCode = readFile("shaders/RHIMain.frag.spv");
+        // With raytracing available the -DRT variant loads instead: it adds
+        // the RT-output samplers (set2 b13-b17) and the RT composite terms.
+        // Runtime toggles neutralize through LightCullData.rtFlags + neutral
+        // texture fallbacks, so no pipeline swap ever happens (mirroring
+        // Metal's single-shader + params model).
+        fragShaderCode = readFile(capabilities.raytracing ? "shaders/RHIMainRT.frag.spv"
+                                                          : "shaders/RHIMain.frag.spv");
     } else if (backend == GraphicsBackend::Metal) {
         vertShaderCode = readFile("shaders/3d_pbr_normal_mapped.metal");
         fragShaderCode = readFile("shaders/3d_pbr_normal_mapped.metal");
@@ -6609,7 +6708,9 @@ void Renderer::createRenderPipeline() {
         bDesc.supportsICB = true;
         mainPipelineBindless = rhi->createPipeline(bDesc);
     } else if (backend == GraphicsBackend::Vulkan && capabilities.bindlessTextures) {
-        std::string bindlessFragCode = readFile("shaders/RHIMainBindless.frag.spv");
+        std::string bindlessFragCode = readFile(capabilities.raytracing
+                                                    ? "shaders/RHIMainBindlessRT.frag.spv"
+                                                    : "shaders/RHIMainBindless.frag.spv");
         if (!bindlessFragCode.empty()) {
             ShaderDesc bfd;
             bfd.stage = ShaderStage::Fragment;
@@ -7162,7 +7263,8 @@ void Renderer::createRenderPipeline() {
     // ------------------------------------------------------------------------
     // RT compute pipelines (Metal MSL, RequiresRaytracing-gated at the graph):
     // shadow / AO / AO temporal / AO denoise / stochastic point shadow +
-    // temporal. Vulkan skips these passes, so no SPIR-V is needed.
+    // temporal. The Vulkan ray-query twins are created in the block after this
+    // one, filling the same pipeline handles.
     // ------------------------------------------------------------------------
     if (backend == GraphicsBackend::Metal && capabilities.raytracing) {
         auto makeMetalCompute = [&](const char* path, ShaderHandle& sh,
@@ -7224,6 +7326,72 @@ void Renderer::createRenderPipeline() {
         surfelRTPipeline       = makeNamedCompute("shaders/gibs_raytracing.metal", "surfelRaytracing", gibsShaders[3], 64, 1, 1);
         surfelTemporalPipeline = makeNamedCompute("shaders/gibs_temporal.metal", "surfelTemporalSmooth", gibsShaders[4], 256, 1, 1);
         giSamplePipeline       = makeNamedCompute("shaders/gibs_sample.metal", "giSample", gibsShaders[5], 8, 8, 1);
+    }
+
+    // ------------------------------------------------------------------------
+    // Vulkan twins of the RT compute suite (GLSL ray-query kernels; binding
+    // model in shaders/include/rt_common.glsl). They fill the SAME pipeline
+    // handles as the Metal block above, so every RT pass body runs unchanged
+    // on both backends. Only reached on desktop drivers that expose
+    // VK_KHR_acceleration_structure + VK_KHR_ray_query (never MoltenVK).
+    // ------------------------------------------------------------------------
+    if (backend == GraphicsBackend::Vulkan && capabilities.raytracing) {
+        auto makeRQCompute = [&](const char* spv, ShaderHandle& sh,
+                                 Uint32 tgX, Uint32 tgY, Uint32 tgZ) -> ComputePipelineHandle {
+            std::string code = readFile(spv);
+            if (code.empty()) return {};
+            ShaderDesc d; d.stage = ShaderStage::Compute; d.code = code.data();
+            d.codeSize = code.size(); d.entryPoint = "main";
+            sh = rhi->createShader(d);
+            ComputePipelineDesc cd; cd.computeShader = sh;
+            cd.threadGroupSizeX = tgX; cd.threadGroupSizeY = tgY; cd.threadGroupSizeZ = tgZ;
+            return rhi->createComputePipeline(cd);
+        };
+        // Threadgroup shapes match the Metal pipelines and the kernels'
+        // local_size declarations (SPIR-V bakes them; the desc documents them
+        // for the shared dispatch math).
+        raytraceShadowPipeline        = makeRQCompute("shaders/RaytraceShadow.comp.spv", rtShadowShader, 1, 1, 1);
+        raytraceAOPipeline            = makeRQCompute("shaders/RaytraceAO.comp.spv", rtAOShader, 1, 1, 1);
+        raytraceReflectionPipeline    = makeRQCompute("shaders/RaytraceReflection.comp.spv", rtReflectionShader, 8, 8, 1);
+        raytraceRefractionPipeline    = makeRQCompute("shaders/RaytraceRefraction.comp.spv", rtRefractionShader, 8, 8, 1);
+        giTemporalPipeline            = makeRQCompute("shaders/GibsGITemporal.comp.spv", giTemporalShader, 8, 8, 1);
+        giDenoisePipeline             = makeRQCompute("shaders/GibsGIDenoise.comp.spv", giDenoiseShader, 8, 8, 1);
+        stochasticShadowPipeline         = makeRQCompute("shaders/StochasticShadow.comp.spv", stochasticShadowShader, 8, 8, 1);
+        stochasticShadowTemporalPipeline = makeRQCompute("shaders/StochasticShadowTemporal.comp.spv", stochasticShadowTemporalShader, 8, 8, 1);
+        stochasticShadowDenoisePipeline  = makeRQCompute("shaders/StochasticShadowDenoise.comp.spv", stochasticShadowDenoiseShader, 8, 8, 1);
+        // ReSTIR is optional with a live legacy fallback (same policy as Metal).
+        try {
+            restirShadowTemporalPipeline = makeRQCompute("shaders/RestirShadowTemporal.comp.spv", restirShadowTemporalShader, 8, 8, 1);
+            restirShadowResolvePipeline  = makeRQCompute("shaders/RestirShadowResolve.comp.spv", restirShadowResolveShader, 8, 8, 1);
+            stochasticShadowUpsamplePipeline = makeRQCompute("shaders/StochasticShadowUpsample.comp.spv", stochasticShadowUpsampleShader, 8, 8, 1);
+        } catch (const std::exception& e) {
+            restirShadowTemporalPipeline = {};
+            restirShadowResolvePipeline = {};
+            stochasticShadowUpsamplePipeline = {};
+            fmt::print(stderr, "ReSTIR shadow pipelines unavailable ({}), legacy stochastic kernel stays active\n", e.what());
+        }
+        // GIBS surfel GI suite (one .comp per Metal entry point).
+        surfelGenPipeline      = makeRQCompute("shaders/GibsSurfelGen.comp.spv", gibsShaders[0], 8, 8, 1);
+        surfelUpdatePipeline   = makeRQCompute("shaders/GibsSurfelUpdate.comp.spv", gibsUpdateShader, 256, 1, 1);
+        surfelClearPipeline    = makeRQCompute("shaders/GibsClearCells.comp.spv", gibsShaders[1], 256, 1, 1);
+        surfelInsertPipeline   = makeRQCompute("shaders/GibsInsertSurfels.comp.spv", gibsShaders[2], 256, 1, 1);
+        surfelRTPipeline       = makeRQCompute("shaders/GibsRaytracing.comp.spv", gibsShaders[3], 64, 1, 1);
+        surfelTemporalPipeline = makeRQCompute("shaders/GibsTemporal.comp.spv", gibsShaders[4], 256, 1, 1);
+        giSamplePipeline       = makeRQCompute("shaders/GibsSample.comp.spv", gibsShaders[5], 8, 8, 1);
+
+        // Param structs too large for a 16-byte push slot ride small
+        // host-visible buffers, bound at the same Metal slot index (the
+        // lightCullDataBuffer pattern; see the pass bodies).
+        auto makeParamBuffer = [&](size_t size) {
+            BufferDesc bd;
+            bd.size = size;
+            bd.usage = BufferUsage::Storage;
+            bd.memoryUsage = MemoryUsage::CPUtoGPU;
+            return rhi->createBuffer(bd);
+        };
+        restirParamsBuffer    = makeParamBuffer(sizeof(RestirShadowParamsCPU));
+        gibsGenParamsBuffer   = makeParamBuffer(sizeof(SurfelGenerationParams));
+        gibsSampleParamsBuffer = makeParamBuffer(sizeof(GIBSSampleParams));
     }
 
     // ------------------------------------------------------------------------

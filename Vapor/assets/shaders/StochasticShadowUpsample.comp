@@ -1,0 +1,74 @@
+#version 460
+// Joint bilateral upsample of the half-res raw stochastic shadow factors to
+// the full-res target — GLSL twin of 3d_stochastic_shadow_upsample.metal.
+// For each full-res pixel, the four half-res texels of its bilinear footprint
+// are weighted by bilinear x normal-cone x tangent-plane-distance against the
+// full-res G-buffer (each half texel's geometry re-read at tap*2). Where no
+// tap is geometry-compatible, falls back to the nearest tap.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+#include "include/restir_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D halfShadow;
+layout(set = 2, binding = 1) uniform sampler2D depthTexture;
+layout(set = 2, binding = 2) uniform sampler2D normalTexture;
+layout(set = 1, binding = 3) uniform writeonly image2D outShadow;
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData camera; };
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(outShadow);
+    uint w = uint(outDim.x);
+    uint h = uint(outDim.y);
+    if (tid.x >= w || tid.y >= h) return;
+    ivec2 halfDim = textureSize(halfShadow, 0);
+    uint halfW = uint(halfDim.x);
+    uint halfH = uint(halfDim.y);
+
+    // Nearest half texel — the fallback when geometry weights reject all taps.
+    ivec2 nearest = ivec2(min(tid.x / 2u, halfW - 1u), min(tid.y / 2u, halfH - 1u));
+
+    float depth = texelFetch(depthTexture, ivec2(tid), 0).r;
+    if (depth >= 1.0) {  // sky: pass through
+        imageStore(outShadow, ivec2(tid), texelFetch(halfShadow, nearest, 0));
+        return;
+    }
+
+    RestirSurface surf = restirReconstructSurface(tid, w, h, depth, camera);
+    vec3 centerN = normalize(texelFetch(normalTexture, ivec2(tid), 0).xyz);
+    float planeScale = 0.02 * max(abs(surf.viewDepth), 0.5);
+
+    // Bilinear footprint: position of this pixel in half-texel space.
+    vec2 halfCoord = (vec2(tid) + 0.5) * 0.5 - 0.5;
+    ivec2 base = ivec2(floor(halfCoord));
+    vec2 f = halfCoord - vec2(base);
+    const ivec2 kOffsets[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
+    float kBilinear[4] = float[4]((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y),
+                                  (1.0 - f.x) * f.y,         f.x * f.y);
+
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    for (uint i = 0u; i < 4u; i++) {
+        ivec2 tap = clamp(base + kOffsets[i], ivec2(0), ivec2(halfW - 1u, halfH - 1u));
+        ivec2 sp = tap * 2;  // the full-res pixel this half texel shaded
+
+        float tapDepth = texelFetch(depthTexture, sp, 0).r;
+        if (tapDepth >= 1.0) continue;
+        RestirSurface tapSurf = restirReconstructSurface(uvec2(sp), w, h, tapDepth, camera);
+        vec3 tapN = normalize(texelFetch(normalTexture, sp, 0).xyz);
+
+        float wNormal = pow(max(0.0, dot(centerN, tapN)), 32.0);
+        float wPlane = exp(-abs(dot(tapSurf.worldPos - surf.worldPos, centerN)) / planeScale);
+        float weight = max(kBilinear[i], 1e-3) * wNormal * wPlane;
+
+        sum += texelFetch(halfShadow, tap, 0).rgb * weight;
+        weightSum += weight;
+    }
+
+    vec3 result = weightSum > 1e-5 ? sum / weightSum
+                                   : texelFetch(halfShadow, nearest, 0).rgb;
+    imageStore(outShadow, ivec2(tid), vec4(result, 1.0));
+}

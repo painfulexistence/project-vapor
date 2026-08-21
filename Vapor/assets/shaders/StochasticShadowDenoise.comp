@@ -1,0 +1,71 @@
+#version 460
+// Edge-aware a-trous denoise over the accumulated stochastic shadow factors —
+// GLSL twin of 3d_stochastic_shadow_denoise.metal (R point / G rect / B spot).
+// Run iteratively at increasing stride (SVGF-lite). Edge stops: normal cone
+// (pow32) + distance from the centre's tangent plane. Reads the previous
+// iteration's output (ping-pong); the UNfiltered accumulator history feeds the
+// temporal loop, so the blur never compounds across frames.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+#include "include/restir_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D src;
+layout(set = 2, binding = 1) uniform sampler2D depthTexture;
+layout(set = 2, binding = 2) uniform sampler2D normalTexture;
+layout(set = 1, binding = 3) uniform writeonly image2D dst;
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData camera; };
+
+// setComputeBytes slot 1 -> push offset 16.
+layout(push_constant) uniform PC {
+    layout(offset = 16) uint stride;
+};
+
+const float kAtrous3[3] = float[3](0.25, 0.5, 0.25);
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(dst);
+    uint w = uint(outDim.x);
+    uint h = uint(outDim.y);
+    if (tid.x >= w || tid.y >= h) return;
+
+    vec3 center = texelFetch(src, ivec2(tid), 0).rgb;
+    float depth = texelFetch(depthTexture, ivec2(tid), 0).r;
+    if (depth >= 1.0) {  // sky: nothing to filter
+        imageStore(dst, ivec2(tid), vec4(center, 1.0));
+        return;
+    }
+
+    RestirSurface surf = restirReconstructSurface(tid, w, h, depth, camera);
+    vec3 centerN = normalize(texelFetch(normalTexture, ivec2(tid), 0).xyz);
+    // Plane-distance scale: a few cm at 1 m, growing with distance.
+    float planeScale = 0.02 * max(abs(surf.viewDepth), 0.5);
+
+    vec3 sum = vec3(0.0);
+    float weightSum = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            ivec2 tap = ivec2(tid) + ivec2(dx, dy) * int(stride);
+            if (tap.x < 0 || tap.y < 0 || tap.x >= int(w) || tap.y >= int(h)) continue;
+
+            float tapDepth = texelFetch(depthTexture, tap, 0).r;
+            if (tapDepth >= 1.0) continue;
+            RestirSurface tapSurf = restirReconstructSurface(uvec2(tap), w, h, tapDepth, camera);
+            vec3 tapN = normalize(texelFetch(normalTexture, tap, 0).xyz);
+
+            float wKernel = kAtrous3[dx + 1] * kAtrous3[dy + 1];
+            float wNormal = pow(max(0.0, dot(centerN, tapN)), 32.0);
+            float wPlane = exp(-abs(dot(tapSurf.worldPos - surf.worldPos, centerN)) / planeScale);
+
+            float weight = wKernel * wNormal * wPlane;
+            sum += texelFetch(src, tap, 0).rgb * weight;
+            weightSum += weight;
+        }
+    }
+
+    vec3 filtered = weightSum > 1e-6 ? sum / weightSum : center;
+    imageStore(dst, ivec2(tid), vec4(filtered, 1.0));
+}

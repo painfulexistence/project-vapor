@@ -1,0 +1,33 @@
+#version 460
+// GIBS spatial hash pass 2 — GLSL twin of gibs_spatial_hash.metal's
+// `insertSurfels`: push each live surfel onto its cell's linked list
+// (next[i] = atomicExchange(cellHeads[cell], i)).
+#extension GL_GOOGLE_include_directive : require
+#include "include/gibs_common.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SurfelBuf { Surfel surfels[]; };
+layout(std430, set = 0, binding = 1) buffer CellHeadBuf { uint cellHeads[]; };
+layout(std430, set = 0, binding = 2) buffer SurfelNextBuf { uint surfelNext[]; };
+layout(std430, set = 0, binding = 3) readonly buffer GIBSBuf { GIBSData gibs; };
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= gibs.activeSurfelCount) {
+        return;
+    }
+
+    Surfel surfel = surfels[gid];
+    if ((surfel.flags & SURFEL_FLAG_VALID) == 0u) {
+        return;
+    }
+
+    uint cellIndex = surfel.cellHash;
+    if (cellIndex >= gibs.totalCells) {
+        return;
+    }
+
+    uint previousHead = atomicExchange(cellHeads[cellIndex], gid);
+    surfelNext[gid] = previousHead;
+}

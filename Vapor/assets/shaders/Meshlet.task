@@ -8,7 +8,9 @@
 //
 // Bindings (set 0 via RHI::setVertexBuffer; matches the main-pass convention):
 //   0 = CameraBuf, 2 = InstanceBuf, 6 = MeshletBoundsBuf
-// Push constants: MeshletParams at offset 0 (setVertexBytes binding 8).
+//   set 2 b18 = Hi-Z pyramid (RHI::setObjectTexture slot 0 -> OBJECT_TEXTURE_BASE)
+// Push constants: MeshletParams at offset 0 (setVertexBytes binding 8),
+//                 MeshletOccParams at offset 32 (setVertexBytes binding 10).
 
 layout(local_size_x = 32) in;
 
@@ -69,7 +71,17 @@ layout(push_constant) uniform MeshletParams {
     uint meshletOffset;   // this mesh's range in the global meshlet buffers
     uint meshletCount;
     float errorThreshold; // screen fraction (pixel error / screen height)
+    // Hi-Z occlusion params (setVertexBytes binding 10 -> offset 32). Mirror
+    // of 3d_meshlet.metal's MeshletOccParams — same max-depth pyramid and
+    // conventions as GpuCull.comp, so the meshlet cull occludes against the
+    // exact Hi-Z the instance cull uses.
+    layout(offset = 32) uint occlusionEnabled;
+    uint hizMipCount;
+    vec2 hizSize;         // mip-0 dimensions in texels
 };
+
+// Hi-Z pyramid, task-stage visible (RHI::setObjectTexture slot 0).
+layout(set = 2, binding = 18) uniform sampler2D hizTex;
 
 struct TaskPayload {
     uint meshletIndices[32];  // global meshlet indices of the survivors
@@ -77,6 +89,42 @@ struct TaskPayload {
 taskPayloadSharedEXT TaskPayload payload;
 
 shared uint visibleCount;
+
+// Per-meshlet Hi-Z occlusion test — a verbatim port of 3d_meshlet.metal's
+// meshletOccludedByHiZ (itself a port of GpuCull.comp's occludedByHiZ), fed
+// the meshlet's world-space bounding box. Conservative: any doubt keeps it.
+bool meshletOccludedByHiZ(vec3 aabbMin, vec3 aabbMax) {
+    mat4 vp = cam.proj * cam.view;
+    vec2 uvMin = vec2(1.0);
+    vec2 uvMax = vec2(0.0);
+    float minDepth = 1.0;
+    for (int i = 0; i < 8; ++i) {
+        vec3 corner = vec3((i & 1) != 0 ? aabbMax.x : aabbMin.x,
+                           (i & 2) != 0 ? aabbMax.y : aabbMin.y,
+                           (i & 4) != 0 ? aabbMax.z : aabbMin.z);
+        vec4 clip = vp * vec4(corner, 1.0);
+        if (clip.w <= 0.0) return false;
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 uv = ndc.xy * 0.5 + 0.5;
+        uvMin = min(uvMin, uv);
+        uvMax = max(uvMax, uv);
+        minDepth = min(minDepth, ndc.z);
+    }
+    if (uvMax.x < 0.0 || uvMin.x > 1.0 || uvMax.y < 0.0 || uvMin.y > 1.0) return false;
+    uvMin = clamp(uvMin, 0.0, 1.0);
+    uvMax = clamp(uvMax, 0.0, 1.0);
+    vec2 hMin = vec2(uvMin.x, 1.0 - uvMax.y);
+    vec2 hMax = vec2(uvMax.x, 1.0 - uvMin.y);
+    vec2 sizePx = (hMax - hMin) * hizSize;
+    float lvl = ceil(log2(max(max(sizePx.x, sizePx.y), 1.0)));
+    lvl = clamp(lvl, 0.0, float(hizMipCount - 1u));
+    float o = 0.0;
+    o = max(o, textureLod(hizTex, vec2(hMin.x, hMin.y), lvl).r);
+    o = max(o, textureLod(hizTex, vec2(hMax.x, hMin.y), lvl).r);
+    o = max(o, textureLod(hizTex, vec2(hMin.x, hMax.y), lvl).r);
+    o = max(o, textureLod(hizTex, vec2(hMax.x, hMax.y), lvl).r);
+    return minDepth > o;
+}
 
 // Rotationally-invariant screen-space projection of a mesh-local error sphere
 // (clusterlod.h's recommended formula). Returns a screen fraction.
@@ -127,6 +175,15 @@ void main() {
             bool thisFineEnough = (b.refined < 0) ||
                 (projectError(b.lodSphere, b.lodError, model, maxScale) <= errorThreshold);
             visible = parentTooCoarse && thisFineEnough;
+        }
+
+        // Hi-Z occlusion: cull the cluster if its world bounding box is
+        // entirely behind the depth pyramid (main pass only; the pre-pass
+        // pushes occlusionEnabled 0 so the pyramid it FEEDS stays complete).
+        if (visible && !cullBypass && occlusionEnabled != 0u) {
+            if (meshletOccludedByHiZ(wc - wr, wc + wr)) {
+                visible = false;
+            }
         }
 
         if (visible) {

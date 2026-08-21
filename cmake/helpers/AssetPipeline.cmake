@@ -31,27 +31,32 @@ function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
         "${SHADER_DIR}/*.mesh"
     )
 
+    # Shared GLSL headers (shaders/include/*.glsl, pulled in through
+    # GL_GOOGLE_include_directive — the ray-query/GIBS kernels share their
+    # struct layouts this way). Every shader depends on all of them: editing a
+    # header rebuilds the whole set, which at this shader count is cheaper than
+    # per-file depfile plumbing (DEPFILE is generator-dependent below CMake 3.21).
+    file(GLOB_RECURSE _glsl_headers CONFIGURE_DEPENDS "${SHADER_DIR}/*.glsl")
+
     set(_spirv_outputs)
     foreach(_glsl ${_sources})
         get_filename_component(_name ${_glsl} NAME)
         set(_spirv "${SHADER_DIR}/${_name}.spv")
-        # Task/mesh shaders (GL_EXT_mesh_shader) need SPIR-V >= 1.4. Target the
-        # Vulkan 1.2 env (-> SPIR-V 1.5), NOT 1.3 (-> 1.6): the device REQUESTS
-        # API 1.3 but MoltenVK only reports 1.2, so its validation environment
-        # caps at SPIR-V 1.5 and rejects 1.6 modules
-        # (VUID-VkShaderModuleCreateInfo-pCode-08737). SPIR-V 1.5 already covers
-        # mesh shading's >=1.4 requirement and is accepted by native 1.3 drivers
-        # too, so it is the correct floor for both. Other stages keep the default
-        # target for maximal compatibility.
-        set(_stage_flags "")
-        if(_name MATCHES "\\.(task|mesh)$")
-            set(_stage_flags --target-env vulkan1.2)
-        endif()
+        # Every stage targets the Vulkan 1.2 env (-> SPIR-V 1.5), NOT 1.3
+        # (-> 1.6): the device REQUESTS API 1.3 but MoltenVK only reports 1.2,
+        # so its validation environment caps at SPIR-V 1.5 and rejects 1.6
+        # modules (VUID-VkShaderModuleCreateInfo-pCode-08737). SPIR-V 1.5
+        # covers everything the shader set needs — mesh shading and ray query
+        # both require >= 1.4 — and is accepted by native 1.3 drivers, so it is
+        # the correct floor for every backend. (Previously only task/mesh got
+        # the flag and other stages compiled to SPIR-V 1.0; the ray-query
+        # kernels made the uniform target the simpler invariant.)
+        set(_stage_flags --target-env vulkan1.2)
         add_custom_command(
             OUTPUT  ${_spirv}
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/assets/shaders"
             COMMAND ${GLSL_VALIDATOR} -V ${_stage_flags} ${_glsl} -o ${_spirv}
-            DEPENDS ${_glsl}
+            DEPENDS ${_glsl} ${_glsl_headers}
             COMMENT "Compiling ${_name} to SPIR-V"
         )
         list(APPEND _spirv_outputs ${_spirv})
@@ -68,10 +73,31 @@ function(vapor_compile_glsl_shaders TARGET SHADER_DIR)
             add_custom_command(
                 OUTPUT  ${_bindless_spirv}
                 COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.2 -DBINDLESS ${_glsl} -o ${_bindless_spirv}
-                DEPENDS ${_glsl}
+                DEPENDS ${_glsl} ${_glsl_headers}
                 COMMENT "Compiling ${_name} (BINDLESS) to SPIR-V"
             )
             list(APPEND _spirv_outputs ${_bindless_spirv})
+
+            # Raytracing variants: -DRT adds the RT-output samplers (stochastic
+            # shadow b13, GIBS GI b14, RT sun shadow b15, reflection b16,
+            # refraction b17) and their composite terms. Only bound when
+            # capabilities.raytracing is true (desktop Vulkan) — the base
+            # variants stay byte-identical for MoltenVK, whose 16-sampler
+            # per-stage cap the extra bindings would exceed.
+            foreach(_rt_variant "RT" "BindlessRT")
+                set(_rt_defs -DRT)
+                if(_rt_variant STREQUAL "BindlessRT")
+                    list(APPEND _rt_defs -DBINDLESS)
+                endif()
+                set(_rt_spirv "${SHADER_DIR}/RHIMain${_rt_variant}.frag.spv")
+                add_custom_command(
+                    OUTPUT  ${_rt_spirv}
+                    COMMAND ${GLSL_VALIDATOR} -V --target-env vulkan1.2 ${_rt_defs} ${_glsl} -o ${_rt_spirv}
+                    DEPENDS ${_glsl} ${_glsl_headers}
+                    COMMENT "Compiling ${_name} (${_rt_variant}) to SPIR-V"
+                )
+                list(APPEND _spirv_outputs ${_rt_spirv})
+            endforeach()
         endif()
     endforeach()
 
@@ -200,6 +226,23 @@ function(vapor_flatten_metal_shaders TARGET)
     # tarball): validate everything — a tarball only contains committed shaders.
     option(VAPOR_VALIDATE_METAL "Compile-check Metal shaders at build via xcrun metal" ON)
     if(NOT VAPOR_VALIDATE_METAL)
+        return()
+    endif()
+
+    # Newer Xcode installs ship WITHOUT the Metal toolchain ("cannot execute
+    # tool 'metal' due to missing Metal Toolchain") until
+    # `xcodebuild -downloadComponent MetalToolchain` has run. Probe once at
+    # configure and degrade to a warning instead of failing ~60 .air steps
+    # deep into the build.
+    execute_process(
+        COMMAND xcrun metal --version
+        RESULT_VARIABLE _metal_probe_result
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if(NOT _metal_probe_result EQUAL 0)
+        message(WARNING "[Vapor] `xcrun metal` is not runnable (missing Metal toolchain?) — "
+                        "Metal shader validation skipped. Install it with: "
+                        "sudo xcodebuild -downloadComponent MetalToolchain")
         return()
     endif()
 

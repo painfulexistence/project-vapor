@@ -1,0 +1,99 @@
+#version 460
+// Adaptive GPU tessellation, classify kernel — GLSL twin of
+// 3d_tess_update.metal's tessClassify. Indirect dispatch over last frame's
+// leaf count: decode each leaf, evaluate the screen-space LoD metric on its
+// hypotenuse, and split (conforming chain) or merge (diamond rule) via
+// single-bit atomics on the bitfield.
+//
+// Bindings: 0 = CBT read view, 1 = SAME buffer as the atomic write view,
+// 2 = TessRoot[], 3 = CameraData, 4 = TessParams (host-visible buffer — the
+// 112-byte struct exceeds a push slot on Vulkan; Metal uses setBytes).
+#extension GL_GOOGLE_include_directive : require
+
+#define TESS_CBT_RO_BINDING 0
+#define TESS_ROOTS_BINDING 2
+#include "include/tess_common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 1) buffer TessCbtRW { uint tessCbtRW[]; };
+layout(std430, set = 0, binding = 3) readonly buffer CameraBuf { TessCameraData cam; };
+layout(std430, set = 0, binding = 4) readonly buffer ParamsBuf { TessParams params; };
+
+void tessSplitBit(uint node) {
+    uint d = tessDepthOf(node);
+    if (d >= params.maxDepth) return;
+    uint pos = tessCeilBitOf(node << 1u | 1u, params.maxDepth);
+    atomicOr(tessCbtRW[tessBitfieldOffset(params.maxDepth) + (pos >> 5u)], 1u << (pos & 31u));
+}
+
+// Conforming split: mark the node, then walk the compatibility chain across
+// hypotenuses (mirror of CBT::splitConforming — idempotent bit sets, safe
+// under concurrency).
+void tessSplitConforming(uint node) {
+    if (tessDepthOf(node) >= params.maxDepth) return;
+    tessSplitBit(node);
+    uint t = tessNeighborsOf(node, params.rootDepth).edge;
+    uint guard = 0u;
+    while (t != 0u && guard++ < 64u) {
+        tessSplitBit(t);
+        // A root's hypotenuse partner is the node the chain came from.
+        if (tessDepthOf(t) <= params.rootDepth) break;
+        t >>= 1u;
+        tessSplitBit(t);
+        t = tessNeighborsOf(t, params.rootDepth).edge;
+    }
+}
+
+// Diamond merge (mirror of CBT::mergeConforming): clear our pair's right
+// sibling if the parent holds exactly its two leaves and the parent's
+// hypotenuse partner holds at most two.
+void tessMergeConforming(uint leaf) {
+    uint d = tessDepthOf(leaf);
+    if (d <= params.rootDepth) return;
+    uint parent = leaf >> 1u;
+    if (tessHeapRead(params.maxDepth, parent) != 2u) return;
+    uint top = tessNeighborsOf(parent, params.rootDepth).edge;
+    if (top != 0u && tessHeapRead(params.maxDepth, top) > 2u) return;
+    uint pos = tessCeilBitOf(leaf | 1u, params.maxDepth);
+    atomicAnd(tessCbtRW[tessBitfieldOffset(params.maxDepth) + (pos >> 5u)], ~(1u << (pos & 31u)));
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint leafCount = tessLeafCount();
+    if (tid >= leafCount) return;
+    if ((params.flags & TESS_FLAG_FREEZE) != 0u) return;
+
+    uint node = tessDecodeLeaf(params.maxDepth, params.rootDepth, tid);
+    TessTriangle tri = tessDecodeTriangle(node, params.rootDepth);
+
+    // World-space hypotenuse endpoints (v2, v0) — the LoD metric edge.
+    vec3 p0 = tessCornerFromWeights(tri.w0, tri.rootSlot).pos;
+    vec3 p2 = tessCornerFromWeights(tri.w2, tri.rootSlot).pos;
+    vec3 w0 = (params.model * vec4(p0, 1.0)).xyz;
+    vec3 w2 = (params.model * vec4(p2, 1.0)).xyz;
+    float hypPx = tessProjectedPixels(w2, w0, cam, params.screenHeight);
+
+    uint depth = tessDepthOf(node);
+    if (hypPx > params.splitPixels && depth < params.maxDepth) {
+        // Soft capacity guard: stop splitting well before the leaf cache
+        // fills so the draw clamp never truncates visible geometry.
+        if (leafCount * 4u < params.maxLeaves * 3u) {
+            tessSplitConforming(node);
+        }
+    } else if (depth > params.rootDepth) {
+        // Merge when even the PARENT's hypotenuse projects under the split
+        // threshold (hysteresis: a just-merged parent never immediately
+        // re-splits).
+        TessTriangle pt = tessDecodeTriangle(node >> 1u, params.rootDepth);
+        vec3 pp0 = tessCornerFromWeights(pt.w0, pt.rootSlot).pos;
+        vec3 pp2 = tessCornerFromWeights(pt.w2, pt.rootSlot).pos;
+        vec3 pw0 = (params.model * vec4(pp0, 1.0)).xyz;
+        vec3 pw2 = (params.model * vec4(pp2, 1.0)).xyz;
+        float parentPx = tessProjectedPixels(pw2, pw0, cam, params.screenHeight);
+        if (parentPx < params.splitPixels) {
+            tessMergeConforming(node);
+        }
+    }
+}

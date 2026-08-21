@@ -1,0 +1,202 @@
+#version 460
+// RT mirror reflections — GLSL ray-query twin of 3d_raytrace_reflection.metal.
+//
+// Per pixel: reconstruct the surface from depth+normal, trace one reflection
+// ray against the scene TLAS, and shade the hit STANDALONE:
+//   - instanceCustomIndex -> InstanceData -> materialID (the TLAS instances
+//     carry the renderer's instance id for exactly this),
+//   - primitiveIndex + barycentrics fetch the hit triangle from the merged
+//     geometry: interpolated vertex normal taken to world through the instance
+//     model matrix, and the interpolated UV that samples the material's ALBEDO
+//     texture x base color,
+//   - material emissive,
+//   - one occlusion ray toward the sun for direct visibility,
+//   - environment irradiance (rough envMap mip along the hit normal) as the
+//     ambient term.
+// GIBS, when enabled, ADDS its surfel radiance as the indirect term.
+//
+// Mirror-only (no roughness cone jitter): the output is noise-free and needs NO
+// temporal denoise. The PBR composite fades it by roughness.
+//
+// Output: RGBA16F, rgb = reflected radiance, a = 1 hit / 0 miss.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+#include "include/rt_common.glsl"
+#include "include/gibs_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D depthTexture;    // full-res
+layout(set = 2, binding = 1) uniform sampler2D normalTexture;   // full-res
+layout(set = 1, binding = 2) uniform writeonly image2D reflectionTexture;
+layout(set = 2, binding = 3) uniform samplerCube envMap;        // prefiltered
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData camera; };
+layout(std430, set = 0, binding = 1) readonly buffer SurfelBuf { Surfel surfels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer CellHeadBuf { uint cellHeads[]; };
+layout(std430, set = 0, binding = 3) readonly buffer SurfelNextBuf { uint surfelNext[]; };
+layout(std430, set = 0, binding = 4) readonly buffer GIBSBuf { GIBSData gibs; };
+layout(set = 3, binding = 5) uniform accelerationStructureEXT TLAS;
+layout(std430, set = 0, binding = 7) readonly buffer InstanceBuf { InstanceData instances[]; };
+layout(std430, set = 0, binding = 8) readonly buffer MaterialBuf { MaterialData materials[]; };
+layout(std430, set = 0, binding = 9) readonly buffer DirLightBuf { DirLight directionalLights[]; };
+// Merged scene geometry (bound only when hasBindlessGeo): VertexData is the
+// packed 48-byte CPU layout, read as a flat float array (12 floats/vertex).
+layout(std430, set = 0, binding = 10) readonly buffer MergedVB { float meshVerts[]; };
+layout(std430, set = 0, binding = 11) readonly buffer MergedIB { uint meshIndices[]; };
+// Bindless material table (bindComputeTextureArgumentTable): 6 textures per
+// material, slot 0 = albedo (same order as the PBR MaterialTexs).
+layout(set = 4, binding = 0) uniform texture2D materialTextures[];
+layout(set = 4, binding = 1) uniform sampler materialSampler;
+
+// setComputeBytes slot 6 -> push offset 96 (ReflectionParams, 16 bytes).
+layout(push_constant) uniform PC {
+    layout(offset = 96) float rayBias;
+    layout(offset = 100) float rayMaxDistance;
+    layout(offset = 104) uint frameIndex;
+    layout(offset = 108) uint hasBindlessGeo;
+};
+
+const uint kFloatsPerVertex = 12u;  // packed VertexData: pos3 + uv2 + normal3 + tangent4
+
+vec3 vertexNormal(uint i) {
+    uint b = i * kFloatsPerVertex;
+    return vec3(meshVerts[b + 5u], meshVerts[b + 6u], meshVerts[b + 7u]);
+}
+
+vec2 vertexUV(uint i) {
+    uint b = i * kFloatsPerVertex;
+    return vec2(meshVerts[b + 3u], meshVerts[b + 4u]);
+}
+
+// Nearest-surfel radiance lookup at an arbitrary world position (trimmed copy
+// of gibs_raytracing's sampleSurfelAtPosition, matching the Metal kernel).
+vec3 surfelRadianceAt(vec3 pos, vec3 normalApprox) {
+    if (gibs.totalCells == 0u || !isInWorldBounds(pos, gibs.worldMin, gibs.worldMax)) {
+        return vec3(0.0);
+    }
+    uint cellHash = computeCellHash(pos, gibs.worldMin, gibs.cellSize, gibs.gridSize);
+    if (cellHash >= gibs.totalCells) {
+        return vec3(0.0);
+    }
+    float bestWeight = 0.0;
+    vec3 best = vec3(0.0);
+    uint iter = 0u;
+    for (uint j = cellHeads[cellHash];
+         j != GIBS_INVALID_INDEX && iter < GIBS_MAX_CHAIN_LENGTH;
+         j = surfelNext[j], iter++) {
+        Surfel s = surfels[j];
+        if ((s.flags & SURFEL_FLAG_VALID) == 0u) continue;
+        float w = computeSurfelWeight(pos, normalApprox, s, gibs.cellSize * 2.0);
+        if (w > bestWeight) {
+            bestWeight = w;
+            best = s.irradiance + s.directLight;
+        }
+    }
+    return best;
+}
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(reflectionTexture);
+    if (tid.x >= uint(outDim.x) || tid.y >= uint(outDim.y)) return;
+
+    // Resolution-agnostic full-res G-buffer read (the target may be half-res).
+    ivec2 fullDim = textureSize(depthTexture, 0);
+    uvec2 scale = max(uvec2(fullDim) / uvec2(outDim), uvec2(1u));
+    ivec2 fullTid = ivec2(min(tid * scale, uvec2(fullDim) - 1u));
+
+    float depth = texelFetch(depthTexture, fullTid, 0).r;
+    if (depth >= 1.0) {
+        imageStore(reflectionTexture, ivec2(tid), vec4(0.0));  // sky: no reflection
+        return;
+    }
+
+    vec2 uv = (vec2(tid) + 0.5) / vec2(outDim);
+    vec3 worldPos = worldPosFromDepth(uv, depth, camera.invProj, camera.invView);
+    vec3 N = normalize(texelFetch(normalTexture, fullTid, 0).xyz);
+
+    vec3 V = normalize(worldPos - camera.position);  // camera -> surface
+    vec3 R = reflect(V, N);
+
+    // Closest hit (not any-hit): we need the hit distance, barycentrics and
+    // the instance custom index. Instances are FORCE_OPAQUE, so no candidate
+    // loop work happens inside rayQueryProceedEXT.
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, TLAS, gl_RayFlagsOpaqueEXT, 0xFF,
+                          worldPos + N * rayBias, 0.001, R, rayMaxDistance);
+    while (rayQueryProceedEXT(rq)) {}
+
+    vec3 color;
+    float hitMask;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float hitT = rayQueryGetIntersectionTEXT(rq, true);
+        vec3 hitPos = worldPos + N * rayBias + R * hitT;
+
+        uint iid = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true));
+        InstanceData inst = instances[iid];
+        mat3 model33 = mat3(inst.model);
+        MaterialData mat = materials[inst.materialID];
+        vec3 base = mat.baseColorFactor.rgb;
+
+        // Hit surface normal from the merged geometry (rtIndexOffset +
+        // primitiveIndex*3; indices are mesh-local -> rebased by
+        // rtVertexOffset), interpolated with the barycentrics and taken to
+        // world through the model upper 3x3. Without the geometry table, fall
+        // back to the mirror ray as the normal.
+        vec3 hitN;
+        if (hasBindlessGeo != 0u) {
+            uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
+            uint b  = inst.rtIndexOffset + prim * 3u;
+            uint i0 = meshIndices[b + 0u] + inst.rtVertexOffset;
+            uint i1 = meshIndices[b + 1u] + inst.rtVertexOffset;
+            uint i2 = meshIndices[b + 2u] + inst.rtVertexOffset;
+            // Barycentrics are (u,v) for verts 1,2; vert 0 = 1-u-v (same
+            // convention as Metal's triangle_barycentric_coord).
+            vec2 bc = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+            float w0 = 1.0 - bc.x - bc.y;
+            vec3 nObj = w0 * vertexNormal(i0) + bc.x * vertexNormal(i1) + bc.y * vertexNormal(i2);
+            hitN = normalize(model33 * nObj);
+            // Albedo texture at the interpolated UV, folded into base color
+            // (mirror ray: base mip, no ray differentials).
+            vec2 hitUV = w0 * vertexUV(i0) + bc.x * vertexUV(i1) + bc.y * vertexUV(i2);
+            base *= textureLod(sampler2D(materialTextures[nonuniformEXT(inst.materialID * 6u)],
+                                         materialSampler), hitUV, 0.0).rgb;
+        } else {
+            hitN = -R;
+        }
+        if (dot(hitN, R) > 0.0) hitN = -hitN;
+
+        // Direct sun: one occlusion ray (matches the RT shadow kernel's setup).
+        DirLight sun = directionalLights[0];
+        vec3 L = normalize(-sun.direction);
+        float sunVis = 0.0;
+        float nl = max(dot(hitN, L), 0.0);
+        if (nl > 0.0) {
+            rayQueryEXT occ;
+            rayQueryInitializeEXT(occ, TLAS,
+                                  gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                                  0xFF, hitPos + hitN * rayBias, 0.001, L, rayMaxDistance);
+            rayQueryProceedEXT(occ);
+            sunVis = (rayQueryGetIntersectionTypeEXT(occ, true) ==
+                      gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
+        }
+
+        // Ambient: environment irradiance approximated by a rough envMap mip
+        // along the hit normal (the same prefiltered cube the miss path uses).
+        vec3 ambient = textureLod(envMap, hitN, 4.0).rgb;
+
+        color = base * (sun.color * sun.intensity * (sunVis * nl) + ambient)
+              + mat.emissiveFactor * mat.emissiveStrength;
+        // GIBS indirect, when the surfel cache is live (totalCells==0 when off).
+        color += base * surfelRadianceAt(hitPos, hitN);
+        hitMask = 1.0;
+    } else {
+        // Miss: environment along the reflected direction (sharp mip — this is
+        // a mirror ray; the composite handles roughness fade).
+        color = textureLod(envMap, R, 0.0).rgb;
+        hitMask = 0.0;
+    }
+    imageStore(reflectionTexture, ivec2(tid), vec4(color, hitMask));
+}
