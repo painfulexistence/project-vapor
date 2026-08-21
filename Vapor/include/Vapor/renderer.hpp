@@ -1223,7 +1223,7 @@ private:
                                                : capabilities.multiDrawIndirect);
         return bindless ||
                (gpuDrivenIndirect() && gpuDrivenMDI &&
-                ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                ((backend != GraphicsBackend::Metal && capabilities.multiDrawIndirect) ||
                  backend == GraphicsBackend::Metal));
     }
     // Whether the depth pre-pass runs fully GPU-driven this frame (so the CPU

@@ -149,19 +149,19 @@ namespace Vapor {
             const auto* hull = static_cast<const JPH::ConvexHullShape*>(shape);
 
             // Draw convex hull edges
-            uint numFaces = hull->GetNumFaces();
-            for (uint f = 0; f < numFaces; ++f) {
-                uint numVertices = hull->GetNumVerticesInFace(f);
+            JPH::uint numFaces = hull->GetNumFaces();
+            for (JPH::uint f = 0; f < numFaces; ++f) {
+                JPH::uint numVertices = hull->GetNumVerticesInFace(f);
                 if (numVertices < 3) continue;
 
                 // Get face vertices
-                std::vector<uint> indices(numVertices);
+                std::vector<JPH::uint> indices(numVertices);
                 hull->GetFaceVertices(f, numVertices, indices.data());
 
                 // Draw edges of this face
-                for (uint v = 0; v < numVertices; ++v) {
-                    uint idx0 = indices[v];
-                    uint idx1 = indices[(v + 1) % numVertices];
+                for (JPH::uint v = 0; v < numVertices; ++v) {
+                    JPH::uint idx0 = indices[v];
+                    JPH::uint idx1 = indices[(v + 1) % numVertices];
 
                     JPH::Vec3 v0 = hull->GetPoint(idx0);
                     JPH::Vec3 v1 = hull->GetPoint(idx1);
@@ -223,7 +223,7 @@ namespace Vapor {
         case JPH::EShapeSubType::MutableCompound: {
             const auto* compound = static_cast<const JPH::CompoundShape*>(shape);
 
-            for (uint i = 0; i < compound->GetNumSubShapes(); ++i) {
+            for (JPH::uint i = 0; i < compound->GetNumSubShapes(); ++i) {
                 const JPH::CompoundShape::SubShape& sub = compound->GetSubShape(i);
                 JPH::Vec3 subPos = sub.GetPositionCOM();
                 JPH::Quat subRot = sub.GetRotation();
