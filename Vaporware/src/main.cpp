@@ -8,6 +8,7 @@
 #include <glm/ext/vector_float3.hpp>
 #include <glm/trigonometric.hpp>
 #include <iostream>
+#include <stb_image_write.h>  // VAPOR_AUTOSHOT frame capture
 
 #include "Vapor/asset_manager.hpp"
 #include "Vapor/camera.hpp"
@@ -1053,6 +1054,29 @@ auto main(int argc, char* args[]) -> int {
 
             ImGui::Render();
             renderer->endFrame();
+        }
+
+        // VAPOR_AUTOSHOT=<frame> captures that frame to autoshot.png next to the
+        // exe, then quits. Rendering bugs that validation cannot see (wrong
+        // sampling, bad transforms) need the frame itself to diagnose, and an
+        // unattended run has no other way to hand one back.
+        {
+            static const char* shotAt = std::getenv("VAPOR_AUTOSHOT");
+            static bool shotRequested = false;
+            static bool shotDone = false;
+            if (shotAt && !shotDone) {
+                const Uint32 target = static_cast<Uint32>(std::atoi(shotAt));
+                if (!shotRequested && frameCount >= target) {
+                    shotRequested = true;
+                    renderer->readPixelsAsync([&](const GpuImageData& img) {
+                        stbi_write_png("autoshot.png", img.width, img.height, img.channelCount,
+                                       img.data.data(), img.width * img.channelCount);
+                        fmt::print("autoshot: wrote autoshot.png {}x{}\n", img.width, img.height);
+                        shotDone = true;
+                    });
+                }
+                if (shotDone) quit = true;
+            }
         }
 
         frameCount++;
