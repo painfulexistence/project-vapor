@@ -5,9 +5,22 @@
 #include <cstdint>
 #include <glm/glm.hpp>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 namespace Vapor {
+
+// What a VoxelWorld generates. Terrain is the streaming heightfield diorama;
+// the object kinds are small self-contained props (crate / boulder / crystal
+// cluster) meant for grids of ~16-48 voxels per edge, so a scene can mix one
+// big terrain with many cheap per-object volumes (the layout the physics work
+// builds on). All kinds share the one default palette.
+enum class VoxelKind : Uint8 {
+    Terrain = 0,
+    Crate = 1,
+    Boulder = 2,
+    CrystalCluster = 3,
+};
 
 // ============================================================================
 // VoxelWorld — CPU source of truth for a raymarched micro-voxel volume.
@@ -93,7 +106,9 @@ public:
 
     // gridDim components are rounded down to multiples of BRICK_DIM.
     // brickCapacity bounds pool memory (brickCapacity * 576 bytes CPU + GPU).
-    void configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn);
+    // kind selects the generator (terrain heightfield vs a small prop shape).
+    void configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn,
+                   VoxelKind kindIn = VoxelKind::Terrain);
 
     // ---- Generation ------------------------------------------------------
     // prepareGeneration resets all storage, builds the default palette and the
@@ -105,18 +120,79 @@ public:
     void generateColumnChunk(int chunkX, int chunkZ);
     void generate(Uint32 seedIn);
     glm::ivec2 columnChunkCount() const;
+    // True once every chunk queued by the last prepareGeneration has finished.
+    // Consumers that need the whole volume (collision geometry) must wait for
+    // this; the renderer does not, since it picks up bricks as they land.
+    bool generationComplete() const {
+        return !pageTable.empty() && pendingChunks.load(std::memory_order_acquire) == 0;
+    }
 
     // ---- Editing (local meters: volume min corner = origin) --------------
     // Clears voxels to air inside the sphere, updating occupancy bits, freeing
     // emptied bricks and materializing carved uniform bricks. Affected slots
     // land in the dirty batch. Returns true if anything changed.
     bool carveSphere(const glm::vec3& localCenter, float radius);
+    // As above, additionally reporting the voxel box the carve could have
+    // touched (inclusive, clamped to the grid) — what an incremental collider
+    // needs in order to re-mesh only the chunks that changed. Filled even when
+    // nothing was actually removed, so callers can rely on it after a true
+    // return. Returned by the carve itself rather than recomputed by callers,
+    // so the two can never disagree about which voxels were in range.
+    bool carveSphere(const glm::vec3& localCenter, float radius, glm::ivec3& outMin, glm::ivec3& outMax);
 
     // First solid voxel along a local-space ray (three-level DDA: empty brick
     // cells are skipped in one step, occupied bricks walk their bitmask).
     // On hit fills the local-space hit position (entry face) and the hit cell.
     bool raycast(const glm::vec3& localRo, const glm::vec3& localRd, float maxDist,
                  glm::vec3& outLocalHit, glm::ivec3& outCell) const;
+
+    // ---- Collision geometry ----------------------------------------------
+    // Both emit GRID-LOCAL meters: the grid's min corner is the origin, so a
+    // point is voxel coordinate * voxelSize. Callers that attach the shape to a
+    // body placed at the volume's pivot (the entity position — the grid centred
+    // in x/z, rising from y) must subtract (extent.x/2, 0, extent.z/2).
+
+    // Triangle mesh of every exposed voxel face, greedy-merged into maximal
+    // rectangles per slice, with outward winding. Feeds a Jolt MeshShape, which
+    // is STATIC-only — use it for terrain. Voxel-precise, and the merge keeps
+    // the triangle count far below one quad per face (large flat spans collapse
+    // to a single rectangle). Empty bricks are skipped a whole 8-voxel block at
+    // a time, so cost tracks surface area, not volume.
+    void buildSurfaceMesh(std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices) const;
+
+    // As above, but restricted to voxels inside [regionMin, regionMax]
+    // (inclusive, voxel coordinates, clamped to the occupied bounds). Whether a
+    // face on the region's own boundary is emitted is still decided against the
+    // voxels OUTSIDE it, so meshing a grid in pieces yields exactly the same
+    // surface as meshing it whole: no seams, and no internal walls where two
+    // pieces meet. That is what lets a collider be rebuilt one chunk at a time
+    // after a carve instead of re-meshing the whole world.
+    void buildSurfaceMeshRegion(
+        std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices, const glm::ivec3& regionMin,
+        const glm::ivec3& regionMax
+    ) const;
+
+    // Support points of the solid voxels sampled over `directions` roughly even
+    // directions — a bounded point set whose convex hull approximates (and is
+    // inscribed in) the true hull. Feeds a Jolt ConvexHullShape, which is what a
+    // DYNAMIC body needs. Intended for small props; a whole terrain would give a
+    // useless hull. Points are deduplicated, so the result may be smaller than
+    // `directions`.
+    void buildConvexHullPoints(std::vector<glm::vec3>& outPoints, int directions = 64) const;
+
+    // The extractors above read the page table and brick pool without internal
+    // locking — meshing walks millions of cells, and a lock per voxel would be
+    // absurd. Anything reading them from another thread must hold this shared
+    // lock for the whole read instead; carveSphere takes the matching
+    // exclusive lock. This is not optional: a carve can MATERIALIZE uniform
+    // bricks, which may grow the brick pool and reallocate the very array a
+    // concurrent reader is walking — use-after-free, not just a torn value.
+    // Generation is not covered (it predates any collider build and writes
+    // disjoint chunks); the pair that matters is carve vs. post-generation
+    // extraction.
+    [[nodiscard]] std::shared_lock<std::shared_mutex> lockVoxelsShared() const {
+        return std::shared_lock<std::shared_mutex>(editMutex);
+    }
 
     // ---- Queries ---------------------------------------------------------
     Uint8 voxelAt(const glm::ivec3& cell) const;
@@ -127,6 +203,14 @@ public:
     const glm::ivec3& dim() const { return gridDim; }
     glm::ivec3 brickGrid() const { return gridDim / BRICK_DIM; }
     glm::vec3 extent() const { return glm::vec3(gridDim) * voxelSize; }
+    // Tight solid bounds in voxel coordinates (inclusive), unioned as bricks
+    // are generated. The renderer shrinks each volume's rasterized box and the
+    // shader's slab test to this range, so a ray never marches the empty margin
+    // (mostly the sky above terrain). Conservative: carves never shrink it (a
+    // dug hole leaves the bound where it was, which stays correct). Falls back
+    // to the full grid while the world is still empty. Thread-safe against
+    // streaming generation.
+    void occupiedVoxelBounds(glm::ivec3& outMin, glm::ivec3& outMax) const;
     float voxelSizeMeters() const { return voxelSize; }
     Uint32 capacity() const { return brickCapacity; }
     Uint64 solidVoxels() const { return solidCount.load(std::memory_order_relaxed); }
@@ -170,6 +254,7 @@ private:
     }
 
     void setDefaultPalette();
+    void generateColumnChunkImpl(int chunkX, int chunkZ);
     // Allocates a pool slot (mutex-held by caller); PAGE_EMPTY when exhausted.
     Uint32 allocSlotLocked();
     void freeSlotLocked(Uint32 slot);
@@ -183,6 +268,7 @@ private:
     float voxelSize = 0.05f;
     Uint32 brickCapacity = 262144;
     Uint32 seed = 1337u;
+    VoxelKind kind = VoxelKind::Terrain;
 
     std::vector<Uint32> pageTable;
     std::vector<Brick> bricks;
@@ -192,8 +278,14 @@ private:
     std::vector<FeatureSphere> features;      // crystals + glowstone, in voxels
     std::atomic<Uint64> solidCount { 0 };
     std::atomic<Uint64> droppedCount { 0 };   // bricks lost to pool exhaustion
+    std::atomic<Uint32> pendingChunks { 0 };  // chunks still to run; 0 = fully generated
+    glm::ivec3 occMin { 0 };                   // tight solid bounds (voxels, inclusive);
+    glm::ivec3 occMax { -1 };                  // occMax < occMin => empty. Guarded by poolMutex.
 
     mutable std::mutex poolMutex;  // guards freeSlots, bricks growth, dirty state
+    // Carve-vs-reader lock; see lockVoxelsShared. Separate from poolMutex,
+    // which only covers slot bookkeeping, not the voxel bytes themselves.
+    mutable std::shared_mutex editMutex;
     std::vector<Uint32> dirtyBrickSlots;
     std::vector<bool> brickDirtyFlags;  // slot -> already in dirtyBrickSlots
     bool pageTableDirty = false;

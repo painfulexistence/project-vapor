@@ -26,6 +26,7 @@
 #include "rhi.hpp"            // TextureHandle, PixelFormat
 #include "render_data.hpp"    // CameraRenderData
 #include "camera.hpp"
+#include <glm/gtc/quaternion.hpp>  // glm::quat (VoxelVolumeDraw orientation)
 #include "graphics.hpp"       // Image, FontHandle via font_manager
 #include "font_manager.hpp"   // FontHandle
 #include "render_scene.hpp"
@@ -60,7 +61,11 @@ class VoxelWorld;
 // VoxelWorld pointer and pulls per-brick dirty batches from it.
 struct VoxelVolumeDraw {
     std::shared_ptr<VoxelWorld> world;
-    glm::vec3 origin = glm::vec3(0.0f);  // world-space min corner
+    glm::vec3 origin = glm::vec3(0.0f);  // world-space min corner (unrotated)
+    // Orientation about the volume pivot (origin + half the x/z extent).
+    // Identity keeps the box axis-aligned; physics drives this once volumes
+    // are rigid bodies.
+    glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
 };
 
 // Graphics backend selection

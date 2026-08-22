@@ -428,7 +428,19 @@ struct alignas(16) MicroVoxelRenderData {
     // (offsets into the shared voxel buffers; exact in float well past any
     // realistic table size — everything stays vec4 for the MSL/std430 twins).
     glm::vec4 extra0 = glm::vec4(0.0f);
-    glm::vec4 _pad[3] = {};
+    // Volume orientation as a quaternion (x, y, z, w); identity = axis-aligned.
+    // The DDA runs in the grid's local frame, so the shader rotates the view
+    // ray by the conjugate into that frame and the hit/normal back out — a
+    // rigid transform about the volume's pivot (volumeOrigin + half the x/z
+    // extent). The renderer also pre-rotates sunDirection into this frame, so
+    // every lighting term stays consistent without touching the helpers.
+    glm::vec4 rotationQuat = glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    // Tight solid bounds in the volume's LOCAL grid frame (meters): the box the
+    // vertex shader rasterizes and the fragment's slab test both use this
+    // instead of the full [0, extent], so a ray skips the empty margin (mostly
+    // the sky above terrain). Defaults span the full grid (a 256^3 @ 5 cm here).
+    glm::vec4 boundsMin = glm::vec4(0.0f);
+    glm::vec4 boundsMax = glm::vec4(12.8f, 12.8f, 12.8f, 0.0f);
 };
 static_assert(sizeof(MicroVoxelRenderData) == 256,
               "MicroVoxelRenderData must stay at the 256-byte per-volume stride the shaders assume");

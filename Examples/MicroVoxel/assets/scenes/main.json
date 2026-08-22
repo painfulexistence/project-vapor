@@ -1,27 +1,17 @@
 {
   "name": "microvoxel",
+  "_comment": "One big 256^3 terrain (static voxel collider, 16^3 chunks). Props are no longer authored here: the T key spawns them at runtime from a palette in main.cpp, one per press — the incremental load test, and the same runtime-spawn path fracture will use. kind: 0=terrain 1=crate 2=boulder 3=crystal cluster. 16 volumes = MAX_VOXEL_VOLUMES, terrain takes one.",
   "entities": [
     {
-      "name": "Volume.Center",
+      "name": "Volume.Terrain",
       "position": [0.0, 0.0, 0.0],
       "components": {
-        "voxelVolume": { "gridDim": [512, 512, 512], "voxelSize": 0.025, "seed": 1337, "brickCapacity": 131072 }
+        "voxelVolume": { "gridDim": [256, 256, 256], "voxelSize": 0.05, "seed": 1337, "brickCapacity": 65536 },
+        "rigidbody": { "motionType": "static" },
+        "voxelCollider": { "chunkVoxels": 16 }
       }
     },
-    {
-      "name": "Volume.Right",
-      "position": [12.8, 0.0, 0.0],
-      "components": {
-        "voxelVolume": { "gridDim": [256, 256, 256], "voxelSize": 0.05, "seed": 7, "brickCapacity": 65536 }
-      }
-    },
-    {
-      "name": "Volume.Left",
-      "position": [-12.8, 0.0, 0.0],
-      "components": {
-        "voxelVolume": { "gridDim": [256, 256, 256], "voxelSize": 0.05, "seed": 99, "brickCapacity": 65536 }
-      }
-    },
+
     {
       "name": "Sun",
       "components": {
