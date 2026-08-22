@@ -149,6 +149,12 @@ layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
     float _cpad1;
     uvec3 cullGridSize;
     uint cullLightCount;
+    uint cullSpotCount;    // unread here (spot/rect counts arrive via push constants)
+    uint cullRectCount;
+    // Cloud-shadow blend strength (0 = off / clouds disabled); the map itself
+    // is cloudShadowTex at set2 b13.
+    float cloudShadowStrength;
+    float _cpad2;
 };
 layout(std430, set = 1, binding = 6) readonly buffer SpotLightBuf {
     SpotLight spotLights[];
@@ -239,6 +245,20 @@ layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 layout(set = 2, binding = 10) uniform samplerCube irradianceMap;
 layout(set = 2, binding = 11) uniform samplerCube prefilterMap;
 layout(set = 2, binding = 12) uniform sampler2D brdfLut;
+// Top-down cloud transmittance over the camera-centered region (CloudShadow.frag).
+layout(set = 2, binding = 13) uniform sampler2D cloudShadowTex;
+
+// Drifting cloud shadows on the sun term. Region constants MUST match
+// CloudShadow.frag (CSM_HALF/CSM_SNAP); fades to 1 near the region edge.
+float cloudShadow(vec3 worldPos) {
+    if (cloudShadowStrength <= 0.0) return 1.0;
+    vec2 center = floor(cam.position.xz / 16.0) * 16.0;
+    vec2 uv = (worldPos.xz - center) / (2.0 * 2048.0) + 0.5;
+    vec2 edge = abs(uv - 0.5);
+    float inRegion = 1.0 - smoothstep(0.45, 0.5, max(edge.x, edge.y));
+    float t = texture(cloudShadowTex, uv).r;
+    return mix(1.0, t, cloudShadowStrength * inRegion);
+}
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -641,6 +661,9 @@ void main() {
             sh = min(sh, texture(sscsTex, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r);
             contrib *= sh;
         }
+        // Drifting cloud shadows dim the sun independently of the geometry
+        // shadow (and of the PCF debug skip).
+        if (i == 0u) contrib *= cloudShadow(fragPos);
         color += contrib;
     }
     // Point lights via the culled tile list. The tile is selected with the
