@@ -1,0 +1,187 @@
+#version 450
+// Adaptive GPU tessellation — leaf corner cache (Vulkan twin of tessLeafPrep
+// in 3d_tess_update.metal; compute/instanced path only — the mesh-shader path
+// decodes and culls in its object stage instead). Indirect dispatch over the
+// NEW leaf count: decode each leaf once (heap descent + bit walk), lerp its
+// corner attributes from the roots, frustum-cull with a displacement-padded
+// bounding sphere, and write the TessLeafData entry the instanced vertex
+// shader lerps — no per-vertex CBT reads.
+//
+// b0 = CBT storage (read)
+// b2 = TessRoot[]
+// b3 = CameraData
+// b4 = TessParams (per-instance buffer — see TessClassify.comp)
+// b6 = TessLeafData[]
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct TessRoot {
+    vec4 posU[3];
+    vec4 nrmV[3];
+    uint left;
+    uint right;
+    uint edge;
+    uint node;
+};
+
+struct CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    mat4 invView;
+    float nearPlane;
+    float farPlane;
+    vec2 _pad;
+    vec3 position;
+    float _pad2;
+    vec4 frustumPlanes[6];
+};
+
+// Mirrors TessLeafDataGpu (tessellation.hpp) / TessLeafData (3d_tess_lib.metal).
+struct TessLeafData {
+    vec4 posU[3];  // xyz = object-space corner, w = uv.x
+    vec4 nrmV[3];  // xyz = corner normal, w = uv.y
+    uint visible;  // 0 = frustum-culled (VS emits a degenerate triangle)
+    uint depth;    // heap depth (debug coloring)
+    uint node;     // heap id (debug)
+    uint pad;
+};
+
+layout(std430, binding = 0) readonly buffer CbtBuf { uint cbt[]; };
+layout(std430, binding = 2) readonly buffer RootBuf { TessRoot roots[]; };
+layout(std430, binding = 3) readonly buffer CameraBuf { CameraData cam; };
+layout(std430, binding = 4) readonly buffer ParamsBuf {
+    mat4 model;
+    uint maxDepth;
+    uint rootDepth;
+    uint rootCount;
+    uint maxLeaves;
+    float splitPixels;
+    float screenHeight;
+    float displacementScale;
+    uint flags;
+    uint gridIndexCount;
+    float terrainFrequency;
+    uint terrainSeed;
+    uint terrainOctaves;
+} params;
+layout(std430, binding = 6) writeonly buffer LeafBuf { TessLeafData leaves[]; };
+
+// ── CBT / LEB decoding (same mirrors as TessClassify.comp) ──────────────────
+
+uint tessDepthOf(uint node) { return uint(findMSB(node)); }
+uint tessBitfieldOffset(uint maxDepth) { return (2u << (maxDepth - 5u)) - 1u; }
+uint tessCeilBitOf(uint node, uint maxDepth) {
+    uint d = tessDepthOf(node);
+    return (node << (maxDepth - d)) & ((1u << maxDepth) - 1u);
+}
+uint tessHeapRead(uint maxDepth, uint node) {
+    if (node == 0u) return 0u;
+    uint d = tessDepthOf(node);
+    uint s = maxDepth - 5u;
+    if (d <= s) {
+        return cbt[(1u << d) - 1u + (node - (1u << d))];
+    }
+    uint first = tessCeilBitOf(node, maxDepth);
+    uint len = 1u << (maxDepth - d);
+    uint word = cbt[tessBitfieldOffset(maxDepth) + (first >> 5u)];
+    uint mask = ((1u << len) - 1u) << (first & 31u);
+    return uint(bitCount(word & mask));
+}
+uint tessDecodeLeaf(uint maxDepth, uint rootDepth, uint leafIndex) {
+    uint node = 1u;
+    while (tessDepthOf(node) < rootDepth || tessHeapRead(maxDepth, node) > 1u) {
+        uint leftCount = tessHeapRead(maxDepth, node << 1u);
+        if (leafIndex < leftCount) {
+            node = node << 1u;
+        } else {
+            leafIndex -= leftCount;
+            node = node << 1u | 1u;
+        }
+        if (tessDepthOf(node) >= maxDepth) break;
+    }
+    return node;
+}
+
+struct TessTriangle {
+    vec3 w0;
+    vec3 w1;
+    vec3 w2;
+    uint rootSlot;
+};
+TessTriangle tessDecodeTriangle(uint node, uint rootDepth) {
+    uint lebDepth = tessDepthOf(node) - rootDepth;
+    TessTriangle t;
+    t.rootSlot = (node >> lebDepth) - (1u << rootDepth);
+    t.w0 = vec3(1, 0, 0);
+    t.w1 = vec3(0, 1, 0);
+    t.w2 = vec3(0, 0, 1);
+    for (uint k = lebDepth; k-- > 0u;) {
+        uint bit = (node >> k) & 1u;
+        vec3 mid = (t.w0 + t.w2) * 0.5;
+        if (bit == 0u) {
+            t.w2 = t.w1;
+            t.w1 = mid;
+        } else {
+            t.w0 = t.w1;
+            t.w1 = mid;
+        }
+    }
+    return t;
+}
+
+struct TessCorner {
+    vec3 pos;
+    vec3 nrm;
+    vec2 uv;
+};
+TessCorner tessCornerFromWeights(vec3 w, uint rootSlot) {
+    TessCorner c;
+    c.pos = w.x * roots[rootSlot].posU[0].xyz + w.y * roots[rootSlot].posU[1].xyz
+        + w.z * roots[rootSlot].posU[2].xyz;
+    c.nrm = w.x * roots[rootSlot].nrmV[0].xyz + w.y * roots[rootSlot].nrmV[1].xyz
+        + w.z * roots[rootSlot].nrmV[2].xyz;
+    c.uv = w.x * vec2(roots[rootSlot].posU[0].w, roots[rootSlot].nrmV[0].w)
+        + w.y * vec2(roots[rootSlot].posU[1].w, roots[rootSlot].nrmV[1].w)
+        + w.z * vec2(roots[rootSlot].posU[2].w, roots[rootSlot].nrmV[2].w);
+    return c;
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint drawn = min(cbt[0], params.maxLeaves);
+    if (tid >= drawn) return;
+
+    uint node = tessDecodeLeaf(params.maxDepth, params.rootDepth, tid);
+    TessTriangle tri = tessDecodeTriangle(node, params.rootDepth);
+    TessCorner c0 = tessCornerFromWeights(tri.w0, tri.rootSlot);
+    TessCorner c1 = tessCornerFromWeights(tri.w1, tri.rootSlot);
+    TessCorner c2 = tessCornerFromWeights(tri.w2, tri.rootSlot);
+
+    // Frustum: world bounding sphere of the three corners, padded by the
+    // displacement bound.
+    vec3 wc0 = (params.model * vec4(c0.pos, 1.0)).xyz;
+    vec3 wc1 = (params.model * vec4(c1.pos, 1.0)).xyz;
+    vec3 wc2 = (params.model * vec4(c2.pos, 1.0)).xyz;
+    vec3 center = (wc0 + wc1 + wc2) / 3.0;
+    float radius = max(distance(center, wc0), max(distance(center, wc1), distance(center, wc2)));
+    radius += abs(params.displacementScale) * 1.5;
+    bool visible = true;
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = cam.frustumPlanes[i];
+        if (dot(plane.xyz, center) + plane.w < -radius) { visible = false; break; }
+    }
+
+    TessLeafData L;
+    L.posU[0] = vec4(c0.pos, c0.uv.x);
+    L.posU[1] = vec4(c1.pos, c1.uv.x);
+    L.posU[2] = vec4(c2.pos, c2.uv.x);
+    L.nrmV[0] = vec4(c0.nrm, c0.uv.y);
+    L.nrmV[1] = vec4(c1.nrm, c1.uv.y);
+    L.nrmV[2] = vec4(c2.nrm, c2.uv.y);
+    L.visible = visible ? 1u : 0u;
+    L.depth = tessDepthOf(node);
+    L.node = node;
+    L.pad = 0u;
+    leaves[tid] = L;
+}

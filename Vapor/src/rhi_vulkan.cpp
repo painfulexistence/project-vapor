@@ -1326,7 +1326,11 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    // Wireframe pipeline variant (PolygonMode::Line) — guarded by the device
+    // feature so a Line desc silently falls back to Fill on unsupporting HW.
+    rasterizer.polygonMode = (desc.polygonMode == PolygonMode::Line && capabilities.wireframe)
+                                 ? VK_POLYGON_MODE_LINE
+                                 : VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = convertCullMode(desc.cullMode);
     rasterizer.frontFace = desc.frontFaceCounterClockwise ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
@@ -1400,6 +1404,13 @@ PipelineHandle RHI_Vulkan::createPipeline(const PipelineDesc& desc) {
         VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR
     };
+    // Opt-in dynamic fill mode: the baked polygonMode becomes the initial value
+    // and RHI::setFillMode drives it per-command (see PipelineDesc). Only when
+    // the device advertised the feature; otherwise the pipeline keeps its baked
+    // mode and wireframe uses Line twins.
+    if (desc.dynamicPolygonMode && dynamicPolygonModeEnabled) {
+        dynamicStates.push_back(VK_DYNAMIC_STATE_POLYGON_MODE_EXT);
+    }
 
     VkPipelineDynamicStateCreateInfo dynamicState{};
     dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
@@ -2303,6 +2314,14 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
 
     pfnCmdBeginRendering(currentCommandBuffer, &renderingInfo);
 
+    // Anchor the dynamic fill mode to Fill at the start of every pass (Vulkan
+    // dynamic state persists across passes in a command buffer, unlike Metal's
+    // per-encoder reset). Passes that want wireframe call setFillMode(Line)
+    // after this; every other dynamicPolygonMode pipeline stays Fill.
+    if (dynamicPolygonModeEnabled && pfnCmdSetPolygonMode) {
+        pfnCmdSetPolygonMode(currentCommandBuffer, VK_POLYGON_MODE_FILL);
+    }
+
     // Set viewport and scissor (attachment-sized, matching the render area).
     // Negative-height viewport (core since Vulkan 1.1): the engine's
     // projection matrices follow the GL convention (NDC +Y up) while Vulkan's
@@ -2810,6 +2829,13 @@ void RHI_Vulkan::createLogicalDevice() {
             deviceFeatures.multiDrawIndirect = VK_TRUE;
             capabilities.multiDrawIndirect = true;
         }
+        // Wireframe rasterization (VK_POLYGON_MODE_LINE) — the debug-view fill
+        // mode for PolygonMode::Line pipelines. Enable only when supported so
+        // device creation never fails; the renderer checks capabilities.wireframe.
+        if (supportedFeatures.fillModeNonSolid) {
+            deviceFeatures.fillModeNonSolid = VK_TRUE;
+            capabilities.wireframe = true;
+        }
     }
 
     VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamicRenderingFeatures{};
@@ -2921,6 +2947,45 @@ void RHI_Vulkan::createLogicalDevice() {
     meshShaderFeatures.taskShader = VK_TRUE;
     meshShaderFeatures.meshShader = VK_TRUE;
 
+    // Dynamic polygon mode (VK_EXT_extended_dynamic_state3): lets a single Fill
+    // pipeline draw wireframe via vkCmdSetPolygonModeEXT — the same encoder-level
+    // model Metal has, so wireframe covers EVERY draw path (bindless / MDI /
+    // meshlet) without per-pipeline Line twins. Needs fillModeNonSolid (to allow
+    // the LINE mode at all) plus the extension's polygon-mode feature. Enabled
+    // only when the whole chain is present; otherwise wireframe falls back to
+    // baked Line pipeline variants.
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT eds3Features{};
+    eds3Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT;
+    {
+        const auto hasExt = [&](const char* name) {
+            for (const char* e : deviceExtensions)
+                if (std::strcmp(e, name) == 0) return true;
+            return false;
+        };
+        uint32_t extCount = 0;
+        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
+        std::vector<VkExtensionProperties> available(extCount);
+        vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, available.data());
+        bool present = false;
+        for (const auto& e : available)
+            if (std::strcmp(e.extensionName, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME) == 0) present = true;
+        if (present && capabilities.wireframe) {
+            VkPhysicalDeviceExtendedDynamicState3FeaturesEXT supported{};
+            supported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT;
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &supported;
+            vkGetPhysicalDeviceFeatures2(physicalDevice, &features2);
+            if (supported.extendedDynamicState3PolygonMode) {
+                eds3Features.extendedDynamicState3PolygonMode = VK_TRUE;
+                if (!hasExt(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME))
+                    deviceExtensions.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+                dynamicPolygonModeEnabled = true;
+                capabilities.dynamicPolygonMode = true;
+            }
+        }
+    }
+
     // Create device
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -2932,6 +2997,10 @@ void RHI_Vulkan::createLogicalDevice() {
     if (descriptorIndexingEnabled) {
         descriptorIndexingFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &descriptorIndexingFeatures;
+    }
+    if (dynamicPolygonModeEnabled) {
+        eds3Features.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &eds3Features;
     }
     const VkDeviceQueueCreateInfo queueCreateInfos[2] = { graphicsQueueInfo, presentQueueInfo };
     deviceInfo.pQueueCreateInfos = queueCreateInfos;
@@ -2995,6 +3064,24 @@ void RHI_Vulkan::createLogicalDevice() {
         capabilities.meshShaders = pfnCmdDrawMeshTasks != nullptr;
         meshShadersEnabled = capabilities.meshShaders;
     }
+
+    if (dynamicPolygonModeEnabled) {
+        pfnCmdSetPolygonMode = (PFN_vkCmdSetPolygonModeEXT)vkGetDeviceProcAddr(device, "vkCmdSetPolygonModeEXT");
+        // The entry point should exist once the extension is enabled; if a
+        // driver omits it, fall back to Line pipeline twins.
+        dynamicPolygonModeEnabled = pfnCmdSetPolygonMode != nullptr;
+        capabilities.dynamicPolygonMode = dynamicPolygonModeEnabled;
+    }
+}
+
+void RHI_Vulkan::setFillMode(PolygonMode mode) {
+    // Dynamic-state fill mode (VK_EXT_extended_dynamic_state3): applies to every
+    // subsequent draw with a dynamicPolygonMode pipeline, on any draw path.
+    // No-op when the feature is unavailable — the renderer binds a Line pipeline
+    // twin instead in that case.
+    if (!dynamicPolygonModeEnabled || !pfnCmdSetPolygonMode || currentCommandBuffer == VK_NULL_HANDLE) return;
+    pfnCmdSetPolygonMode(currentCommandBuffer,
+                         mode == PolygonMode::Line ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL);
 }
 
 // Tear down and rebuild the swapchain at the surface's current extent.

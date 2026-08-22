@@ -2,6 +2,7 @@
 using namespace metal;
 #include "Res/shaders/3d_common.metal"  // shared CameraData/InstanceData/VertexData + inverse()
 #include "Res/shaders/3d_pbr_lib.metal" // shared Surface/BRDF/analytic-light/IBL helpers
+#include "Res/shaders/3d_terrain_shade.metal" // terrain splat + per-pixel FNL normal (shaderModel == 1)
 
 // Bring-up debug probes (the negative-errorThreshold "probe ladder" in meshMain
 // + the mesh-only meshSynthetic pipeline) that were used to chase the blank-
@@ -555,6 +556,12 @@ static float meshletSampleCascade(float3 worldPos, float ndl, int ci,
     float4 lsPos = pssm.lightSpaceMatrices[ci] * float4(worldPos, 1.0);
     float3 proj  = lsPos.xyz / lsPos.w;
     float2 uv    = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    // -1 = outside this cascade's map; the caller falls through to a farther
+    // cascade and finally to "lit". See the forward fragment for why the
+    // missing test rendered everything past the last split fully shadowed.
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || proj.z > 1.0) {
+        return -1.0;
+    }
     float  slope = clamp(1.0 - ndl, 0.0, 1.0);
     float  bias  = 0.002 * float(ci + 1) * (1.0 + 2.0 * slope);
     float  ref   = proj.z - bias;
@@ -593,12 +600,17 @@ static float meshletDirShadow(float3 worldPos, float ndl, float viewZ, float2 sc
     if      (viewZ > pssm.cascadeSplits.z) ci = 2;
     else if (viewZ > pssm.cascadeSplits.y) ci = 1;
     float sh = meshletSampleCascade(worldPos, ndl, ci, pssm, shadowMaps);
+    bool beyondAll = false;
+    if (sh < 0.0 && ci < 1) { ci = 1; sh = meshletSampleCascade(worldPos, ndl, 1, pssm, shadowMaps); }
+    if (sh < 0.0 && ci < 2) { ci = 2; sh = meshletSampleCascade(worldPos, ndl, 2, pssm, shadowMaps); }
+    if (sh < 0.0) { sh = 1.0; beyondAll = true; }  // past every cascade -> lit
     float cb = pssm.cascadeBlendRange;
-    if (cb > 0.0 && ci < 2) {
+    if (cb > 0.0 && ci < 2 && !beyondAll) {
         float cascadeEnd = (ci == 0) ? pssm.cascadeSplits.y : pssm.cascadeSplits.z;
         float blendStart = cascadeEnd - cb;
         if (viewZ > blendStart && viewZ < cascadeEnd) {
             float next = meshletSampleCascade(worldPos, ndl, ci + 1, pssm, shadowMaps);
+            if (next < 0.0) next = 1.0;  // out of range -> fade to lit, not black
             float t = (viewZ - blendStart) / cb;
             sh = mix(sh, next, smoothstep(0.0, 1.0, t));
         }
@@ -671,7 +683,13 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
                              texture2d<float, access::sample>     gibsGI         [[texture(8)]],
                              texture2d<float, access::sample>     texReflection  [[texture(9)]],
                              texture2d<float, access::sample>     texRefraction  [[texture(10)]],
-                             texture2d<float, access::sample>     texShadow      [[texture(11)]]) {
+                             texture2d<float, access::sample>     texShadow      [[texture(11)]],
+                             // Terrain detail-layer arrays for the shaderModel == 1
+                             // branch (same slots-by-convention as the forward
+                             // fragment's texture(18)/(19), placed at the next free
+                             // meshlet slots; default white array when no terrain).
+                             texture2d_array<float, access::sample> terrainDetailAlbedo [[texture(12)]],
+                             texture2d_array<float, access::sample> terrainDetailNormal [[texture(13)]]) {
     // shadeMode: 1 = per-meshlet hashColor (bring-up default / probes / UI toggle),
     //            0 = lambertian fallback (no material bind — bindless caps absent),
     //            2 = full PBR from the shared material table + analytic lights + IBL.
@@ -719,10 +737,16 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
     surf.roughness  = tex.roughness.sample(s, in.uv).g * material.roughnessFactor;
     surf.metallic   = tex.metallic.sample(s, in.uv).b * material.metallicFactor;
     surf.emission   = srgbToLinear(tex.emissive.sample(s, in.uv).rgb * material.emissiveFactor.rgb) * material.emissiveStrength;
-    surf.subsurface = material.subsurface;
-    surf.specular   = material.specular;
-    surf.specular_tint = material.specularTint;
-    surf.anisotropic = material.anisotropic;
+    // A terrain material (shaderModel == 1) overloads the Disney lobe fields to
+    // carry its height-field descriptor (see renderer.cpp). This meshlet path
+    // has no terrain branch, but guard the lobes anyway so a terrain material
+    // routed here shades as a neutral dielectric instead of reading specular =
+    // heightScale / anisotropic = seed bits.
+    bool isTerrain = (material.shaderModel == 1.0);
+    surf.subsurface = isTerrain ? 0.0 : material.subsurface;
+    surf.specular   = isTerrain ? 0.5 : material.specular;
+    surf.specular_tint = isTerrain ? 0.0 : material.specularTint;
+    surf.anisotropic = isTerrain ? 0.0 : material.anisotropic;
     surf.sheen      = material.sheen;
     surf.sheen_tint = material.sheenTint;
     surf.clearcoat  = material.clearcoat;
@@ -743,6 +767,25 @@ fragment float4 fragmentMain(MeshletVertexOut in [[stage_in]],
         float3 up = abs(N.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
         T = normalize(cross(up, N));
         B = cross(N, T);
+    }
+
+    // Terrain: full splat shading, same branch as the forward fragment — the
+    // meshlet path is a plain (non-ICB) pipeline, so the detail arrays arrive
+    // as direct texture args. in.uv.x carries the baked height01; the
+    // height-field descriptor rides the material's overloaded Disney lobe
+    // fields (already neutralized in `surf` above).
+    if (isTerrain) {
+        float3 tAlbedo, tN;
+        float noiseFreq   = material.subsurface;
+        float heightScale = material.specular;
+        int   octaves     = int(material.specularTint + 0.5);
+        uint  seed        = as_type<uint>(material.anisotropic);
+        trgShadeTerrain(in.worldPosition, noiseFreq, octaves, seed, heightScale,
+                        clamp(in.uv.x, 0.0, 1.0), terrainDetailAlbedo, terrainDetailNormal, tAlbedo, tN);
+        surf.color = tAlbedo;  // detail albedo is already linearized in the blend
+        surf.roughness = 0.95;
+        surf.metallic = 0.0;
+        norm = tN;
     }
     float3 viewDir = normalize(camera.position - in.worldPosition);
     constexpr sampler screenSampler(address::clamp_to_edge, filter::linear);

@@ -80,6 +80,9 @@ struct MaterialData {
     float uvScale;
     float iblEnabled; // 1.0 = use IBL, 0.0 = ambient approximation
     float transmission; // KHR_materials_transmission factor; IOR fixed 1.5
+    // Surface shader model (0 Standard / 1 Terrain / 2 Grass); sits in the C++
+    // alignment tail after transmission, so the 112-byte stride is unchanged.
+    float shaderModel;
 };
 
 struct DirLight {

@@ -750,6 +750,24 @@ void Renderer::shutdown() {
                 rhi->destroySampler(texture.sampler);
             }
         }
+        // Terrain detail-layer arrays (not in the textures registry).
+        if (defaultDetailArrayTexture.isValid()) rhi->destroyTexture(defaultDetailArrayTexture);
+        if (terrainDetailAlbedoArray.isValid()) rhi->destroyTexture(terrainDetailAlbedoArray);
+        if (terrainDetailNormalArray.isValid()) rhi->destroyTexture(terrainDetailNormalArray);
+        defaultDetailArrayTexture = {};
+        terrainDetailAlbedoArray = {};
+        terrainDetailNormalArray = {};
+
+        // Grass ring resources.
+        if (grassInstanceBuffer.isValid()) rhi->destroyBuffer(grassInstanceBuffer);
+        if (grassParamsBuffer.isValid()) rhi->destroyBuffer(grassParamsBuffer);
+        if (grassPipeline.isValid()) rhi->destroyPipeline(grassPipeline);
+        if (grassVS.isValid()) rhi->destroyShader(grassVS);
+        if (grassFS.isValid()) rhi->destroyShader(grassFS);
+        grassInstanceBuffer = {};
+        grassParamsBuffer = {};
+        grassPipeline = {};
+
         // Destroy shaders
         if (vertexShader.isValid()) {
             rhi->destroyShader(vertexShader);
@@ -773,6 +791,8 @@ void Renderer::shutdown() {
         if (mainPipeline.isValid()) {
             rhi->destroyPipeline(mainPipeline);
         }
+        if (mainPipelineWire.isValid()) rhi->destroyPipeline(mainPipelineWire);
+        if (tessRenderPipelineWire.isValid()) rhi->destroyPipeline(tessRenderPipelineWire);
 
         // Shutdown batch rendering
         shutdownBatchRendering();
@@ -906,6 +926,132 @@ MeshId Renderer::registerMesh(const std::vector<Vapor::VertexData>& vertices,
     return id;
 }
 
+// In-place geometry rewrite for a registered mesh — the streaming hook (e.g.
+// terrain tiles): a fixed pool of meshes is registered once and their
+// contents are rewritten as the world streams, so nothing ever leaks. The
+// counts must match registration (same-size updateBuffer contract); topology
+// changes need a fresh registerMesh instead.
+bool Renderer::updateMeshGeometry(MeshId id, const std::vector<Vapor::VertexData>& vertices,
+                                  const std::vector<Uint32>& indices) {
+    if (id >= meshes.size()) return false;
+    RenderMesh& mesh = meshes[id];
+    if (vertices.size() != mesh.vertexCount || indices.size() != mesh.indexCount) return false;
+
+    if (mesh.vertexBuffer.isValid() && !vertices.empty()) {
+        rhi->updateBuffer(mesh.vertexBuffer, vertices.data(), 0, vertices.size() * sizeof(Vapor::VertexData));
+    }
+    if (mesh.indexBuffer.isValid() && !indices.empty()) {
+        rhi->updateBuffer(mesh.indexBuffer, indices.data(), 0, indices.size() * sizeof(Uint32));
+    }
+
+    // Keep the merged MDI copy in step so the GPU-driven path sees the same
+    // world as the per-object path.
+    std::copy(vertices.begin(), vertices.end(), m_mergedVertices.begin() + mesh.vertexOffset);
+    std::copy(indices.begin(), indices.end(), m_mergedIndices.begin() + mesh.indexOffset);
+    m_mergedGeometryDirty = true;
+
+    // Refit this mesh's meshlet cluster bounds to the rewritten geometry.
+    // Streamed tiles bake WORLD coordinates into their vertices (identity
+    // transforms), so a rewrite MOVES the mesh — but the cull spheres baked at
+    // registration still sit at the placeholder tile's position, and the task
+    // shader frustum-culls every cluster the moment the camera looks at the
+    // real tile: streamed terrain simply vanishes on the meshlet path. The
+    // meshlet topology (same grid) stays valid; only the bounds move. The cone
+    // is disabled rather than refit — its axis is equally stale, and per-
+    // triangle normal work isn't worth stream-time cost for a terrain tile.
+    if (mesh.meshletCount > 0 && capabilities.meshShaders) {
+        for (Uint32 m = 0; m < mesh.meshletCount; ++m) {
+            const Vapor::Meshlet& ml = m_globalMeshlets[mesh.meshletOffset + m];
+            glm::vec3 mn(1e30f), mx(-1e30f);
+            for (Uint32 v = 0; v < ml.vertexCount; ++v) {
+                const glm::vec3& p =
+                    m_mergedVertices[m_globalMeshletVertices[ml.vertexOffset + v]].position;
+                mn = glm::min(mn, p);
+                mx = glm::max(mx, p);
+            }
+            const glm::vec3 c = (mn + mx) * 0.5f;
+            const float r = glm::length(mx - c);
+            Vapor::MeshletBounds& b = m_globalMeshletBounds[mesh.meshletOffset + m];
+            b.cullSphere = glm::vec4(c, r);
+            b.coneApex = glm::vec4(c, 0.0f);
+            b.coneAxisCutoff = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);  // w >= 1 => cone cull off
+            b.lodSphere = glm::vec4(c, r);
+            b.parentSphere = glm::vec4(c, r);
+        }
+        // Patch the live GPU array in place; if it isn't built yet (mesh
+        // registered this frame) the dirty full-rebuild covers it.
+        if (meshletBoundsBuffer.isValid() && !m_meshletsDirty) {
+            rhi->updateBuffer(meshletBoundsBuffer,
+                              &m_globalMeshletBounds[mesh.meshletOffset],
+                              static_cast<size_t>(mesh.meshletOffset) * sizeof(Vapor::MeshletBounds),
+                              static_cast<size_t>(mesh.meshletCount) * sizeof(Vapor::MeshletBounds));
+        } else {
+            m_meshletsDirty = true;
+        }
+    }
+
+    // Refit the BLAS on RT backends so rays see the new surface.
+    if (id < meshBLAS.size() && meshBLAS[id].isValid()) {
+        rhi->buildAccelerationStructure(meshBLAS[id]);
+    }
+    return true;
+}
+
+// Pack the terrain detail layers into the two shared 2D-array textures the
+// Main pass's terrain branch samples with world-space tiling. Called once by
+// TerrainSystem at terrain init (and again on regenerate — the old arrays are
+// replaced). Layer order is the shader's weight order: 0 grass, 1 rock,
+// 2 dirt, 3 snow.
+void Renderer::setTerrainDetailLayers(const std::array<std::shared_ptr<Vapor::Image>, 4>& albedoLayers,
+                                      const std::array<std::shared_ptr<Vapor::Image>, 4>& normalLayers) {
+    const auto& first = albedoLayers[0];
+    if (!first || first->width == 0 || first->width != first->height) return;
+    const Uint32 res = first->width;
+    auto usable = [&](const std::shared_ptr<Vapor::Image>& img) {
+        return img && img->width == res && img->height == res && img->channelCount == 4 &&
+            img->byteArray.size() >= static_cast<size_t>(res) * res * 4;
+    };
+    for (int i = 0; i < 4; i++) {
+        if (!usable(albedoLayers[i]) || !usable(normalLayers[i])) return;
+    }
+
+    if (terrainDetailAlbedoArray.isValid()) rhi->destroyTexture(terrainDetailAlbedoArray);
+    if (terrainDetailNormalArray.isValid()) rhi->destroyTexture(terrainDetailNormalArray);
+
+    Uint32 mips = 1;
+    for (Uint32 r = res; r > 1; r >>= 1) mips++;
+
+    TextureDesc desc;
+    desc.width = res;
+    desc.height = res;
+    desc.arrayLayers = 4;
+    desc.mipLevels = mips;  // full chain: tiled detail viewed at grazing angles
+    desc.format = PixelFormat::RGBA8_UNORM;
+    desc.usage = TextureUsage::Sampled;  // includes the transfer bits the mip blit needs
+
+    auto upload = [&](const std::array<std::shared_ptr<Vapor::Image>, 4>& layers) {
+        TextureHandle tex = rhi->createTexture(desc);
+        for (Uint32 layer = 0; layer < 4; ++layer) {
+            rhi->updateTexture(tex, layers[layer]->byteArray.data(),
+                               static_cast<size_t>(res) * res * 4, 0, layer);
+        }
+        rhi->generateMipmaps(tex);
+        return tex;
+    };
+    terrainDetailAlbedoArray = upload(albedoLayers);
+    terrainDetailNormalArray = upload(normalLayers);
+    fmt::print("Renderer: terrain detail layers staged ({}x{} x4 albedo+normal, {} mips)\n", res, res, mips);
+}
+
+void Renderer::setTerrainHeightField(float noiseFrequency, int noiseOctaves,
+                                     Uint32 seed, float heightScale) {
+    m_terrainNoiseFrequency = noiseFrequency;
+    m_terrainNoiseOctaves = noiseOctaves;
+    m_terrainSeed = seed;
+    m_terrainHeightScale = heightScale;
+    m_hasTerrainHeightField = true;
+}
+
 MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     RenderMaterial material;
 
@@ -926,6 +1072,7 @@ MaterialId Renderer::registerMaterial(const MaterialDataInput& materialData) {
     material.clearcoat = materialData.clearcoat;
     material.clearcoatGloss = materialData.clearcoatGloss;
     material.transmission = materialData.transmission;
+    material.shaderModel = materialData.shaderModel;
     material.alphaMode = materialData.alphaMode;
     material.alphaCutoff = materialData.alphaCutoff;
     material.doubleSided = materialData.doubleSided;
@@ -1289,6 +1436,13 @@ void Renderer::setupDefaultRenderGraph() {
     renderGraph.addPass("Tess",
         [](Renderer& r) { r.tessRenderPass(); });
 
+    // Streamed grass ring (TerrainSystem): instanced blades drawn per resident
+    // cell over the scene color/depth. Writes depth (opaque, distance fade
+    // shrinks blades geometrically), so the sky/fog passes after it
+    // treat grass as ordinary scene geometry. After Tess so blades depth-test
+    // against tessellated geometry like everything else.
+    renderGraph.addPass("Grass",
+        [](Renderer& r) { r.grassPass(); });
     // Raymarched micro-voxel volumes (VoxelVolumeComponent). Box-rasterized
     // two-level DDA that writes true hit depth into depthStencilRT, so it must
     // run after Main (loads scene color+depth) and before SkyAtmosphere —
@@ -1572,6 +1726,21 @@ void Renderer::updateBuffers() {
             data.clearcoatGloss = mat.clearcoatGloss;
             data.iblEnabled = mat.useIBL ? 1.0f : 0.0f;  // panel "Use IBL"
             data.transmission = mat.transmission;
+            data.shaderModel = static_cast<float>(mat.shaderModel);
+            // Terrain (shaderModel == 1) never uses the Disney lobes, so pack the
+            // height-field descriptor into them: RHIMain.frag's terrain branch
+            // reconstructs a per-pixel normal by re-evaluating heightAt(). Done
+            // here because set1 buffers, push constants, and the 112-byte struct
+            // tail are all full — the material struct is the only spare channel.
+            // The seed is a full 32-bit value (default 20260705u > 2^24), so it
+            // is carried as raw bits, not a lossy float cast; the shader reads it
+            // back with floatBitsToUint.
+            if (data.shaderModel == 1.0f && m_hasTerrainHeightField) {
+                data.subsurface   = m_terrainNoiseFrequency;
+                data.specular     = m_terrainHeightScale;
+                data.specularTint = static_cast<float>(m_terrainNoiseOctaves);
+                std::memcpy(&data.anisotropic, &m_terrainSeed, sizeof(float));
+            }
             materialDataArray.push_back(data);
         }
         rhi->updateBuffer(materialUniformBuffer, materialDataArray.data(), 0,
@@ -1773,8 +1942,16 @@ void Renderer::mainRenderPass() {
     // Begin render pass
     rhi->beginRenderPass(renderPassDesc);
 
-    // Bind pipeline
-    rhi->bindPipeline(mainPipeline);
+    // Wireframe (debug): with dynamic polygon mode (Metal always; Vulkan with
+    // extended_dynamic_state3) one setFillMode covers EVERY main-pass draw path
+    // (bindless / MDI / meshlet included). Without it (older Vulkan drivers),
+    // fall back to the baked Line pipeline twin — which only covers the default
+    // bound path, since the GPU-driven variants have no twin.
+    if (capabilities.dynamicPolygonMode) {
+        rhi->setFillMode(wireframe ? PolygonMode::Line : PolygonMode::Fill);
+    }
+    const bool wireTwin = wireframe && !capabilities.dynamicPolygonMode && mainPipelineWire.isValid();
+    rhi->bindPipeline(wireTwin ? mainPipelineWire : mainPipeline);
 
     // Bind common buffers (same for all drawables).
     // IMPORTANT: vertex and fragment shaders have INDEPENDENT buffer index
@@ -1884,6 +2061,18 @@ void Renderer::mainRenderPass() {
         if (irradianceMap.isValid()) rhi->setTexture(0, 10, irradianceMap, clampSampler);
         if (prefilterMap.isValid()) rhi->setTexture(0, 11, prefilterMap, clampSampler);
         if (brdfLUTTex.isValid())    rhi->setTexture(0, 12, brdfLUTTex, clampSampler);
+        // Terrain detail-layer arrays (set2 b13/b14): override the Metal-contract
+        // 2D defaults the shared block put at these slots — on Vulkan they are the
+        // sampler2DArray detail layers RHIMain.frag's terrain branch samples. Bind
+        // the staged arrays when a terrain surface exists, else the default white
+        // array so the descriptor stays valid AND type-correct for every draw
+        // (a Standard draw keeps them bound but never samples them). Bound here in
+        // the common section, so every geometry path (incl. Bindless MDI) inherits
+        // it.
+        rhi->setTexture(0, 13, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
+        rhi->setTexture(0, 14, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
         // Perf-isolation debug flags -> RHIMain.frag push offset 96 (binding 2).
         // Vulkan-only: on Metal, fragment buffer(2) is the CLUSTER buffer, so
         // pushing here would corrupt it (the old billions-of-iterations hang).
@@ -1922,6 +2111,16 @@ void Renderer::mainRenderPass() {
         // MUST be bound (an unbound sample reads 0 -> whole scene black). Use the
         // computed contact RT when SSCS is on, else white (min() no-op).
         rhi->setTexture(0, 15, (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex, clampSampler);
+        // Terrain detail-layer arrays at the Metal contract slots 18/19 (the MSL
+        // twin of Vulkan's set2 b13/b14). Default white array keeps the
+        // texture2d_array args valid when no terrain is staged; the shader
+        // samples them only in the shaderModel == 1 branch. (Sampler slots >= 16
+        // are skipped by the RHI-Metal workaround — the shader uses a constexpr
+        // sampler for these, so that's fine.)
+        rhi->setTexture(0, 18, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
+        rhi->setTexture(0, 19, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                  : defaultDetailArrayTexture, defaultSampler);
         if (capabilities.raytracing) {
             // RT kernel outputs replace the neutral whites —
             // texShadow(7), texPointShadow(13), gibsGI(14).
@@ -2136,6 +2335,14 @@ void Renderer::mainRenderPass() {
             // RT hard-shadow near region (white when RT off -> near branch is a
             // no-op since cascadeSplits.x/rtEnd is also 0, matching the forward pass).
             rhi->setTexture(0, 11, (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, clampSampler);
+            // Terrain detail-layer arrays (texture 12/13): the meshlet fragment's
+            // shaderModel == 1 branch splats them exactly like the forward pass's
+            // texture(18)/(19). Default white array keeps the texture2d_array args
+            // type-correct when no terrain is staged (never sampled then).
+            rhi->setTexture(0, 12, terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                                      : defaultDetailArrayTexture, defaultSampler);
+            rhi->setTexture(0, 13, terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                                      : defaultDetailArrayTexture, defaultSampler);
             struct MeshletShadeFlags { Uint32 shadowRGB, gibsOn; float reflOn, reflIntensity, refrOn, refrIntensity; };
             MeshletShadeFlags sf{
                 (capabilities.raytracing && stochasticShadowsEnabled) ? 1u : 0u,
@@ -2218,7 +2425,7 @@ void Renderer::mainRenderPass() {
             // in-flight frames), and bind it at buffer(14).
             if (!bindlessSystemTable.isValid()) {
                 bindlessSystemTable = rhi->createTextureArgumentTable(
-                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/12);
+                    fragmentShaderBindless, /*bufferIndex=*/14, 1, /*texturesPerEntry=*/14);
             }
             if (bindlessSystemTable.isValid()) {
                 TextureHandle whiteTex = textures[defaultWhiteTexture].handle;
@@ -2227,7 +2434,7 @@ void Renderer::mainRenderPass() {
                 bool reflOn = rtReflectionsEnabled && capabilities.raytracing && reflectionRT.isValid();
                 bool refrOn = rtRefractionsEnabled && sceneHasTransmission &&
                               capabilities.raytracing && refractionRT.isValid();
-                const TextureHandle sys[12] = {
+                const TextureHandle sys[14] = {
                     (aoEnabled && aoRT.isValid()) ? aoRT : whiteTex,                     // 0 texAO
                     (capabilities.raytracing && shadowRT.isValid()) ? shadowRT : whiteTex, // 1 texShadow
                     (iblReady && irradianceMap.isValid()) ? irradianceMap : defaultBlackCubemapTex, // 2
@@ -2244,8 +2451,17 @@ void Renderer::mainRenderPass() {
                     (sscsEnabled && sscsRT.isValid()) ? sscsRT : whiteTex,               // 9 texSSCS
                     reflOn ? reflectionRT : blackTex,                                    // 10 texReflection
                     refrOn ? refractionRT : blackTex,                                    // 11 texRefraction
+                    // Terrain detail arrays — the ICB path's stand-in for the
+                    // bound path's texture(18)/(19) args; the fragment's
+                    // shaderModel == 1 branch splats them. Default white array
+                    // keeps the texture2d_array slots type-correct (never
+                    // sampled without a terrain material).
+                    terrainDetailAlbedoArray.isValid() ? terrainDetailAlbedoArray
+                                                       : defaultDetailArrayTexture,     // 12 terrainDetailAlbedo
+                    terrainDetailNormalArray.isValid() ? terrainDetailNormalArray
+                                                       : defaultDetailArrayTexture,     // 13 terrainDetailNormal
                 };
-                for (Uint32 i = 0; i < 12; ++i) {
+                for (Uint32 i = 0; i < 14; ++i) {
                     if (sys[i].id != m_bindlessSysCache[i].id) {
                         rhi->writeTextureArgumentTable(bindlessSystemTable, 0, i, sys[i]);
                         m_bindlessSysCache[i] = sys[i];
@@ -2260,9 +2476,12 @@ void Renderer::mainRenderPass() {
                 glm::vec2 refrParams(refrOn ? 1.0f : 0.0f, rtRefractionIntensity);
                 rhi->setFragmentBytes(&refrParams, sizeof(glm::vec2), 18);
             }
-            // Replay the GPU-encoded command buffer (commands carry their own
-            // index-buffer regions).
-            rhi->executeICB(sceneICB, totalInstanceCount);
+            // Replay the GPU-encoded command buffer. The commands carry their
+            // own index-buffer regions — an INDIRECT reference, so the merged
+            // index buffer must ride along for useResource/lifetime (see
+            // executeICB); without it, terrain streaming's merged-buffer
+            // rebuilds leave in-flight frames drawing from a freed buffer.
+            rhi->executeICB(sceneICB, totalInstanceCount, mergedIndexBuffer);
         } else {
             // One native multi-draw over the cull-written args, all materials.
             rhi->bindIndexBuffer(mergedIndexBuffer, 0);
@@ -2587,6 +2806,20 @@ void Renderer::prePass() {
     rp.loadDepth = false;
     rp.clearDepth = 1.0f;
     rhi->beginRenderPass(rp);
+
+    // Wireframe must match the main pass here too: the pre-pass writes the depth
+    // the SkyAtmosphere pass tests against, so a FILLED pre-pass would stamp
+    // solid depth over every terrain pixel — the sky then can't paint the
+    // triangle interiors, and they keep the colorRT clear colour (the cyan the
+    // wireframe view showed between the lines). Drawing the pre-pass in Line
+    // mode too leaves depth only along the edges, so the sky fills the gaps and
+    // the wireframe reads as lines over the real background. Dynamic-polygon-
+    // mode backends only (Metal always; Vulkan with eds3) — the baked Line twin
+    // fallback has no pre-pass variant, but it also can't reach the GPU-driven
+    // pre-pass paths, so this is the whole story on those devices.
+    if (capabilities.dynamicPolygonMode) {
+        rhi->setFillMode(wireframe ? PolygonMode::Line : PolygonMode::Fill);
+    }
 
     // Meshlet Option A: GPU-driven depth+normal pre-pass via the SAME task+mesh
     // shaders the main meshlet pass uses, so the pre-pass depth matches exactly
@@ -2969,6 +3202,12 @@ void Renderer::ensureMergedGeometry() {
 
     if (mergedVertexBuffer.isValid()) rhi->destroyBuffer(mergedVertexBuffer);
     if (mergedIndexBuffer.isValid()) rhi->destroyBuffer(mergedIndexBuffer);
+
+    // The scene ICB survives this rebuild on purpose: its commands are fully
+    // re-encoded by gpuCullPass every frame (against whatever merged buffers
+    // exist by then), and in-flight frames replaying commands that reference
+    // the buffers destroyed above are kept safe by executeICB's useResource
+    // (the encoder reference retains the old buffer until those frames end).
 
     BufferDesc vbDesc;
     vbDesc.size = m_mergedVertices.size() * sizeof(Vapor::VertexData);
@@ -3999,6 +4238,12 @@ void Renderer::shadowPass() {
     // while cascades started at rtEnd, leaving [nearShadowEnd, rtEnd] unshadowed
     // because RHIMain.frag never consumed the RT shadow.)
     const float rtEnd = pssmRTMaxDist;
+    // Cap the cascade far well short of the (possibly tens-of-km) camera far
+    // plane so the 3 cascades pack their resolution into the range shadows are
+    // actually visible in; pixels past shadowFar fall outside every cascade and
+    // the frag returns "lit" (fog/aerial perspective covers them). Clamped
+    // above rtEnd so there's always a positive cascade range.
+    const float shadowFar = glm::clamp(pssmShadowDistance, rtEnd + 1.0f, farClip);
 
     // Cascade split distances (view space). splits[0] = near end, splits[3] = far.
     float splits[4];
@@ -4006,8 +4251,8 @@ void Renderer::shadowPass() {
     const float lambda = 0.7f;  // 0 = uniform, 1 = logarithmic
     for (int i = 1; i <= 3; i++) {
         float p = float(i) / 3.0f;
-        float logS = rtEnd * std::pow(farClip / glm::max(rtEnd, 0.1f), p);
-        float uniS = rtEnd + (farClip - rtEnd) * p;
+        float logS = rtEnd * std::pow(shadowFar / glm::max(rtEnd, 0.1f), p);
+        float uniS = rtEnd + (shadowFar - rtEnd) * p;
         splits[i] = lambda * logS + (1.0f - lambda) * uniS;
     }
 
@@ -4026,11 +4271,15 @@ void Renderer::shadowPass() {
 
     PSSMRenderData gpuData;
     gpuData.cascadeSplits = glm::vec4(splits[0], splits[1], splits[2], splits[3]);
-    gpuData.blendRange = (farClip - rtEnd) * 0.05f;
+    gpuData.blendRange = (shadowFar - rtEnd) * 0.05f;
+
+    // Per-cascade bounding spheres, kept for the caster culling below.
+    glm::vec3 cascadeCtr[3];
+    float cascadeRad[3] = { 0.0f, 0.0f, 0.0f };
 
     for (int ci = 0; ci < 3; ci++) {
-        float splitNear = glm::clamp(splits[ci],     nearClip, farClip);
-        float splitFar  = glm::clamp(splits[ci + 1], nearClip, farClip);
+        float splitNear = glm::clamp(splits[ci],     nearClip, shadowFar);
+        float splitFar  = glm::clamp(splits[ci + 1], nearClip, shadowFar);
         float nearNDCz = viewDepthToNDCz(splitNear);
         float farNDCz  = viewDepthToNDCz(splitFar);
 
@@ -4078,6 +4327,13 @@ void Renderer::shadowPass() {
 
         glm::mat4 lightProj = glm::orthoZO(-sphereRadius, sphereRadius, -sphereRadius, sphereRadius, minDist, maxDist);
         gpuData.lightSpaceMatrices[ci] = lightProj * lightView;
+        cascadeCtr[ci] = snapped;
+        // The ortho above is a SQUARE of half-edge sphereRadius, not the
+        // inscribed sphere, so the caster cull must bound the square: its
+        // half-diagonal. Using sphereRadius dropped casters in the corner
+        // region that do project into the map — shadows went missing (and
+        // popped at cascade boundaries, where the next cascade still had them).
+        cascadeRad[ci] = sphereRadius * 1.41421356f;
     }
 
     // Independent near-field shadow map for the [near, rtEnd] sub-frustum.
@@ -4091,6 +4347,8 @@ void Renderer::shadowPass() {
     gpuData.pcfSampleCount = pssmPcfSampleCount;
     gpuData.cascadeBlendRange = pssmCascadeBlendRange;
     gpuData.debugVisualize = pssmDebugVisualize ? 1u : 0u;
+    glm::vec3 nearCtr(0.0f);
+    float nearRad = 0.0f;  // bounding radius of the near-map slice (for culling)
     if (rtEnd > nearClip) {
         float nNDC = viewDepthToNDCz(glm::clamp(nearClip, nearClip, farClip));
         float fNDC = viewDepthToNDCz(glm::clamp(rtEnd,    nearClip, farClip));
@@ -4124,10 +4382,47 @@ void Renderer::shadowPass() {
         mn -= (mx - mn);
         gpuData.nearLightMatrix = glm::orthoZO(-extent * 0.5f, extent * 0.5f,
                                                -extent * 0.5f, extent * 0.5f, mn, mx) * lv;
+        nearCtr = ctrWorld;
+        nearRad = extent * 0.7072f;  // half-diagonal of the square light-space box
     }
 
     // Upload all cascade matrices once; the shadow VS indexes by cascadeIndex.
     rhi->updateBuffer(pssmDataBuffer, &gpuData, 0, sizeof(gpuData));
+
+    // Shadow-caster set, with world bounding spheres for the per-map culling
+    // below. A directional caster shadows a map iff its sphere, swept along the
+    // light direction, touches the map's bounding sphere — i.e. the caster lies
+    // inside the infinite light-axis CYLINDER around the map's centre (remove
+    // the along-light component of the offset, compare the rest against the
+    // radius sum). Without this every cascade + the near map re-recorded EVERY
+    // drawable: 4 passes x the whole 10 km tile grid + scatter, thousands of
+    // per-draw bind/draw pairs a frame — the "CPU shadow > 10 ms" cost on
+    // MoltenVK (whose per-command overhead is far above native). Cascade 0/1
+    // cover tens-to-hundreds of metres, so almost everything culls.
+    struct ShadowCaster {
+        glm::vec3 center;
+        float radius;
+        Uint32 drawableIdx;
+        Uint32 iid;
+    };
+    static std::vector<ShadowCaster> shadowCasters;  // scratch, reused per frame
+    shadowCasters.clear();
+    shadowCasters.reserve(frameDrawables.size());
+    for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
+        const Drawable& drawable = frameDrawables[drawableIdx];
+        if (!drawable.castShadow) continue;
+        auto it = drawableToInstanceID.find(drawableIdx);
+        if (it == drawableToInstanceID.end()) continue;
+        shadowCasters.push_back({ (drawable.aabbMin + drawable.aabbMax) * 0.5f,
+                                  glm::length(drawable.aabbMax - drawable.aabbMin) * 0.5f,
+                                  drawableIdx, it->second });
+    }
+    const auto casterTouches = [&](const ShadowCaster& c, const glm::vec3& ctr, float rad) {
+        glm::vec3 off = c.center - ctr;
+        off -= lightDir * glm::dot(off, lightDir);
+        const float r = rad + c.radius;
+        return glm::dot(off, off) <= r * r;
+    };
 
     // Render scene depth into each cascade layer (depth only).
     for (Uint32 ci = 0; ci < 3; ci++) {
@@ -4163,17 +4458,14 @@ void Renderer::shadowPass() {
         if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
             rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
 
-        // ALL drawables, not the camera-visible set: casters outside the view
-        // frustum must still render into the cascades or their shadows vanish
-        // when they leave the screen. (updateBuffers uploads instance data for
-        // every drawable — culled ones follow the visible prefix.)
-        for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
-            const Drawable& drawable = frameDrawables[drawableIdx];
-            if (!drawable.castShadow) continue;
+        // Casters from the whole submitted set, NOT the camera-visible one
+        // (casters outside the view frustum must still render into the
+        // cascades or their shadows vanish when they leave the screen) —
+        // culled per cascade by the light-axis cylinder test above.
+        for (const ShadowCaster& caster : shadowCasters) {
+            if (!casterTouches(caster, cascadeCtr[ci], cascadeRad[ci])) continue;
+            const Drawable& drawable = frameDrawables[caster.drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
-            auto it = drawableToInstanceID.find(drawableIdx);
-            if (it == drawableToInstanceID.end()) continue;
-            Uint32 iid = it->second;
             // Alpha-cutout casters (MASK) bind their albedo for the fragment
             // discard — Metal via 3d_pssm_shadow_depth, Vulkan via
             // ShadowDepth.frag. Opaque casters need no texture (pure depth).
@@ -4182,7 +4474,7 @@ void Renderer::shadowPass() {
                 bindMaterialAlbedo(drawable.material);
             }
             if (!shadowPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
-            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
+            rhi->setVertexBytes(&caster.iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
                 rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
@@ -4220,19 +4512,19 @@ void Renderer::shadowPass() {
         if (nearPullsMerged) rhi->bindVertexBuffer(mergedVertexBuffer, 3, 0);
         if (defaultWhiteTexture < textures.size() && textures[defaultWhiteTexture].handle.isValid())
             rhi->setTexture(0, 0, textures[defaultWhiteTexture].handle, textures[defaultWhiteTexture].sampler);
-        for (Uint32 drawableIdx = 0; drawableIdx < frameDrawables.size(); drawableIdx++) {
-            const Drawable& drawable = frameDrawables[drawableIdx];
-            if (!drawable.castShadow) continue;
+        // Same cylinder culling as the cascades, against the near slice's
+        // bounding sphere — this map covers tens of metres, so nearly the
+        // whole caster set drops out.
+        for (const ShadowCaster& caster : shadowCasters) {
+            if (!casterTouches(caster, nearCtr, nearRad)) continue;
+            const Drawable& drawable = frameDrawables[caster.drawableIdx];
             const RenderMesh& mesh = meshes[drawable.mesh];
-            auto it = drawableToInstanceID.find(drawableIdx);
-            if (it == drawableToInstanceID.end()) continue;
-            Uint32 iid = it->second;
             if (drawable.material < materials.size() &&
                 materials[drawable.material].alphaMode == AlphaMode::MASK) {
                 bindMaterialAlbedo(drawable.material);  // albedo for the alpha-cutout
             }
             if (!nearPullsMerged && mesh.vertexBuffer.isValid()) rhi->bindVertexBuffer(mesh.vertexBuffer, 3, 0);
-            rhi->setVertexBytes(&iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
+            rhi->setVertexBytes(&caster.iid, sizeof(Uint32), 4);  // instanceID -> push offset 0
             if (mesh.indexBuffer.isValid()) {
                 rhi->bindIndexBuffer(mesh.indexBuffer, 0);
                 rhi->drawIndexed(mesh.indexCount, 1, 0, 0, 0);
@@ -4833,6 +5125,99 @@ void Renderer::volumeRaymarchPass() {
     rhi->endRenderPass();
 
     std::swap(colorRT, tempColorRT);  // colorRT now holds the composited volume
+}
+
+// ── Grass ring ──────────────────────────────────────────────────────────────
+// Fixed instance pool: cellSlots x bladesPerSlot blades. TerrainSystem streams
+// cells by rewriting slots in place — the same never-allocate-while-streaming
+// contract as the terrain tile pools.
+bool Renderer::configureGrassPool(Uint32 cellSlots, Uint32 bladesPerSlot) {
+    if (!grassPipeline.isValid()) return false;  // backend has no grass pass
+    if (cellSlots == 0 || bladesPerSlot == 0) return false;
+    if (grassInstanceBuffer.isValid()) rhi->destroyBuffer(grassInstanceBuffer);
+    BufferDesc bd;
+    bd.size = static_cast<size_t>(cellSlots) * bladesPerSlot * sizeof(Vapor::GrassBladeGpu);
+    bd.usage = BufferUsage::Storage;
+    bd.memoryUsage = MemoryUsage::GPU;
+    grassInstanceBuffer = rhi->createBuffer(bd);
+    grassSlotCount = cellSlots;
+    grassBladesPerSlot = bladesPerSlot;
+    grassDraws.clear();
+    if (!grassParamsBuffer.isValid()) {
+        BufferDesc pd;
+        pd.size = sizeof(Vapor::GrassParamsGpu);
+        pd.usage = BufferUsage::Storage;
+        pd.memoryUsage = MemoryUsage::GPU;
+        grassParamsBuffer = rhi->createBuffer(pd);
+    }
+    fmt::print("Renderer: grass pool {} cells x {} blades ({} MB)\n", cellSlots, bladesPerSlot,
+               bd.size / (1024 * 1024));
+    return grassInstanceBuffer.isValid();
+}
+
+void Renderer::updateGrassCell(Uint32 slot, const std::vector<Vapor::GrassBladeGpu>& blades) {
+    if (!grassInstanceBuffer.isValid() || slot >= grassSlotCount || blades.empty()) return;
+    const size_t count = std::min<size_t>(blades.size(), grassBladesPerSlot);
+    rhi->updateBuffer(grassInstanceBuffer, blades.data(),
+                      static_cast<size_t>(slot) * grassBladesPerSlot * sizeof(Vapor::GrassBladeGpu),
+                      count * sizeof(Vapor::GrassBladeGpu));
+}
+
+void Renderer::setGrassDraws(const std::vector<Vapor::GrassCellDraw>& draws,
+                             const Vapor::GrassSettingsData& settings) {
+    grassDraws = draws;
+    grassSettings = settings;
+}
+
+// Streamed grass blades: one instanced draw per resident cell into the scene
+// color/depth (depth-tested against the raster scene, writes depth so the sky
+// and fog composite correctly). Distance fade shrinks blades to zero height —
+// no blending, no sorting. Runs right after the Main pass.
+void Renderer::grassPass() {
+    if (!grassEnabled || !grassPipeline.isValid() || !grassInstanceBuffer.isValid() ||
+        !grassParamsBuffer.isValid() || grassDraws.empty() || !colorRT.isValid() ||
+        !depthStencilRT.isValid()) {
+        return;
+    }
+
+    // Self-contained wind clock (the renderer has no global time source).
+    const auto now = std::chrono::steady_clock::now();
+    if (grassLastTick.time_since_epoch().count() != 0) {
+        grassTimeSeconds += std::chrono::duration<float>(now - grassLastTick).count();
+    }
+    grassLastTick = now;
+
+    glm::vec3 sunDir = atmosphereData.sunDirection;
+    sunDir = (glm::length(sunDir) > 1e-6f) ? glm::normalize(sunDir) : glm::vec3(0.0f, 1.0f, 0.0f);
+    Vapor::GrassParamsGpu p {};
+    p.viewProj = currentCamera.proj * currentCamera.view;
+    p.cameraPosTime = glm::vec4(currentCamera.position, grassTimeSeconds);
+    p.wind = glm::vec4(grassSettings.windDir, grassSettings.windStrength, grassSettings.windSpeed);
+    p.rootColor = glm::vec4(grassSettings.rootColor, grassSettings.fadeStart);
+    p.tipColor = glm::vec4(grassSettings.tipColor, grassSettings.fadeEnd);
+    p.sun = glm::vec4(sunDir, atmosphereData.sunIntensity);
+    p.sunColor = glm::vec4(atmosphereData.sunColor, 0.0f);
+    rhi->updateBuffer(grassParamsBuffer, &p, 0, sizeof(Vapor::GrassParamsGpu));
+
+    RenderPassDesc rp;
+    rp.name = "Grass";
+    rp.colorAttachments.push_back(colorRT);
+    rp.clearColors.push_back(clearColor);
+    rp.loadColor.push_back(true);   // composite over the rendered scene
+    rp.depthAttachment = depthStencilRT;
+    rp.loadDepth = true;            // test/write against the scene depth
+    rhi->beginRenderPass(rp);
+    rhi->bindPipeline(grassPipeline);
+    rhi->setVertexBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
+    rhi->setVertexBuffer(1, grassInstanceBuffer);
+    rhi->setFragmentBuffer(0, grassParamsBuffer, 0, sizeof(Vapor::GrassParamsGpu));
+    for (const auto& cell : grassDraws) {
+        if (cell.count == 0 || cell.slot >= grassSlotCount) continue;
+        // 15 vertices per blade (two tapered quads + tip); base instance selects
+        // the cell's slot range (gl_InstanceIndex / Metal instance_id include it).
+        rhi->draw(15, std::min(cell.count, grassBladesPerSlot), 0, cell.slot * grassBladesPerSlot);
+    }
+    rhi->endRenderPass();
 }
 
 // ============================================================================
@@ -5990,6 +6375,25 @@ void Renderer::createDefaultResources() {
         textures.push_back(tex);
     }
 
+    // Default 4-layer white array texture for the terrain detail-layer slots
+    // (set2 b13/b14). Keeps those sampler2DArray descriptors valid and
+    // type-correct on every Main-pass draw; the terrain branch (shaderModel==1)
+    // only samples it when no real detail arrays are staged, and those override
+    // it when a terrain surface exists.
+    {
+        TextureDesc texDesc;
+        texDesc.width = 1;
+        texDesc.height = 1;
+        texDesc.arrayLayers = 4;
+        texDesc.format = PixelFormat::RGBA8_UNORM;
+        texDesc.usage = TextureUsage::Sampled;
+        defaultDetailArrayTexture = rhi->createTexture(texDesc);
+        const Uint32 whitePixel = 0xFFFFFFFF;
+        for (Uint32 layer = 0; layer < 4; ++layer) {
+            rhi->updateTexture(defaultDetailArrayTexture, &whitePixel, sizeof(Uint32), 0, layer);
+        }
+    }
+
     // Create default ORM texture: occlusion=1, roughness=1, metallic=0. The
     // PBR shaders read occlusion from .r, roughness from .g, metallic from .b,
     // so a material with no ORM map shades as a fully-rough dielectric (not a
@@ -6588,7 +6992,19 @@ void Renderer::createRenderPipeline() {
     pipelineDesc.hasDepthAttachment = true;
     pipelineDesc.depthAttachmentFormat = PixelFormat::Depth32Float;
 
+    // Wireframe: prefer dynamic fill mode (Metal always; Vulkan with
+    // extended_dynamic_state3) — one pipeline covers wireframe on every draw
+    // path via RHI::setFillMode. Only when the device lacks dynamic polygon
+    // mode do we fall back to a baked Line pipeline twin (Vulkan default path).
+    pipelineDesc.dynamicPolygonMode = capabilities.dynamicPolygonMode;
     mainPipeline = rhi->createPipeline(pipelineDesc);
+
+    if (backend == GraphicsBackend::Vulkan && capabilities.wireframe &&
+        !capabilities.dynamicPolygonMode) {
+        PipelineDesc wireDesc = pipelineDesc;
+        wireDesc.polygonMode = PolygonMode::Line;
+        mainPipelineWire = rhi->createPipeline(wireDesc);
+    }
 
     // Bindless MDI twin: same pipeline with the bindless fragment variant.
     //   Metal:  fragmentMain specialized with kBindlessMaterials (argument
@@ -6898,6 +7314,45 @@ void Renderer::createRenderPipeline() {
             volumeRaymarchPipeline = makeFullscreenFragPipeline(
                 "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
 
+            // Grass ring: procedural blades pulled from the instance pool (no
+            // vertex buffer), depth tested + written, cull off (blades are
+            // two-sided). Color-only into colorRT.
+            {
+                std::string gVert = readFile("shaders/Grass.vert.spv");
+                std::string gFrag = readFile("shaders/Grass.frag.spv");
+                if (!gVert.empty() && !gFrag.empty()) {
+                    ShaderDesc vd;
+                    vd.stage = ShaderStage::Vertex;
+                    vd.code = gVert.data();
+                    vd.codeSize = gVert.size();
+                    vd.entryPoint = "main";
+                    grassVS = rhi->createShader(vd);
+                    ShaderDesc fd;
+                    fd.stage = ShaderStage::Fragment;
+                    fd.code = gFrag.data();
+                    fd.codeSize = gFrag.size();
+                    fd.entryPoint = "main";
+                    grassFS = rhi->createShader(fd);
+
+                    PipelineDesc d;
+                    d.vertexShader = grassVS;
+                    d.fragmentShader = grassFS;
+                    d.vertexLayout.stride = 0;
+                    d.vertexLayout.attributes = {};
+                    d.topology = PrimitiveTopology::TriangleList;
+                    d.blendMode = BlendMode::Opaque;
+                    d.depthTest = true;
+                    d.depthWrite = true;
+                    d.depthCompareOp = CompareOp::Less;
+                    d.cullMode = CullMode::None;
+                    d.sampleCount = 1;
+                    d.hasDepthAttachment = true;
+                    d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                    d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                    grassPipeline = rhi->createPipeline(d);
+                }
+            }
+
             // MicroVoxel primary: box-rasterized voxel DDA. Not the fullscreen
             // lambda — it draws AABB cubes (cull off, camera may sit inside)
             // and writes gl_FragDepth, so depth test AND write are on.
@@ -7036,6 +7491,11 @@ void Renderer::createRenderPipeline() {
             };
             // GPU-driven rendering: frustum-cull compute pass.
             gpuCullPipeline = makeCompute("shaders/GpuCull.comp.spv", gpuCullShader);
+
+            // Adaptive tessellation (CBT/LEB): the GLSL twins of the Metal
+            // compute chain + the instanced draw path (no mesh/task route on
+            // Vulkan yet — tessMeshPathActive() falls back on its own).
+            createTessellationPipelinesVulkan();
 
             particleForcePipeline     = makeCompute("shaders/ParticleForce.comp.spv", particleForceShader);
             particleIntegratePipeline = makeCompute("shaders/ParticleIntegrate.comp.spv", particleIntegrateShader);
@@ -7471,6 +7931,42 @@ void Renderer::createRenderPipeline() {
         volumeRaymarchPipeline = makeMetalPass("shaders/3d_volume_raymarch.metal", "volumeRaymarchVertex", "volumeRaymarchFragment",
                                                BlendMode::Opaque, { PixelFormat::RGBA16_FLOAT }, false, CompareOp::Less);
 
+        // Grass ring (Metal twin of the Vulkan Grass pipeline): procedural
+        // blades from the instance pool, depth write on, cull off.
+        {
+            std::string grassCode = readFile("shaders/3d_grass.metal");
+            if (!grassCode.empty()) {
+                ShaderDesc vd;
+                vd.stage = ShaderStage::Vertex;
+                vd.code = grassCode.data();
+                vd.codeSize = grassCode.size();
+                vd.entryPoint = "grassVertex";
+                grassVS = rhi->createShader(vd);
+                ShaderDesc fd;
+                fd.stage = ShaderStage::Fragment;
+                fd.code = grassCode.data();
+                fd.codeSize = grassCode.size();
+                fd.entryPoint = "grassFragment";
+                grassFS = rhi->createShader(fd);
+
+                PipelineDesc d;
+                d.vertexShader = grassVS;
+                d.fragmentShader = grassFS;
+                d.vertexLayout.stride = 0;
+                d.vertexLayout.attributes = {};
+                d.topology = PrimitiveTopology::TriangleList;
+                d.blendMode = BlendMode::Opaque;
+                d.depthTest = true;
+                d.depthWrite = true;
+                d.depthCompareOp = CompareOp::Less;
+                d.cullMode = CullMode::None;
+                d.sampleCount = 1;
+                d.hasDepthAttachment = true;
+                d.depthAttachmentFormat = PixelFormat::Depth32Float;
+                d.colorAttachmentFormats = { PixelFormat::RGBA16_FLOAT };
+                grassPipeline = rhi->createPipeline(d);
+            }
+        }
         // MicroVoxel primary: box-rasterized voxel DDA. Not makeMetalPass —
         // it needs depth WRITE (the fragment returns [[depth(any)]] so voxels
         // depth-composite with the raster scene) and cull off (the camera may
@@ -7971,6 +8467,7 @@ void Renderer::stage(std::shared_ptr<RenderScene> scene) {
                 matData.clearcoat = mesh->material->clearcoat;
                 matData.clearcoatGloss = mesh->material->clearcoatGloss;
                 matData.transmission = mesh->material->transmission;
+                matData.shaderModel = static_cast<Uint32>(mesh->material->materialShader);
                 matData.alphaMode = mesh->material->alphaMode;
                 matData.alphaCutoff = mesh->material->alphaCutoff;
                 matData.doubleSided = mesh->material->doubleSided;
@@ -8625,6 +9122,11 @@ void Renderer::drawGraphicsImGui() {
                 if (ImGui::Combo("PCF samples", &idx, pcfLabels, 4)) pssmPcfSampleCount = pcfValues[idx];
             }
             ImGui::SliderFloat("Cascade blend", &pssmCascadeBlendRange, 0.0f, 10.0f);
+            // Cascade coverage cap, decoupled from the camera far plane — the
+            // fix for distant open-world terrain reading as unshadowed (see
+            // pssmShadowDistance). Lower = crisper near/mid shadows; beyond it
+            // the ground is lit (fog hides the handover).
+            ImGui::SliderFloat("Shadow distance", &pssmShadowDistance, 200.0f, 8000.0f);
             ImGui::Checkbox("Visualize cascades", &pssmDebugVisualize);
             if (TextureHandle vt = capabilities.raytracing ? shadowRT : debugView("nearShadow", nearShadowMap, TextureSwizzle::RRR1, 0); vt.isValid()) {
                 if (void* id = getImGuiTextureID(vt)) {
@@ -8967,6 +9469,24 @@ void Renderer::drawGraphicsImGui() {
         ImGui::TreePop();
     }
 
+    if (ImGui::TreeNode("Terrain")) {
+        ImGui::Text("Detail layers: %s", terrainDetailAlbedoArray.isValid() ? "staged" : "none");
+        ImGui::Checkbox("Grass", &grassEnabled);
+        Uint32 grassBlades = 0;
+        for (const auto& cell : grassDraws) grassBlades += cell.count;
+        ImGui::Text("Grass cells %zu, blades %u", grassDraws.size(), grassBlades);
+        // Adaptive-tessellation debug: leaf count, freeze split/merge, split
+        // threshold, and the wireframe view that makes the subdivision visible.
+        if (!m_tessInstances.empty()) {
+            ImGui::Separator();
+            ImGui::Checkbox("Wireframe (I)", &wireframe);
+            ImGui::Checkbox("Freeze tessellation", &tessFreeze);
+            ImGui::SliderFloat("Split (px)", &tessSplitPixels, 8.0f, 256.0f);
+        } else {
+            ImGui::Checkbox("Wireframe (I)", &wireframe);
+        }
+        ImGui::TreePop();
+    }
     if (ImGui::TreeNode("MicroVoxel")) {
         ImGui::Checkbox("Enabled", &microVoxelEnabled);
         Uint64 solid = 0, dropped = 0;
@@ -9972,6 +10492,14 @@ void Renderer::renderToTexture(
         rhi->setTexture(0, 12, pssmShadowArrayTexture, defaultSampler);
         rhi->setTexture(0, 13, whiteTex, defaultSampler);
         rhi->setTexture(0, 14, blackTex, defaultSampler);
+        // On Vulkan, set2 b13/b14 are RHIMain.frag's sampler2DArray terrain
+        // detail layers, not the Metal-contract 2D point-shadow/gibs slots — bind
+        // the default white array so this RTT main-pipeline draw's descriptor is
+        // valid (RTT never renders terrain surfaces, so the default suffices).
+        if (backend == GraphicsBackend::Vulkan) {
+            rhi->setTexture(0, 13, defaultDetailArrayTexture, defaultSampler);
+            rhi->setTexture(0, 14, defaultDetailArrayTexture, defaultSampler);
+        }
 
         // Skip the tile-culled point-light loop (bit0): the cluster buffer is
         // built for the MAIN camera's screen tiles, meaningless in this view.

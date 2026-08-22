@@ -1,0 +1,26 @@
+#version 450
+// Adaptive GPU tessellation — one reduction halving step (Vulkan twin of
+// tessReduceLevel in 3d_tess_update.metal): count level d = sums of level
+// d + 1, dispatched for d = S-1 .. 0; cbt[0] ends up = total leaf count.
+//
+// b0 = CBT storage; TessReduceParams via the compute push range (binding 4).
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer CbtBuf { uint cbt[]; };
+
+layout(push_constant) uniform ReducePush {
+    uint maxDepth;
+    uint level;  // the level being WRITTEN
+    uint pad0;
+    uint pad1;
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint d = level;
+    if (tid >= (1u << d)) return;
+    uint off = (1u << d) - 1u;
+    uint childOff = (2u << d) - 1u;
+    cbt[off + tid] = cbt[childOff + 2u * tid] + cbt[childOff + 2u * tid + 1u];
+}

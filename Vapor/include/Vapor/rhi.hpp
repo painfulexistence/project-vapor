@@ -207,6 +207,15 @@ enum class CullMode {
     Back,
 };
 
+// Rasterizer fill mode. Line = wireframe (edges only). Vulkan bakes it into the
+// pipeline (needs the fillModeNonSolid device feature — see RHICapabilities);
+// Metal sets it dynamically on the encoder (RHI::setFillMode), so a Fill Metal
+// pipeline can still draw wireframe.
+enum class PolygonMode {
+    Fill,
+    Line,
+};
+
 enum class PrimitiveTopology {
     PointList,
     LineList,
@@ -349,6 +358,15 @@ struct PipelineDesc {
     // passes without depth (e.g. fullscreen post-process to swapchain).
     bool hasDepthAttachment = true;
     CullMode cullMode = CullMode::Back;
+    // Wireframe when Line (Vulkan bakes it in; Metal ignores it here and uses
+    // the dynamic RHI::setFillMode instead). Requires capabilities.wireframe.
+    PolygonMode polygonMode = PolygonMode::Fill;
+    // Opt this pipeline's fill mode into RHI::setFillMode (dynamic) instead of
+    // baking `polygonMode`. Metal is always dynamic (ignores the flag); Vulkan
+    // adds VK_DYNAMIC_STATE_POLYGON_MODE_EXT when capabilities.dynamicPolygonMode
+    // — so one Fill pipeline covers wireframe on every draw path, no Line twin.
+    // Ignored (baked Fill) when the device lacks the dynamic-state feature.
+    bool dynamicPolygonMode = false;
     bool frontFaceCounterClockwise = true;
     Uint32 sampleCount = 1;
     // Attachment formats this pipeline renders into. Both Metal and Vulkan
@@ -469,6 +487,14 @@ struct RHICapabilities {
     // indexing with runtime arrays + update-after-bind). Required for the
     // Bindless MDI draw mode on either backend.
     bool bindlessTextures = false;
+    // Wireframe rasterization (Vulkan fillModeNonSolid; always true on Metal,
+    // which sets the fill mode dynamically on the encoder).
+    bool wireframe = false;
+    // Fill mode is switchable per-command via RHI::setFillMode (Metal always;
+    // Vulkan when VK_EXT_extended_dynamic_state3 polygon mode is available). When
+    // true, PipelineDesc.dynamicPolygonMode pipelines cover wireframe on every
+    // draw path without a Line pipeline twin.
+    bool dynamicPolygonMode = false;
 };
 
 // ============================================================================
@@ -604,6 +630,11 @@ public:
     // ========================================================================
 
     virtual void bindPipeline(PipelineHandle pipeline) = 0;
+    // Dynamic rasterizer fill mode for the current render encoder. Metal honors
+    // it live (a Fill pipeline draws wireframe); Vulkan can't switch polygon
+    // mode dynamically, so it's a no-op there — bind a PolygonMode::Line
+    // pipeline variant instead. Resets to Fill at each beginRenderPass.
+    virtual void setFillMode(PolygonMode /*mode*/) {}
     virtual void bindVertexBuffer(BufferHandle buffer, Uint32 binding = 0, size_t offset = 0) = 0;
     virtual void bindIndexBuffer(BufferHandle buffer, size_t offset = 0) = 0;
 
@@ -677,7 +708,16 @@ public:
     virtual void bindComputeICB(Uint32 /*binding*/, IndirectCommandBufferHandle /*handle*/) {}
     // Replay commands [0, commandCount) of the ICB on the current render pass.
     // The bound pipeline must have been created with supportsICB.
-    virtual void executeICB(IndirectCommandBufferHandle /*handle*/, Uint32 /*commandCount*/) {}
+    // `indexBuffer`: any buffer the ICB's commands reference INDIRECTLY (baked
+    // in by the encode kernel — e.g. the merged index buffer regions of
+    // draw_indexed_primitives). Metal neither declares residency for nor
+    // retains indirect references, so the caller must pass it here: useResource
+    // makes it resident for this pass AND the command buffer's retain keeps it
+    // alive through frame completion even if it is destroyed mid-flight (a
+    // streamed-geometry rebuild destroying the old merged buffers otherwise
+    // leaves in-flight frames replaying commands into freed memory).
+    virtual void executeICB(IndirectCommandBufferHandle /*handle*/, Uint32 /*commandCount*/,
+                            BufferHandle /*indexBuffer*/ = {}) {}
 
     // Bindless texture table (the Bindless MDI draw mode; gated on
     // capabilities.bindlessTextures). Holds entryCount structs of

@@ -106,6 +106,7 @@ public:
     // ========================================================================
 
     void bindPipeline(PipelineHandle pipeline) override;
+    void setFillMode(PolygonMode mode) override;
     void bindVertexBuffer(BufferHandle buffer, Uint32 binding, size_t offset) override;
     void bindIndexBuffer(BufferHandle buffer, size_t offset) override;
 
@@ -333,10 +334,13 @@ private:
     // The texture set (combined image samplers, device limit >= 16) holds the 10
     // material/shadow/AO/SSCS/near samplers (b0-b9) plus the 3 IBL maps the main
     // pass now samples: irradiance cube (b10), prefilter cube (b11), BRDF LUT
-    // (b12). Additive capacity: the write loop only writes bound slots, so
-    // pipelines that use fewer textures (bloom, IBL bake) are unaffected.
+    // (b12), and the 2 terrain detail-layer arrays the Main pass's terrain branch
+    // samples: detail albedo array (b13), detail normal array (b14). Additive
+    // capacity: the write loop only writes bound slots, so pipelines that use
+    // fewer textures (bloom, IBL bake) are unaffected. 15 <= the guaranteed
+    // maxPerStageDescriptorSampledImages of 16, so MoltenVK accepts it.
     // (Bindless MDI's material texture array lives in set 3, not here.)
-    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 13;
+    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 15;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -393,6 +397,10 @@ private:
     VkShaderStageFlags graphicsStageFlags = 0;
     PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasks = nullptr;
     PFN_vkCmdDrawMeshTasksIndirectEXT pfnCmdDrawMeshTasksIndirect = nullptr;
+    // Dynamic polygon mode (VK_EXT_extended_dynamic_state3); null / false when
+    // the device lacks the feature (then wireframe uses Line pipeline twins).
+    PFN_vkCmdSetPolygonModeEXT pfnCmdSetPolygonMode = nullptr;
+    bool dynamicPolygonModeEnabled = false;
     BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     TextureBinding boundComputeSampled[BINDINGS_PER_SET] = {};
