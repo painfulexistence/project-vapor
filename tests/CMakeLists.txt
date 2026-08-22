@@ -130,6 +130,34 @@ target_link_libraries(test_cbt PRIVATE
 target_compile_features(test_cbt PRIVATE cxx_std_20)
 target_compile_options(test_cbt PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Procedural mesh toolkit tests (pure logic, no GPU) ─────────────────────
+add_executable(test_procgen
+    procgen_test.cpp
+)
+target_include_directories(test_procgen PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+)
+target_link_libraries(test_procgen PRIVATE
+    Catch2::Catch2WithMain
+    glm::glm
+)
+target_compile_features(test_procgen PRIVATE cxx_std_20)
+target_compile_options(test_procgen PRIVATE ${TEST_WARNING_FLAGS})
+
+# ── Procedural texture toolkit tests (pure logic, no GPU) ──────────────────
+add_executable(test_proctex
+    proctex_test.cpp
+)
+target_include_directories(test_proctex PRIVATE
+    ${CMAKE_SOURCE_DIR}/Vapor/include
+)
+target_link_libraries(test_proctex PRIVATE
+    Catch2::Catch2WithMain
+    glm::glm
+)
+target_compile_features(test_proctex PRIVATE cxx_std_20)
+target_compile_options(test_proctex PRIVATE ${TEST_WARNING_FLAGS})
+
 # ── Backend Support tests (Metal/Vulkan window initialization) ────────────
 add_executable(test_backend_support
     backend_support_test.cpp
@@ -219,6 +247,20 @@ target_link_libraries(test_scene_blueprint PRIVATE
 target_compile_features(test_scene_blueprint PRIVATE cxx_std_20)
 target_compile_options(test_scene_blueprint PRIVATE ${TEST_WARNING_FLAGS})
 
+# ── Water system tests (WaterSystem against a mock IRenderer; no GPU) ─────
+add_executable(test_water_system
+    water_system_test.cpp
+)
+target_link_libraries(test_water_system PRIVATE
+    Vapor
+    Catch2::Catch2WithMain
+    glm::glm
+    fmt::fmt
+    EnTT::EnTT
+)
+target_compile_features(test_water_system PRIVATE cxx_std_20)
+target_compile_options(test_water_system PRIVATE ${TEST_WARNING_FLAGS})
+
 vapor_copy_engine_assets(test_physics)
 vapor_copy_engine_assets(test_resource_manager)
 vapor_copy_engine_assets(test_asset_management)
@@ -242,6 +284,9 @@ catch_discover_tests(test_ui_system          WORKING_DIRECTORY "$<TARGET_FILE_DI
 catch_discover_tests(test_file_system        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_file_system>")
 catch_discover_tests(test_meshlet_builder    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_meshlet_builder>")
 catch_discover_tests(test_cbt                WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_cbt>")
+catch_discover_tests(test_procgen            WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_procgen>")
+catch_discover_tests(test_proctex            WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_proctex>")
 catch_discover_tests(test_particle_system    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_particle_system>")
 catch_discover_tests(test_scene_blueprint    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_scene_blueprint>")
+catch_discover_tests(test_water_system       WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_water_system>")
 catch_discover_tests(test_voxel_world        WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_voxel_world>")

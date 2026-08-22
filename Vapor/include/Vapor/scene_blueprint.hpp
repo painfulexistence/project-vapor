@@ -1,11 +1,15 @@
 #pragma once
 #include "graphics.hpp"// Image, Material, Mesh
 #include "hidden.hpp"
+#include "procgen.hpp" // procedural mesh generators (scene JSON "procMesh")
+#include "proctex.hpp" // procedural texture generators (scene JSON "textures")
+#include <algorithm>
 #include <entt/entt.hpp>
 #include <fmt/core.h>
 #include <functional>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/vec3.hpp>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -84,6 +88,24 @@ struct PrimitiveBlueprint {
     int material = -1;  // index into SceneBlueprint::materials, -1 = default
 };
 
+// Procedural mesh authored on an entity: a registered generator plus its
+// parameters, resolved by MeshGenerators at instantiate() time. Like
+// PrimitiveBlueprint this stores NO vertex payload — the geometry is rebuilt
+// per load, so a scene cook stays small and a generator improvement reaches
+// already-cooked scenes.
+//
+// A generator emits geometry as named buckets ("tiles", "grout", ...), one per
+// material; `bucketMaterials` maps those names onto the scene's declared
+// materials. Buckets with no mapping render with the default material.
+struct ProcMeshBlueprint {
+    std::string generator;   // registered name; empty = no procedural mesh
+    std::string paramsJson;  // the "params" object, verbatim (see componentsJson)
+    // bucket name -> index into SceneBlueprint::materials (-1 = default).
+    std::vector<std::pair<std::string, int>> bucketMaterials;
+
+    bool empty() const { return generator.empty(); }
+};
+
 struct EntityBlueprint {
     std::string name;
     glm::vec3 position{ 0.0f };
@@ -93,6 +115,7 @@ struct EntityBlueprint {
     std::vector<int> meshes;// indices into SceneBlueprint::meshes
     std::vector<int> lights;// indices into SceneBlueprint::lights
     PrimitiveBlueprint primitive;
+    ProcMeshBlueprint procMesh;
 
     // Authoring references, expanded by loadSceneBlueprint (kept afterwards as
     // provenance): a model file whose hierarchy is spliced under this entity,
@@ -220,6 +243,183 @@ namespace detail {
     }
 #endif
 }// namespace detail
+
+// ── Procedural textures ─────────────────────────────────────────────────────
+// Registry mapping a scene-JSON generator name ("tileAlbedo", ...) to a
+// function that bakes an RGBA8 image from a JSON parameter object — the
+// texture-side sibling of BlueprintComponents. The engine registers the
+// Vapor::proctex generators (see scene_blueprint.cpp); an app registers its own
+// the same way, before loading any scene that names them.
+//
+// Scene JSON:
+//   "textures": [
+//     { "name": "deckAlbedo", "generator": "tileAlbedo",
+//       "params": { "base": [0.78, 0.76, 0.73], "rimTint": [0.86,0.86,0.86],
+//                   "seed": 11, "size": 256 } }
+//   ],
+//   "materials": [
+//     { "name": "deckTile", "albedoMap": "@deckAlbedo" }   // '@' = generated
+//   ]
+//
+// A material map slot takes either a file path (loaded from disk as before) or
+// "@name" referring to an entry above. Swapping a generated placeholder for a
+// real photograph is therefore a one-token edit, with no code change.
+//
+// Generators must be PURE functions of their params (Vapor::proctex uses only
+// seeded hashes, never a global RNG). The parse layer bakes each entry and
+// hashes the RESULTING PIXELS into a synthetic uri of the form
+// "proc://<generator>#v<version>-<pixel hash>". The renderer's texture cache
+// keys on that whole string, so two entries collapse to one upload when they
+// share a generator, a version AND a bake — which is what makes the params'
+// spelling irrelevant ("4" vs "4.0", a default left implicit vs written out).
+// Entries whose bakes are identical also share a single Image object, so the
+// payload is not duplicated through the scene image list or the cook.
+//
+// Two consequences worth knowing:
+//  * A scene cook (.vscene) stores the baked pixels and does not re-run
+//    generators on a cache hit, so computeSourceHash folds in the registry's
+//    (name, version) pairs. Bump a generator's `version` when you change what
+//    it produces, or already-cooked scenes keep serving the old image.
+//  * The registry is a plain global with no synchronisation, and
+//    parseSceneBlueprint runs on worker threads for async scene loads. Register
+//    every generator during startup, before the first load — concurrent add()
+//    against an in-flight parse is a data race.
+class TextureGenerators {
+public:
+    using Generator = std::function<proctex::TextureData(const nlohmann::json& params)>;
+
+    // Engine-default generators are registered on first access.
+    static TextureGenerators& instance();
+
+    void add(const std::string& name, int version, Generator fn) {
+        m_generators[name] = Entry{ version, std::move(fn) };
+    }
+
+    bool has(const std::string& name) const { return m_generators.count(name) != 0; }
+
+    // Bakes the image, or returns nullptr for an unknown generator (the caller
+    // reports it — an unresolvable texture must not silently become black).
+    // The returned Image carries a synthetic, content-addressed uri; nothing
+    // ever opens it as a file because byteArray is already populated (see the
+    // stub-resolution loop in loadSceneBlueprint).
+    std::shared_ptr<Image> generate(const std::string& name, const nlohmann::json& params) const;
+
+    // -1 when unknown.
+    int version(const std::string& name) const {
+        const auto it = m_generators.find(name);
+        return it == m_generators.end() ? -1 : it->second.version;
+    }
+
+    // Sorted, so callers get a stable order out of the unordered map — the
+    // scene-cook hash folds this list in and would otherwise churn per run.
+    std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        out.reserve(m_generators.size());
+        for (const auto& entry : m_generators) out.push_back(entry.first);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+private:
+    struct Entry {
+        int version = 1;
+        Generator fn;
+    };
+    std::unordered_map<std::string, Entry> m_generators;
+};
+
+// ── Procedural meshes ───────────────────────────────────────────────────────
+// What a mesh generator returns: geometry split into named buckets, one per
+// material, plus the colliders that geometry implies. Emitting both from one
+// pass is the point — a generator knows where its walls are, so the physics
+// shape never has to be re-derived (or drift) from the render mesh.
+// An entity a generator wants placed alongside its geometry — a lamp, a
+// trigger volume, a spawn marker, the water surface of a pool. `components` is
+// the same JSON an entity's "components" block carries, so a generator can
+// attach anything the applier registry knows without the engine learning what
+// the generator is building.
+//
+// The transform is in the generating entity's local space; instantiate parents
+// each child to it, so the whole assembly moves as one.
+struct GeneratedChild {
+    std::string name;
+    glm::vec3 position{ 0.0f };
+    glm::quat rotation{ 1.0f, 0.0f, 0.0f, 0.0f };
+    glm::vec3 scale{ 1.0f };
+    std::string components;  // JSON object, e.g. R"({"pointLight":{"intensity":4}})"
+};
+
+struct GeneratedContent {
+    // Insertion-ordered would be nicer, but a sorted map keeps the emitted
+    // mesh order stable across runs, which keeps draw order deterministic.
+    std::map<std::string, procgen::MeshData> buckets;
+    std::vector<procgen::CollisionBox> colliders;
+    std::vector<GeneratedChild> children;
+
+    procgen::MeshData& bucket(const std::string& name) { return buckets[name]; }
+    size_t triangleCount() const {
+        size_t n = 0;
+        for (const auto& b : buckets) n += b.second.triangleCount();
+        return n;
+    }
+};
+
+// Registry mapping a scene-JSON generator name ("tilePanel", ...) to a
+// function that builds geometry from a JSON parameter object — the mesh-side
+// sibling of TextureGenerators. The engine registers thin wrappers over the
+// Vapor::procgen primitives; an app registers composite generators for whole
+// structures the same way, before loading a scene that names them.
+//
+// Scene JSON:
+//   { "name": "WestWall",
+//     "procMesh": {
+//       "generator": "tilePanel",
+//       "params": { "width": 24, "height": 4.6, "tileW": 0.2, "tileH": 0.2 },
+//       "materials": { "tiles": "wallTile", "grout": "groutMat" }
+//     } }
+//
+// Generators must be PURE functions of their params, for the same reason the
+// texture ones are: the geometry is rebuilt on every load rather than cooked,
+// so two loads of one scene have to agree. `version` is provenance.
+class MeshGenerators {
+public:
+    using Generator = std::function<GeneratedContent(const nlohmann::json& params)>;
+
+    // Engine-default generators are registered on first access.
+    static MeshGenerators& instance();
+
+    void add(const std::string& name, int version, Generator fn) {
+        m_generators[name] = Entry{ version, std::move(fn) };
+    }
+
+    bool has(const std::string& name) const { return m_generators.count(name) != 0; }
+
+    // Runs the generator, or reports and returns an empty result for an
+    // unknown name. Geometry that fails procgen::validate() is dropped rather
+    // than handed to Mesh::initialize(), whose MikkTSpace pass throws on
+    // degenerate UV triangles — a bad generator must not take the load down.
+    GeneratedContent generate(const std::string& name, const nlohmann::json& params) const;
+
+    int version(const std::string& name) const {
+        const auto it = m_generators.find(name);
+        return it == m_generators.end() ? -1 : it->second.version;
+    }
+
+    std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        out.reserve(m_generators.size());
+        for (const auto& entry : m_generators) out.push_back(entry.first);
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+private:
+    struct Entry {
+        int version = 1;
+        Generator fn;
+    };
+    std::unordered_map<std::string, Entry> m_generators;
+};
 
 class BlueprintComponents {
 public:

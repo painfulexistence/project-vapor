@@ -15,6 +15,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <utility>  // std::pair — PhysicsBodySystem's placement helper
 #include <vector>
 
 namespace Vapor {
@@ -859,6 +860,205 @@ namespace Vapor {
                 volumes.push_back(v);
             }
             renderer->setVolumetricFogVolumes(volumes);
+        }
+    };
+
+    // ============================================================================
+    // 剛體建立系統 - realizes authored colliders as live Jolt bodies
+    // ============================================================================
+    // The blueprint layer deliberately emplaces physics components as pure data:
+    // a Rigidbody arrives with an invalid BodyHandle and this closes the loop,
+    // creating the body on the first update after the entity appears. That split
+    // is what lets parseSceneBlueprint stay I/O- and engine-free — and it is why
+    // an authored "boxCollider" does nothing until an app runs this.
+    //
+    // Idempotent: an entity whose handle is already valid is skipped, so calling
+    // it every frame costs one view iteration and picks up entities spawned
+    // since the last one.
+    //
+    // Run AFTER TransformSystem. A collider parented to something (procMesh
+    // emits its colliders as children) needs the world transform to be current,
+    // or the body lands at the parent's origin.
+    class PhysicsBodySystem {
+    public:
+        static void update(entt::registry& reg, Physics3D* physics) {
+            if (!physics) return;
+
+            // Where the body goes. Unparented entities use the local transform
+            // verbatim; parented ones decompose the world matrix, since that is
+            // the only place the accumulated parent transform exists.
+            auto placement = [](const TransformComponent& t) {
+                if (t.parent == entt::null) return std::pair{ t.position, t.rotation };
+                const glm::mat4& m = t.worldTransform;
+                const glm::vec3 position(m[3]);
+                // Normalize the basis before extracting the rotation, or a
+                // scaled parent tilts the collider.
+                glm::mat3 basis(m);
+                for (int axis = 0; axis < 3; ++axis) {
+                    const float length = glm::length(basis[axis]);
+                    basis[axis] = length > 1e-6f ? basis[axis] / length : glm::vec3(0.0f);
+                    if (length <= 1e-6f) basis[axis][axis] = 1.0f;
+                }
+                return std::pair{ position, glm::normalize(glm::quat_cast(basis)) };
+            };
+
+            auto boxes = reg.view<RigidbodyComponent, TransformComponent, BoxColliderComponent>();
+            for (auto entity : boxes) {
+                auto& rb = boxes.get<RigidbodyComponent>(entity);
+                if (rb.body.valid()) continue;
+                const auto& transform = boxes.get<TransformComponent>(entity);
+                const auto& collider = boxes.get<BoxColliderComponent>(entity);
+                const auto [position, rotation] = placement(transform);
+                rb.body = physics->createBoxBody(collider.halfSize, position, rotation, rb.motionType);
+                // Activating a static body is meaningless; only movable ones
+                // need to start awake.
+                physics->addBody(rb.body, rb.motionType != BodyMotionType::Static);
+            }
+
+            auto spheres = reg.view<RigidbodyComponent, TransformComponent, SphereColliderComponent>();
+            for (auto entity : spheres) {
+                auto& rb = spheres.get<RigidbodyComponent>(entity);
+                if (rb.body.valid()) continue;
+                const auto& transform = spheres.get<TransformComponent>(entity);
+                const auto& collider = spheres.get<SphereColliderComponent>(entity);
+                const auto [position, rotation] = placement(transform);
+                rb.body = physics->createSphereBody(collider.radius, position, rotation, rb.motionType);
+                physics->addBody(rb.body, rb.motionType != BodyMotionType::Static);
+            }
+        }
+    };
+
+    // ============================================================================
+    // 水面系統 - drives the FFT water surface from a WaterComponent
+    // ============================================================================
+    // Unlike fog, the renderer holds exactly ONE water surface, so this takes the
+    // first enabled component and reports any others rather than letting them
+    // overwrite each other frame by frame.
+    //
+    // The three renderer entry points differ by cost, so they are driven
+    // differently: setWaterSettings is an assignment and runs every frame (the
+    // look stays live-tunable from the inspector), while setWaterGrid
+    // reallocates GPU buffers and setWaterSimParams dirties the spectrum for a
+    // rebake — pushing those unconditionally would rebuild the surface every
+    // single frame. The last pushed values live in the component's Hidden
+    // fields, the same way WeatherComponent remembers its last state.
+    class WaterSystem {
+    public:
+        static void update(entt::registry& reg, IRenderer* renderer) {
+            if (!renderer) return;
+
+            WaterComponent* water = nullptr;
+            entt::entity owner = entt::null;
+            int enabledCount = 0;
+            for (auto entity : reg.view<WaterComponent>(entt::exclude<InactiveComponent>)) {
+                auto& w = reg.get<WaterComponent>(entity);
+                if (!w.enabled) continue;
+                if (++enabledCount > 1) continue;
+                water = &w;
+                owner = entity;
+            }
+            if (!water) {
+                renderer->setWaterEnabled(false);
+                return;
+            }
+            // Complain once per change, not once per frame — this runs at
+            // frame rate and the condition persists for as long as the scene.
+            if (enabledCount > 1 && enabledCount != water->_lastRivalCount.value) {
+                fmt::print(stderr,
+                           "WaterSystem: {} enabled WaterComponents but the renderer has one "
+                           "water surface; using the first and ignoring the rest\n", enabledCount);
+            }
+            water->_lastRivalCount = enabledCount;
+
+            glm::vec3 position(0.0f);
+            glm::vec3 scale(1.0f);
+            if (const auto* t = reg.try_get<TransformComponent>(owner)) {
+                position = t->position;
+                scale = t->scale;
+            }
+
+            // ── Grid, on change. Tile counts come from data and size an
+            // allocation of (tilesX+1)*(tilesZ+1) vertices, so they are clamped
+            // rather than trusted — 4096² is already ~470 MB of vertices.
+            const WaterGridDesc g{ std::clamp(water->grid.tilesX, 1u, 4096u),
+                                   std::clamp(water->grid.tilesZ, 1u, 4096u),
+                                   std::max(water->grid.tileSize, 1e-3f),
+                                   water->grid.texTile };
+            // Compared AFTER clamping, so a clamped value stays equal next
+            // frame instead of rebuilding the grid forever.
+            if (!water->_pushed.value || !(g == water->_lastGrid.value)) {
+                renderer->setWaterGrid(g.tilesX, g.tilesZ, g.tileSize, g.texTile.x, g.texTile.y);
+                water->_lastGrid = g;
+            }
+
+            // ── Transform, on change: the surface plane sits at the entity.
+            if (!water->_pushed.value || position != water->_lastPosition.value ||
+                scale != water->_lastScale.value) {
+                WaterTransform transform;
+                transform.position = position;
+                transform.scale = scale;
+                renderer->setWaterTransform(transform);
+                water->_lastPosition = position;
+                water->_lastScale = scale;
+            }
+
+            // ── Spectrum, on change (every push forces a rebake).
+            if (!water->_pushed.value || !(water->spectrum == water->_lastSpectrum.value)) {
+                WaterSimParams sim;  // resolution/time stay at the renderer's values
+                sim.patchSize = water->spectrum.patchSize;
+                sim.windSpeedMps = water->spectrum.windSpeedMps;
+                sim.windDirRad = water->spectrum.windDirRad;
+                sim.amplitude = water->spectrum.amplitude;
+                sim.choppiness = water->spectrum.choppiness;
+                sim.depthMeters = water->spectrum.depthMeters;
+                sim.smallWaveCutoff = water->spectrum.smallWaveCutoff;
+                sim.directionalSpread = water->spectrum.directionalSpread;
+                sim.gravity = water->spectrum.gravity;
+                sim.surfaceTension = water->spectrum.surfaceTension;
+                sim.timeScale = water->spectrum.timeScale;
+                sim.seed = water->spectrum.seed;
+                renderer->setWaterSimParams(sim);
+                water->_lastSpectrum = water->spectrum;
+            }
+
+            // ── Look, every frame. The pass overwrites modelMatrix, time, the
+            // sun mirror and causticsParams.w, so those are left at zero here.
+            const WaterLookDesc& look = water->look;
+            const WaterCausticsDesc& c = water->caustics;
+            WaterData data{};
+            data.surfaceColor = look.surfaceColor;
+            data.refractionColor = look.refractionColor;
+            data.normalMapScroll = look.normalMapScroll;
+            data.normalMapScrollSpeed = look.normalMapScrollSpeed;
+            data.refractionDistortionFactor = look.refractionDistortionFactor;
+            data.refractionHeightFactor = look.refractionHeightFactor;
+            data.refractionDistanceFactor = look.refractionDistanceFactor;
+            data.depthSofteningDistance = look.depthSofteningDistance;
+            data.foamHeightStart = look.foamHeightStart;
+            data.foamFadeDistance = look.foamFadeDistance;
+            data.foamTiling = look.foamTiling;
+            data.foamAngleExponent = look.foamAngleExponent;
+            data.roughness = look.roughness;
+            data.reflectance = look.reflectance;
+            data.specIntensity = look.specIntensity;
+            data.foamBrightness = look.foamBrightness;
+            data.waveCount = 0;  // the RHI pass displaces from the FFT, not waves[]
+            data.dampeningFactor = look.dampeningFactor;
+            data.fftParams = look.fftParams;
+            data.reflectionParams = look.reflectionParams;
+            // Caustics bounds are authored relative to the entity, so the same
+            // scene JSON works wherever the water is placed. min/max are
+            // re-derived after scaling: a negative scale would swap them, and
+            // the shader tests them as an ordered AABB.
+            const glm::vec3 a = position + c.boundsMin * scale;
+            const glm::vec3 b = position + c.boundsMax * scale;
+            data.causticsParams = glm::vec4(c.intensity, c.worldScale, c.speed, position.y);
+            data.causticsBoundsMin = glm::vec4(glm::min(a, b), c.fadeDepth);
+            data.causticsBoundsMax = glm::vec4(glm::max(a, b), c.envReflectionIntensity);
+            renderer->setWaterSettings(data);
+
+            water->_pushed = true;
+            renderer->setWaterEnabled(true);
         }
     };
 

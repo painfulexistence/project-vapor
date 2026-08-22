@@ -355,6 +355,15 @@ void AssetSerializer::serializeBlueprint(cereal::BinaryOutputArchive& archive, c
         archive(e.primitive.size);
         archive(e.primitive.height);
         archive(e.primitive.material);
+        // procMesh, like primitive, stores no vertices — the generator reruns
+        // on load, so the cook only has to carry what names it.
+        archive(e.procMesh.generator);
+        archive(e.procMesh.paramsJson);
+        archive(static_cast<Uint32>(e.procMesh.bucketMaterials.size()));
+        for (const auto& [bucket, material] : e.procMesh.bucketMaterials) {
+            archive(bucket);
+            archive(material);
+        }
     }
 
     archive(blueprint.sources);
@@ -430,6 +439,18 @@ auto AssetSerializer::deserializeBlueprint(cereal::BinaryInputArchive& archive) 
         archive(e.primitive.size);
         archive(e.primitive.height);
         archive(e.primitive.material);
+        archive(e.procMesh.generator);
+        archive(e.procMesh.paramsJson);
+        Uint32 bucketCount = 0;
+        archive(bucketCount);
+        e.procMesh.bucketMaterials.reserve(bucketCount);
+        for (Uint32 b = 0; b < bucketCount; ++b) {
+            std::string bucket;
+            int material = -1;
+            archive(bucket);
+            archive(material);
+            e.procMesh.bucketMaterials.emplace_back(std::move(bucket), material);
+        }
         blueprint.entities.push_back(std::move(e));
     }
 

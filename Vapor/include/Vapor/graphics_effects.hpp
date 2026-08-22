@@ -3,6 +3,7 @@
 // particles, sun flare. Separated from core GPU structs to keep each file
 // focused on a single visual system.
 #include <SDL3/SDL_stdinc.h>
+#include <cstddef>
 #include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -45,7 +46,64 @@ struct alignas(16) WaterData {
     Uint32 waveCount;
     float dampeningFactor;
     float time;
+    float _pad2;
+    // ── RHI water-pass extension (appended; the legacy 3d_water.metal reads
+    // only the prefix above — the waves[] block is legacy-only, the RHI pass
+    // displaces from the FFT simulation instead). Sun mirrors the atmosphere
+    // the way the fog passes do, so the water pass needs no extra
+    // light-buffer binding.
+    glm::vec4 sunDirection;       // xyz = world dir FROM the sun (normalized)
+    glm::vec4 sunColorIntensity;  // rgb + w = intensity
+    glm::vec4 causticsParams;     // x=intensity (0=off) y=world scale z=speed w=water level Y
+    glm::vec4 causticsBoundsMin;  // xyz = world AABB min of the water volume, w = fade depth
+    glm::vec4 causticsBoundsMax;  // xyz = world AABB max, w = env reflection intensity
+    // Planar reflection + FFT shading (set by the passes / app):
+    glm::mat4 reflectionViewProj; // mirrored camera VP, for projective sampling
+    glm::vec4 fftParams;          // x=patch size (m) y=detail normal tiling z=detail normal strength w=displacement scale
+    glm::vec4 reflectionParams;   // x=planar strength (0=env cube only) y=surface distortion z=foam whitecap scale w=unused
 };
+
+// The shader twins (Water.vert/.frag, WaterCaustics.frag, WaterRefl.*, the
+// 3d_water_*_rhi.metal files and the WaterFFT kernels) declare this layout
+// field-for-field; any change here must be mirrored there. std430 and MSL
+// agree with the C++ offsets only because of the explicit _pad members.
+static_assert(sizeof(WaveData) == 32, "WaveData layout drifted from the shader twins");
+static_assert(offsetof(WaterData, refractionDistortionFactor) == 144, "WaterData tunables must start at 144");
+static_assert(offsetof(WaterData, waves) == 192, "WaterData waves must start at 192");
+static_assert(offsetof(WaterData, sunDirection) == 336, "WaterData extension must start at 336");
+static_assert(offsetof(WaterData, reflectionViewProj) == 416, "WaterData reflection block must start at 416");
+static_assert(sizeof(WaterData) == 512, "WaterData layout drifted from the shader twins");
+
+// ── FFT water simulation ───────────────────────────────────────────────────
+// Parameters of the spectral surface simulation (Tessendorf-style: initial
+// spectrum -> time evolution -> inverse FFT -> displacement + normals).
+// Uploaded as the compute UBO; also read on the CPU (dirty tracking, grid
+// sizing). Changing spectrum-shaping fields requires a spectrum rebake —
+// Renderer::setWaterSimParams handles that.
+struct alignas(16) WaterSimParams {
+    Uint32 resolution = 256;        // N, power of two (compute kernels assume <= 512)
+    float patchSize = 16.0f;        // world meters covered by one tiling patch
+    float windSpeedMps = 2.2f;      // drives the spectrum peak
+    float windDirRad = 0.7f;        // wind heading (radians, XZ plane)
+    // Phillips constant A, NOT a wave height. The field variance sums every
+    // lattice mode, so RMS height = sqrt(A) * f(patch, wind, cutoff, ...) with
+    // f in the tens — expect useful values around 1e-4..1e-2, and note that a
+    // seemingly innocent 1.0 yields metre-scale surf. Halving the wave height
+    // means quartering this. See Examples/Poolrooms for calibrated numbers.
+    float amplitude = 2.0e-4f;      // spectrum scale (Phillips A)
+    float choppiness = 0.9f;        // horizontal displacement scale (0 = heave only)
+    float depthMeters = 2.0f;       // finite-depth dispersion tanh(k*d)
+    float smallWaveCutoff = 0.010f; // suppress wavelengths below this (m)
+    float directionalSpread = 6.0f; // cos^n concentration about the wind
+    float gravity = 9.81f;
+    float surfaceTension = 0.074f;  // sigma/rho k^3 capillary term (N/m over 1000 kg/m^3)
+    float timeScale = 1.0f;
+    float time = 0.0f;              // written per frame by the sim pass
+    Uint32 seed = 1337u;
+    float _padA;
+    float _padB;
+};
+static_assert(sizeof(WaterSimParams) == 64, "WaterSimParams layout drifted from the shader twins");
 
 struct WaterTransform {
     glm::vec3 position = glm::vec3(0.0f);

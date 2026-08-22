@@ -1,0 +1,75 @@
+#version 450
+// FFT water — spectrum time evolution. GLSL twin of the waterSpectrumEvolve
+// kernel in 3d_water_fft_rhi.metal.
+//
+// h(k,t) = h0(k) e^{i w t} + conj(h0(-k)) e^{-i w t} with the
+// capillary-gravity finite-depth dispersion
+//   w^2 = (g k + sigma k^3) tanh(k d).
+// Also derives the horizontal displacement spectra -i k/|k| h(k,t) that make
+// wave crests pinch (choppy waves).
+//
+// Outputs (complex per RG/BA pair):
+//   specATex: RG = height h(k,t), BA = displacement X
+//   specBTex: RG = displacement Z, BA = unused
+// The two textures then run through the inverse FFT in place.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SimParams {
+    uint resolution;
+    float patchSize;
+    float windSpeedMps;
+    float windDirRad;
+    float amplitude;
+    float choppiness;
+    float depthMeters;
+    float smallWaveCutoff;
+    float directionalSpread;
+    float gravity;
+    float surfaceTension;
+    float timeScale;
+    float time;
+    uint seed;
+    float _padA;
+    float _padB;
+} sim;
+
+layout(set = 1, binding = 0, rgba32f) uniform readonly image2D h0Tex;
+layout(set = 1, binding = 1, rgba32f) uniform writeonly image2D specATex;
+layout(set = 1, binding = 2, rgba32f) uniform writeonly image2D specBTex;
+
+const float PI = 3.14159265359;
+
+vec2 cmul(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void main() {
+    uvec2 id = gl_GlobalInvocationID.xy;
+    uint n = sim.resolution;
+    if (id.x >= n || id.y >= n) return;
+
+    float twoPiOverL = 2.0 * PI / sim.patchSize;
+    vec2 k = vec2(float(int(id.x) - int(n) / 2), float(int(id.y) - int(n) / 2)) * twoPiOverL;
+    float kLen = length(k);
+
+    vec4 h0 = imageLoad(h0Tex, ivec2(id));  // RG = h0(k), BA = conj(h0(-k))
+
+    // Capillary-gravity dispersion in finite depth.
+    float w2 = (sim.gravity * kLen + sim.surfaceTension * kLen * kLen * kLen)
+             * tanh(min(kLen * sim.depthMeters, 20.0));
+    float w = sqrt(max(w2, 0.0));
+    float phase = w * sim.time * sim.timeScale;
+    vec2 e = vec2(cos(phase), sin(phase));       // e^{i w t}
+    vec2 eConj = vec2(e.x, -e.y);                // e^{-i w t}
+
+    vec2 h = cmul(h0.xy, e) + cmul(h0.zw, eConj);
+
+    // Horizontal displacement spectra: -i (k/|k|) h.
+    vec2 kn = (kLen > 1e-5) ? k / kLen : vec2(0.0);
+    vec2 dx = vec2(h.y, -h.x) * kn.x;  // (-i h) * knx
+    vec2 dz = vec2(h.y, -h.x) * kn.y;
+
+    imageStore(specATex, ivec2(id), vec4(h, dx));
+    imageStore(specBTex, ivec2(id), vec4(dz, 0.0, 0.0));
+}

@@ -46,6 +46,9 @@ layout(std430, set = 1, binding = 0) readonly buffer PostBuf {
     float glitchIntensity;
     // Edge view (gradient magnitude replaces the image).
     float enableEdges;
+    // Bloom composite strength (Metal composites bloom in a prior pass; here it
+    // scales the additive bloom below). Mirrors Renderer::bloomStrength.
+    float bloomStrength;
 };
 
 vec3 aces(vec3 x) {
@@ -219,8 +222,10 @@ void main() {
     color.b = texture(texScreen, uvB).b + texture(texGodRays, uvB).b;
 
     // Additive bloom (composited here on the Vulkan path). texBloom is bound to
-    // a black texture when bloom is disabled, so this adds nothing then.
-    color += texture(texBloom, uv).rgb * 0.8;
+    // a black texture when bloom is disabled, so this adds nothing then. Uses
+    // the runtime strength (Metal's BloomComposite does the same) — this used
+    // to be hardcoded 0.8, so the bloom-strength slider did nothing on Vulkan.
+    color += texture(texBloom, uv).rgb * bloomStrength;
 
     // Sobel edge overlay (HDR domain; bright pixels suppress the overlay).
     if (enableSobel > 0.5) {

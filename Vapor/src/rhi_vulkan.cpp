@@ -728,8 +728,20 @@ void RHI_Vulkan::flushDescriptors() {
 
     for (Uint32 i = 0; i < TEXTURE_BINDINGS_PER_SET; i++) {
         if (boundTextures[i].view == VK_NULL_HANDLE) continue;
+        // Almost every sampled image is in SHADER_READ_ONLY. The exception is a
+        // depth image sampled while it is the current pass's read-only depth
+        // attachment (waterPass): the descriptor layout must match the image's
+        // actual DEPTH_STENCIL_READ_ONLY_OPTIMAL, or validation flags a mismatch.
+        VkImageLayout imgLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (boundTextures[i].textureId != 0) {
+            auto tit = textures.find(boundTextures[i].textureId);
+            if (tit != textures.end() &&
+                tit->second.currentLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+                imgLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            }
+        }
         VkDescriptorImageInfo& info = imageInfos[imageCount++];
-        info = { boundTextures[i].sampler, boundTextures[i].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        info = { boundTextures[i].sampler, boundTextures[i].view, imgLayout };
         VkWriteDescriptorSet& w = writes[writeCount++];
         w = {};
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2234,19 +2246,34 @@ void RHI_Vulkan::beginRenderPass(const RenderPassDesc& desc) {
             } else {
                 depthAttachment.imageView = it->second.view;
             }
+            // Read-only depth (the water pass): keep the image in a read-only
+            // layout so the same image can be both depth-tested here AND sampled
+            // by this pass's fragment shader — the alternative is a validation
+            // error and undefined reads. Requires the pipeline's depthWrite off.
+            const VkImageLayout depthLayout =
+                desc.depthReadOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                                   : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             transitionImage(it->second.image, it->second.currentLayout,
-                            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
-            it->second.currentLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                            depthLayout, VK_IMAGE_ASPECT_DEPTH_BIT);
+            it->second.currentLayout = depthLayout;
             // Sampleable depth (shadow maps) needs a shader-read transition once
-            // the pass ends; remember it for endRenderPass.
-            if (it->second.usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+            // the pass ends; remember it for endRenderPass. A read-only-depth
+            // pass leaves the image where it is — the next main pass transitions
+            // it back to a writable attachment, and nothing samples it meanwhile.
+            if ((it->second.usage & VK_IMAGE_USAGE_SAMPLED_BIT) && !desc.depthReadOnly) {
                 currentPassDepthTexture = desc.depthAttachment.id;
             }
+            depthAttachment.imageLayout = depthLayout;
         }
-        depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        // Load/store operations (loadDepth: true = load, false = clear)
+        // Load/store operations (loadDepth: true = load, false = clear). A
+        // read-only pass must use STORE_OP_NONE (core in the 1.3 baseline this
+        // backend requires): NONE means "not accessed for store", preserving
+        // the contents. DONT_CARE would be wrong here — it licenses a tiler
+        // (MoltenVK/Apple) to discard the depth, and HeightFog / VolumetricFog
+        // / LightScattering all sample this depth AFTER the water pass.
         depthAttachment.loadOp = desc.loadDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
-        depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depthAttachment.storeOp =
+            desc.depthReadOnly ? VK_ATTACHMENT_STORE_OP_NONE : VK_ATTACHMENT_STORE_OP_STORE;
         depthAttachment.clearValue.depthStencil = {desc.clearDepth, desc.clearStencil};
     }
 
@@ -2468,8 +2495,9 @@ void RHI_Vulkan::setTexture(Uint32 set, Uint32 binding, TextureHandle texture, S
         return;
     }
     TextureBinding& cur = boundTextures[binding];
-    if (cur.view != texIt->second.view || cur.sampler != samplerIt->second.sampler) {
-        cur = { texIt->second.view, samplerIt->second.sampler };
+    if (cur.view != texIt->second.view || cur.sampler != samplerIt->second.sampler ||
+        cur.textureId != texture.id) {
+        cur = { texIt->second.view, samplerIt->second.sampler, texture.id };
         descriptorsDirty = true;
     }
 }
