@@ -1615,7 +1615,11 @@ std::vector<Uint8> RHI_D3D12::compileSpirvToDxil(const void* spirv, size_t size,
     switch (stage) {
         case ShaderStage::Vertex:   profile = sm68 ? L"vs_6_8" : L"vs_6_6"; break;
         case ShaderStage::Fragment: profile = sm68 ? L"ps_6_8" : L"ps_6_6"; break;
-        case ShaderStage::Compute:  profile = capabilities.raytracing ? L"cs_6_6" : L"cs_6_6"; break;
+        // cs_6_6 unconditionally: it clears the SM 6.5 floor that inline ray
+        // queries (RayQuery<>) need, so the RT kernels and the plain compute
+        // kernels share one profile. (This was a ternary on
+        // capabilities.raytracing with cs_6_6 on both arms.)
+        case ShaderStage::Compute:  profile = L"cs_6_6"; break;
         case ShaderStage::Task:     profile = L"as_6_5"; scModel = std::max(scModel, 65u); break;
         case ShaderStage::Mesh:     profile = L"ms_6_5"; scModel = std::max(scModel, 65u); break;
     }
