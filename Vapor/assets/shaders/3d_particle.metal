@@ -13,7 +13,7 @@
 struct Particle {
     float4 posLifetime; // xyz=position, w=lifetime (-1=immortal)
     float4 velAge;      // xyz=velocity, w=age (seconds since spawn)
-    float4 forcePad;    // xyz=force, w=_pad3
+    float4 forcePad;    // xyz=force, w=killPlaneY (rain ground kill)
     float4 color;
 };
 
@@ -118,7 +118,7 @@ kernel void particleForce(
     // Velocity-dependent drag — matches Vulkan (0.5)
     force -= vel * 0.5;
 
-    p.forcePad = float4(force, p.forcePad.w);
+    p.forcePad.xyz = force;
     particles[id] = p;
 }
 
@@ -130,11 +130,12 @@ kernel void particleIntegrate(
     if (id >= params.particleCount) return;
 
     Particle p = particles[id];
-    float3 pos      = p.posLifetime.xyz;
-    float  lifetime = p.posLifetime.w;
-    float  age      = p.velAge.w;
-    float3 vel      = p.velAge.xyz;
-    float3 force    = p.forcePad.xyz;
+    float3 pos        = p.posLifetime.xyz;
+    float  lifetime   = p.posLifetime.w;
+    float  age        = p.velAge.w;
+    float3 vel        = p.velAge.xyz;
+    float3 force      = p.forcePad.xyz;
+    float  killPlaneY = p.forcePad.w;
 
     // Advance age; fade and kill finite-lifetime particles (mirrors GLSL)
     if (lifetime >= 0.0) {
@@ -153,12 +154,13 @@ kernel void particleIntegrate(
     vel   += force * params.deltaTime;
     pos   += vel   * params.deltaTime;
 
-    // Ground kill (cheap rain/spark collision — mirrors GLSL): finite-lifetime
-    // particles die crossing their world-Y kill plane (forcePad.w).
-    if (lifetime >= 0.0 && pos.y < p.forcePad.w) {
+    // Ground kill (cheap rain/spark collision): finite-lifetime particles die
+    // the frame they cross their world-Y kill plane.
+    if (lifetime >= 0.0 && pos.y < killPlaneY) {
+        p.velAge.w = lifetime;
+        p.color.a = 0.0;
         p.posLifetime = float4(pos, lifetime);
-        p.velAge      = float4(vel, lifetime);  // age = lifetime -> dead
-        p.color.a     = 0.0;
+        p.velAge.xyz = vel;
         particles[id] = p;
         return;
     }
@@ -205,32 +207,78 @@ struct ParticleVertexOut {
     float4 position [[position]];
     float2 uv;
     float4 color;
+    float  linearDepth;  // for depth fade
+    float2 screenUV;     // for depth sampling
 };
 
+// Extended push constants for velocity stretch + depth effects (48 bytes)
 struct ParticlePushConstants {
     float particleSize;
-    float useTexture;       // > 0.5: sample the per-emitter texture; else procedural disc
-    float velocityStretch;  // > 0: stretch the quad along velocity (rain streaks)
-    float _pad3;
+    float useTexture;         // > 0.5: sample the per-emitter texture; else procedural disc
+    float velocityStretch;    // > 0: stretch the quad along velocity (rain streaks)
+    float depthFadeEnabled;   // > 0.5: apply depth fade
+    float depthFadeDistance;
+    float groundClampEnabled; // > 0.5: clamp to depth surface
+    float groundClampOffset;  // height above surface
+    float _pad;
 };
+
+float linearizeDepthMetal(float d, float nearPlane, float farPlane) {
+    return nearPlane * farPlane / (farPlane - d * (farPlane - nearPlane));
+}
+
+float3 reconstructWorldPositionMetal(float2 screenUV, float depth, float4x4 invProj, float4x4 invView) {
+    float2 ndc = screenUV * 2.0 - 1.0;
+    // Metal uses reverse-Z, so depth 1.0 is near, 0.0 is far
+    float4 clipPos = float4(ndc.x, -ndc.y, depth, 1.0);
+    float4 viewPos = invProj * clipPos;
+    viewPos /= viewPos.w;
+    float4 worldPos = invView * viewPos;
+    return worldPos.xyz;
+}
 
 vertex ParticleVertexOut particleVertex(
     uint vertexID   [[vertex_id]],
     uint instanceID [[instance_id]],
     constant CameraData&              camera        [[buffer(0)]],
     constant ParticlePushConstants&   pushConstants [[buffer(1)]],
-    device const Particle*            particles     [[buffer(2)]]
+    device const Particle*            particles     [[buffer(2)]],
+    depth2d<float>                    sceneDepth    [[texture(1)]]
 ) {
     Particle p = particles[instanceID];
+    float3 pos = p.posLifetime.xyz;
+    float3 vel = p.velAge.xyz;
+
+    // Ground clamping: project particle to screen, sample depth, clamp to surface
+    if (pushConstants.groundClampEnabled > 0.5) {
+        float4 clipPosGC = camera.proj * camera.view * float4(pos, 1.0);
+        if (clipPosGC.w > 0.0) {
+            float2 ndcGC = clipPosGC.xy / clipPosGC.w;
+            // Metal NDC Y is flipped vs clip space
+            float2 screenUVGC = float2(ndcGC.x * 0.5 + 0.5, -ndcGC.y * 0.5 + 0.5);
+
+            // Only clamp if on screen
+            if (screenUVGC.x >= 0.0 && screenUVGC.x <= 1.0 &&
+                screenUVGC.y >= 0.0 && screenUVGC.y <= 1.0) {
+                constexpr sampler depthSampler(filter::linear, address::clamp_to_edge);
+                float sceneDepthSample = sceneDepth.sample(depthSampler, screenUVGC);
+                float3 surfacePos = reconstructWorldPositionMetal(
+                    screenUVGC, sceneDepthSample, camera.invProj, camera.invView);
+
+                if (pos.y < surfacePos.y + pushConstants.groundClampOffset) {
+                    pos.y = surfacePos.y + pushConstants.groundClampOffset;
+                }
+            }
+        }
+    }
 
     float3 cameraRight = float3(camera.view[0][0], camera.view[1][0], camera.view[2][0]);
     float3 cameraUp    = float3(camera.view[0][1], camera.view[1][1], camera.view[2][1]);
 
     float2 quadPos  = quadVertices[vertexID];
     float  size     = pushConstants.particleSize;
-    float3 pos      = p.posLifetime.xyz;
-    float3 vel      = p.velAge.xyz;
-    float3 worldPos;
+    float3 billboardPos;
+
     if (pushConstants.velocityStretch > 0.0 && dot(vel, vel) > 1e-6) {
         // Velocity-aligned billboard (rain streaks — mirrors Particle.vert):
         // quad Y runs along the motion, X across it, turned toward the camera.
@@ -239,23 +287,32 @@ vertex ParticleVertexOut particleVertex(
         float  len2   = dot(across, across);
         across = len2 > 1e-8 ? across * rsqrt(len2) : cameraRight;
         float halfLen = size * (1.0 + pushConstants.velocityStretch * length(vel));
-        worldPos = pos + across * quadPos.x * size + along * quadPos.y * halfLen;
+        billboardPos = pos + across * quadPos.x * size + along * quadPos.y * halfLen;
     } else {
-        worldPos = pos + cameraRight * quadPos.x * size
-                       + cameraUp    * quadPos.y * size;
+        billboardPos = pos + cameraRight * quadPos.x * size
+                          + cameraUp    * quadPos.y * size;
     }
 
+    float4 viewPos = camera.view * float4(billboardPos, 1.0);
+    float4 clipPos = camera.proj * viewPos;
+
     ParticleVertexOut out;
-    out.position = camera.proj * camera.view * float4(worldPos, 1.0);
-    out.uv       = quadUVs[vertexID];
-    out.color    = p.color;
+    out.position    = clipPos;
+    out.uv          = quadUVs[vertexID];
+    out.color       = p.color;
+    out.linearDepth = -viewPos.z; // negated because view Z is negative forward
+    // Compute screen UV for depth sampling
+    float2 ndc = clipPos.xy / clipPos.w;
+    out.screenUV = float2(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
     return out;
 }
 
 fragment float4 particleFragment(
     ParticleVertexOut               in              [[stage_in]],
     constant ParticlePushConstants& pc              [[buffer(0)]],
+    constant CameraData&            camera          [[buffer(1)]],
     texture2d<float>                particleTexture [[texture(0)]],
+    depth2d<float>                  sceneDepth      [[texture(1)]],
     sampler                         particleSampler [[sampler(0)]]
 ) {
     float4 outColor;
@@ -272,6 +329,18 @@ fragment float4 particleFragment(
 
         outColor = float4(in.color.rgb * (alpha + glow * 0.5), in.color.a * alpha);
     }
+
+    // Depth fade: soft fade when particle is close to scene geometry
+    if (pc.depthFadeEnabled > 0.5 && pc.depthFadeDistance > 0.0) {
+        constexpr sampler depthSampler(filter::linear, address::clamp_to_edge);
+        float sceneDepthSample = sceneDepth.sample(depthSampler, in.screenUV);
+        float sceneLinearDepth = linearizeDepthMetal(sceneDepthSample, camera.near, camera.far);
+        float depthDiff = sceneLinearDepth - in.linearDepth;
+
+        float depthFade = saturate(depthDiff / pc.depthFadeDistance);
+        outColor.a *= depthFade;
+    }
+
     if (outColor.a < 0.01) discard_fragment();
     return outColor;
 }
