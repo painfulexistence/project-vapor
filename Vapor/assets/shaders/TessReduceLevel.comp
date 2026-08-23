@@ -1,0 +1,22 @@
+#version 460
+// Tess reduction step 2 — GLSL twin of tessReduceLevel: one halving step,
+// level d written from level d+1 (dispatched for d = S-1 .. 0).
+#extension GL_GOOGLE_include_directive : require
+#include "include/tess_common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer TessCbtBuf { uint cbt[]; };
+
+layout(push_constant) uniform PC {
+    layout(offset = 64) uint maxDepth;  // unused here (tessReduceFirst's field)
+    layout(offset = 68) uint level;     // the level being WRITTEN
+};
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint d = level;
+    if (tid >= (1u << d)) return;
+    uint childOff = (2u << d) - 1u;
+    cbt[(1u << d) - 1u + tid] = cbt[childOff + 2u * tid] + cbt[childOff + 2u * tid + 1u];
+}

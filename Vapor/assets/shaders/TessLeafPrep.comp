@@ -1,0 +1,66 @@
+#version 460
+// Tess leaf corner cache (compute path only) — GLSL twin of tessLeafPrep.
+// Indirect dispatch over the NEW leaf count: decode each leaf once into the
+// TessLeafData corner cache + frustum visibility, so the instanced vertex
+// shader only lerps. (The mesh-shader path skips this: its task stage decodes
+// and culls in-line.)
+#extension GL_GOOGLE_include_directive : require
+
+#define TESS_CBT_RO_BINDING 0
+#define TESS_ROOTS_BINDING 2
+#include "include/tess_common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 3) readonly buffer CameraBuf { TessCameraData cam; };
+layout(std430, set = 0, binding = 4) readonly buffer ParamsBuf { TessParams params; };
+
+// Per-leaf corner cache entry (mirror of TessLeafDataGpu, 112 bytes).
+struct TessLeafData {
+    vec4 posU[3];  // xyz = object-space corner, w = uv.x
+    vec4 nrmV[3];  // xyz = corner normal, w = uv.y
+    uint visible;  // 0 = frustum-culled (VS emits a degenerate triangle)
+    uint depth;    // heap depth (debug coloring)
+    uint node;     // heap id (debug)
+    uint pad;
+};
+layout(std430, set = 0, binding = 6) buffer LeafBuf { TessLeafData leaves[]; };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint drawn = min(tessLeafCount(), params.maxLeaves);
+    if (tid >= drawn) return;
+
+    uint node = tessDecodeLeaf(params.maxDepth, params.rootDepth, tid);
+    TessTriangle tri = tessDecodeTriangle(node, params.rootDepth);
+    TessCorner c0 = tessCornerFromWeights(tri.w0, tri.rootSlot);
+    TessCorner c1 = tessCornerFromWeights(tri.w1, tri.rootSlot);
+    TessCorner c2 = tessCornerFromWeights(tri.w2, tri.rootSlot);
+
+    // Frustum: world bounding sphere of the three corners, padded by the
+    // displacement bound.
+    vec3 wc0 = (params.model * vec4(c0.pos, 1.0)).xyz;
+    vec3 wc1 = (params.model * vec4(c1.pos, 1.0)).xyz;
+    vec3 wc2 = (params.model * vec4(c2.pos, 1.0)).xyz;
+    vec3 center = (wc0 + wc1 + wc2) / 3.0;
+    float radius = max(distance(center, wc0), max(distance(center, wc1), distance(center, wc2)));
+    radius += abs(params.displacementScale) * 1.5;
+    bool visible = true;
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = cam.frustumPlanes[i];
+        if (dot(plane.xyz, center) + plane.w < -radius) { visible = false; break; }
+    }
+
+    TessLeafData L;
+    L.posU[0] = vec4(c0.pos, c0.uv.x);
+    L.posU[1] = vec4(c1.pos, c1.uv.x);
+    L.posU[2] = vec4(c2.pos, c2.uv.x);
+    L.nrmV[0] = vec4(c0.nrm, c0.uv.y);
+    L.nrmV[1] = vec4(c1.nrm, c1.uv.y);
+    L.nrmV[2] = vec4(c2.nrm, c2.uv.y);
+    L.visible = visible ? 1u : 0u;
+    L.depth = tessDepthOf(node);
+    L.node = node;
+    L.pad = 0u;
+    leaves[tid] = L;
+}

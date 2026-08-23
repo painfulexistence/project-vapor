@@ -1,0 +1,112 @@
+#version 460
+// GIBS screen-space GI gather — GLSL twin of gibs_sample.metal's `giSample`.
+// Each (reduced-resolution) pixel queries nearby surfels from the spatial hash
+// (search radius in CELLS from gibs.sampleRadius; surfel influence radius in
+// world units from params.sampleRadius) and accumulates weighted irradiance.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+#include "include/gibs_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D depthTexture;
+layout(set = 2, binding = 1) uniform sampler2D normalTexture;
+layout(set = 1, binding = 2) uniform writeonly image2D giOutput;
+
+layout(std430, set = 0, binding = 0) readonly buffer SurfelBuf { Surfel surfels[]; };
+layout(std430, set = 0, binding = 1) readonly buffer CellHeadBuf { uint cellHeads[]; };
+layout(std430, set = 0, binding = 2) readonly buffer GIBSBuf { GIBSData gibs; };
+// GIBSSampleParams (96 B — beyond a push slot) rides a host-visible buffer at
+// the same Metal slot index; see gibsPass.
+layout(std430, set = 0, binding = 3) readonly buffer SampleParamsBuf {
+    mat4 sampInvViewProj;
+    vec2 sampScreenSize;
+    vec2 sampGiResolution;
+    float sampSampleRadius;  // surfel influence radius, world units
+    uint sampMaxSamples;
+    float sampNormalWeight;
+    float sampDistanceWeight;
+};
+layout(std430, set = 0, binding = 4) readonly buffer SurfelNextBuf { uint surfelNext[]; };
+
+vec3 sampleGIFromSurfels(vec3 worldPos, vec3 normal) {
+    if (!isInWorldBounds(worldPos, gibs.worldMin, gibs.worldMax)) {
+        return vec3(0.0);
+    }
+
+    uvec3 grid = gibs.gridSize;
+    uvec3 baseCell = worldToCell(worldPos, gibs.worldMin, gibs.cellSize);
+
+    vec3 irradianceSum = vec3(0.0);
+    float weightSum = 0.0;
+
+    // Search radius is in CELLS (gibs.sampleRadius); the surfel influence
+    // radius (sampSampleRadius) is in world units.
+    int searchRadius = int(gibs.sampleRadius);
+
+    for (int dz = -searchRadius; dz <= searchRadius; dz++) {
+        for (int dy = -searchRadius; dy <= searchRadius; dy++) {
+            for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+                ivec3 cellCoord = ivec3(baseCell) + ivec3(dx, dy, dz);
+
+                if (any(lessThan(cellCoord, ivec3(0))) ||
+                    any(greaterThanEqual(uvec3(cellCoord), grid))) {
+                    continue;
+                }
+
+                uint cellIndex = cellToIndex(uvec3(cellCoord), grid);
+                if (cellIndex >= gibs.totalCells) {
+                    continue;
+                }
+
+                // Walk this cell's surfel list
+                uint sampled = 0u;
+                uint iter = 0u;
+                for (uint j = cellHeads[cellIndex];
+                     j != GIBS_INVALID_INDEX && iter < GIBS_MAX_CHAIN_LENGTH && sampled < sampMaxSamples;
+                     j = surfelNext[j], iter++) {
+                    Surfel surfel = surfels[j];
+                    if ((surfel.flags & SURFEL_FLAG_VALID) == 0u) {
+                        continue;
+                    }
+
+                    float weight = computeSurfelWeight(worldPos, normal, surfel, sampSampleRadius);
+                    if (weight > GIBS_EPSILON) {
+                        vec3 surfelRadiance = surfel.irradiance + surfel.directLight;
+                        irradianceSum += surfelRadiance * weight;
+                        weightSum += weight;
+                        sampled++;
+                    }
+                }
+            }
+        }
+    }
+
+    if (weightSum > GIBS_EPSILON) {
+        return irradianceSum / weightSum;
+    }
+    return vec3(0.0);
+}
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= uint(sampGiResolution.x) || gid.y >= uint(sampGiResolution.y)) {
+        return;
+    }
+
+    // Corresponding screen UV + full-res G-buffer coordinate.
+    vec2 uv = (vec2(gid) + 0.5) / sampGiResolution;
+    ivec2 depthCoord = ivec2(uv * sampScreenSize);
+    float depth = texelFetch(depthTexture, depthCoord, 0).r;
+
+    if (depth > 0.9999) {
+        imageStore(giOutput, ivec2(gid), vec4(0.0));  // sky
+        return;
+    }
+
+    vec3 worldPos = reconstructWorldPosition(uv, depth, sampInvViewProj);
+    vec3 normal = normalize(texelFetch(normalTexture, depthCoord, 0).xyz);
+
+    vec3 gi = sampleGIFromSurfels(worldPos, normal);
+    imageStore(giOutput, ivec2(gid), vec4(gi, 1.0));
+}

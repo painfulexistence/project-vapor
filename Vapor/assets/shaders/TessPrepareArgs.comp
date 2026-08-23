@@ -1,0 +1,45 @@
+#version 460
+// Tess indirect args — GLSL twin of tessPrepareArgs. Single thread: write
+// next frame's classify dispatch args, this frame's leafPrep args, the
+// indirect draw command (instanceCount = leaf count) and the mesh-path task
+// grid — the CPU never sees any of these numbers.
+#extension GL_GOOGLE_include_directive : require
+
+#define TESS_CBT_RO_BINDING 0
+#include "include/tess_common.glsl"
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 4) readonly buffer ParamsBuf { TessParams params; };
+// GPU-written indirect args (64 B; field offsets are load-bearing — see
+// tessellation.hpp's kTessArgs*Offset constants).
+layout(std430, set = 0, binding = 5) buffer ArgsBuf {
+    uint classifyArgs[3];  // offset  0: next frame's classify dispatch groups
+    uint leafPrepArgs[3];  // offset 12: this frame's leafPrep dispatch groups
+    uint drawArgs[5];      // offset 24: DrawCommand
+    uint meshTasksArgs[3]; // offset 44: task-shader grid for the mesh path
+    uint leafCountOut;     // offset 56
+    uint argsPad;
+};
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) return;
+    uint leafCount = tessLeafCount();
+    uint drawn = min(leafCount, params.maxLeaves);
+
+    classifyArgs[0] = (leafCount + 63u) / 64u;
+    classifyArgs[1] = 1u;
+    classifyArgs[2] = 1u;
+    leafPrepArgs[0] = (drawn + 63u) / 64u;
+    leafPrepArgs[1] = 1u;
+    leafPrepArgs[2] = 1u;
+    drawArgs[0] = params.gridIndexCount;  // indexCount
+    drawArgs[1] = drawn;                  // instanceCount (one per leaf)
+    drawArgs[2] = 0u;                     // firstIndex
+    drawArgs[3] = 0u;                     // vertexOffset
+    drawArgs[4] = 0u;                     // firstInstance
+    meshTasksArgs[0] = (drawn + 31u) / 32u;
+    meshTasksArgs[1] = 1u;
+    meshTasksArgs[2] = 1u;
+    leafCountOut = leafCount;
+}

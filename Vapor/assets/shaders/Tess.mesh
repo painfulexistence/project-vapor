@@ -1,0 +1,61 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_GOOGLE_include_directive : require
+// Adaptive GPU tessellation, mesh stage — GLSL twin of 3d_tess_mesh.metal's
+// tessMeshMain. Re-derives the leaf's corner attributes from the payload's
+// heap node id (a pure bit walk — no CBT reads) and emits the same 45-vertex
+// / 64-triangle grid the compute path instances, with identical barycentrics
+// — the two paths are pixel-identical.
+
+#define TESS_ROOTS_BINDING 2
+#include "include/tess_common.glsl"
+
+layout(local_size_x = 64) in;  // >= max(45 verts, 64 tris)
+layout(triangles, max_vertices = 45, max_primitives = 64) out;
+
+layout(std430, set = 0, binding = 1) readonly buffer CameraBuf { TessCameraData cam; };
+layout(std430, set = 0, binding = 3) readonly buffer ParamsBuf { TessParams params; };
+
+struct TessPayload {
+    uint nodes[32];
+};
+taskPayloadSharedEXT TessPayload payload;
+
+layout(location = 0) out vec3 outWorldNormal[];
+layout(location = 1) out vec3 outWorldPosition[];
+layout(location = 2) out vec2 outUV[];
+layout(location = 3) flat out uint outDepth[];
+layout(location = 4) flat out uint outNode[];
+
+void main() {
+    uint node = payload.nodes[gl_WorkGroupID.x];
+    // Every thread re-runs the (cheap, CBT-free) bit-walk decode — redundant
+    // arithmetic instead of shared memory + barrier.
+    TessTriangle tri = tessDecodeTriangle(node, params.rootDepth);
+    TessCorner c0 = tessCornerFromWeights(tri.w0, tri.rootSlot);
+    TessCorner c1 = tessCornerFromWeights(tri.w1, tri.rootSlot);
+    TessCorner c2 = tessCornerFromWeights(tri.w2, tri.rootSlot);
+
+    SetMeshOutputsEXT(TESS_GRID_VERTS, TESS_GRID_TRIS);
+
+    uint tid = gl_LocalInvocationIndex;
+    if (tid < TESS_GRID_VERTS) {
+        uvec2 rc = tessGridVertexRC(tid);
+        vec3 w = tessGridBarycentric(rc.x, rc.y);
+        vec3 pos = w.x * c0.pos + w.y * c1.pos + w.z * c2.pos;
+        vec3 nrm = normalize(w.x * c0.nrm + w.y * c1.nrm + w.z * c2.nrm);
+        vec2 uv = w.x * c0.uv + w.y * c1.uv + w.z * c2.uv;
+        pos += nrm * tessDisplaceAmount(pos, params.displacementScale);
+
+        vec4 world = params.model * vec4(pos, 1.0);
+        gl_MeshVerticesEXT[tid].gl_Position = cam.proj * cam.view * world;
+        outWorldPosition[tid] = world.xyz;
+        outWorldNormal[tid] = normalize((params.model * vec4(nrm, 0.0)).xyz);
+        outUV[tid] = uv;
+        outDepth[tid] = tessDepthOf(node);
+        outNode[tid] = node;
+    }
+    if (tid < TESS_GRID_TRIS) {
+        gl_PrimitiveTriangleIndicesEXT[tid] = tessGridTriangle(tid);
+    }
+}

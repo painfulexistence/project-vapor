@@ -1,0 +1,150 @@
+#version 460
+// GIBS surfel generation from the pre-pass G-buffer — GLSL twin of
+// gibs_surfel_generation.metal's `surfelGeneration` kernel. Stochastic,
+// density-driven acceptance; coverage check against last frame's spatial hash;
+// slot allocation prefers the free-list (reclaimed by GibsSurfelUpdate) before
+// bumping the persistent high-water cursor.
+//
+// Counters: [0] per-frame generation budget, [1] pool high-water cursor
+// (CPU reads it back as the active surfel count), [2] free-list depth.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+#include "include/gibs_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D depthTexture;
+layout(set = 2, binding = 1) uniform sampler2D normalTexture;
+layout(set = 2, binding = 2) uniform sampler2D albedoTexture;
+
+layout(std430, set = 0, binding = 0) buffer SurfelBuf { Surfel surfels[]; };
+layout(std430, set = 0, binding = 1) buffer CounterBuf { uint counters[]; };
+layout(std430, set = 0, binding = 2) readonly buffer GIBSBuf { GIBSData gibs; };
+// SurfelGenerationParams (96 B — beyond a push slot) rides a host-visible
+// buffer at the same Metal slot index; see gibsPass.
+layout(std430, set = 0, binding = 3) readonly buffer GenParamsBuf {
+    mat4 genInvViewProj;
+    vec2 genScreenSize;
+    float genSurfelRadius;
+    float genDensityThreshold;
+    uint genMaxNewSurfels;
+    uint genFrameIndex;
+    vec2 _genPad;
+};
+layout(std430, set = 0, binding = 4) readonly buffer CellHeadBuf { uint cellHeads[]; };
+layout(std430, set = 0, binding = 5) readonly buffer SurfelNextBuf { uint surfelNext[]; };
+layout(std430, set = 0, binding = 6) readonly buffer FreeListBuf { uint freeList[]; };
+
+const uint COUNTER_NEW_SURFELS = 0u;
+const uint COUNTER_TOTAL_SURFELS = 1u;
+const uint COUNTER_FREE_SURFELS = 2u;
+
+void main() {
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    if (gid.x >= uint(genScreenSize.x) || gid.y >= uint(genScreenSize.y)) {
+        return;
+    }
+
+    float depth = texelFetch(depthTexture, ivec2(gid), 0).r;
+    if (depth > 0.9999) {
+        return; // sky
+    }
+
+    vec3 worldPos = reconstructWorldPositionFromPixel(gid, depth, genScreenSize, genInvViewProj);
+    if (!isInWorldBounds(worldPos, gibs.worldMin, gibs.worldMax)) {
+        return;
+    }
+
+    // normalRT stores signed world-space normals (same as the AO kernels).
+    vec3 rawNormal = texelFetch(normalTexture, ivec2(gid), 0).xyz;
+    if (length(rawNormal) < 0.5) {
+        return; // cleared / invalid pixel
+    }
+    vec3 normal = normalize(rawNormal);
+
+    vec3 albedo = texelFetch(albedoTexture, ivec2(gid), 0).rgb;
+
+    // Stochastic acceptance based on density x distance x view angle.
+    uint seed = temporalSeed(gid, genFrameIndex);
+    float rnd = randomFloat(seed);
+
+    vec3 toCamera = normalize(gibs.cameraPosition - worldPos);
+    float distToCamera = length(gibs.cameraPosition - worldPos);
+    float distanceFactor = clamp(1.0 - distToCamera / gibs.rayMaxDistance, 0.0, 1.0);
+    distanceFactor = distanceFactor * distanceFactor; // Quadratic falloff
+    float angleFactor = max(0.1, dot(normal, toCamera));
+    float probability = genDensityThreshold * distanceFactor * angleFactor;
+    if (rnd > probability) {
+        return;
+    }
+
+    // Cheap pool-full early-out (racy read is fine; allocation is authoritative).
+    if (counters[COUNTER_TOTAL_SURFELS] >= gibs.maxSurfels &&
+        counters[COUNTER_FREE_SURFELS] == 0u) {
+        return;
+    }
+
+    // Coverage check against last frame's spatial hash: reject if an existing
+    // surfel already covers this point (see the Metal twin for the rationale).
+    {
+        uint coverageCell = computeCellHash(worldPos, gibs.worldMin, gibs.cellSize, gibs.gridSize);
+        uint iter = 0u;
+        for (uint j = cellHeads[coverageCell];
+             j != GIBS_INVALID_INDEX && iter < GIBS_MAX_CHAIN_LENGTH;
+             j = surfelNext[j], iter++) {
+            Surfel existing = surfels[j];
+            if ((existing.flags & SURFEL_FLAG_VALID) == 0u) {
+                continue;
+            }
+            float dist = length(existing.position - worldPos);
+            bool covered = dist < existing.radius * 2.0
+                        && dot(existing.normal, normal) > 0.7;
+            if (covered) {
+                return; // surface already represented here
+            }
+        }
+    }
+
+    // Per-frame generation budget.
+    uint newIndex = atomicAdd(counters[COUNTER_NEW_SURFELS], 1u);
+    if (newIndex >= genMaxNewSurfels) {
+        return;
+    }
+
+    // Allocate a slot: prefer a reclaimed free-list slot, else bump the
+    // high-water cursor (undoing on overflow) — exact Metal semantics.
+    uint surfelIndex;
+    uint prevFree = atomicAdd(counters[COUNTER_FREE_SURFELS], uint(-1));
+    if (prevFree != 0u && prevFree <= gibs.maxSurfels) {
+        surfelIndex = freeList[prevFree - 1u];
+    } else {
+        atomicAdd(counters[COUNTER_FREE_SURFELS], 1u);
+        surfelIndex = atomicAdd(counters[COUNTER_TOTAL_SURFELS], 1u);
+        if (surfelIndex >= gibs.maxSurfels) {
+            atomicAdd(counters[COUNTER_TOTAL_SURFELS], uint(-1));
+            return;
+        }
+    }
+
+    uint cellHash = computeCellHash(worldPos, gibs.worldMin, gibs.cellSize, gibs.gridSize);
+
+    Surfel surfel;
+    surfel.position = worldPos;
+    surfel.radius = genSurfelRadius;
+    surfel.normal = normal;
+    surfel._pad1 = 0.0;
+    surfel.albedo = albedo;
+    surfel._pad2 = 0.0;
+    surfel.irradiance = vec3(0.0); // Filled by the raytracing pass
+    surfel._pad3 = 0.0;
+    surfel.directLight = vec3(0.0);
+    surfel.age = 0.0;
+    surfel.cellHash = cellHash;
+    surfel.flags = SURFEL_FLAG_STATIC | SURFEL_FLAG_VALID | SURFEL_FLAG_NEEDS_UPDATE;
+    surfel.instanceID = 0u;
+    surfel._pad4 = 0u;
+    surfel._reserved1 = vec4(0.0);
+    surfel._reserved2 = vec4(0.0);
+
+    surfels[surfelIndex] = surfel;
+}

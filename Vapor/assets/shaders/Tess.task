@@ -1,0 +1,60 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_GOOGLE_include_directive : require
+// Adaptive GPU tessellation, task (object) stage — GLSL twin of
+// 3d_tess_mesh.metal's tessObjectMain. Each 32-thread group claims 32 leaf
+// indices, decodes them from the CBT (heap descent + bit walk),
+// frustum-culls, compacts survivors (shared-atomic pattern, same as
+// Meshlet.task), and forwards heap node ids in the payload. Launched via
+// drawMeshTasksIndirect on TessArgs.meshTasks.
+//
+// Bindings (set 0 via RHI::setVertexBuffer): 0 = CBT storage (read),
+// 1 = CameraData, 2 = TessRoot[], 3 = TessParams (host-visible buffer on
+// Vulkan; Metal uses setVertexBytes).
+
+#define TESS_CBT_RO_BINDING 0
+#define TESS_ROOTS_BINDING 2
+#include "include/tess_common.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(std430, set = 0, binding = 1) readonly buffer CameraBuf { TessCameraData cam; };
+layout(std430, set = 0, binding = 3) readonly buffer ParamsBuf { TessParams params; };
+
+struct TessPayload {
+    uint nodes[32];
+};
+taskPayloadSharedEXT TessPayload payload;
+
+shared uint visibleCount;
+
+void main() {
+    if (gl_LocalInvocationIndex == 0u) visibleCount = 0u;
+    barrier();
+
+    uint leafIndex = gl_GlobalInvocationID.x;
+    uint drawn = min(tessLeafCount(), params.maxLeaves);
+
+    if (leafIndex < drawn) {
+        uint node = tessDecodeLeaf(params.maxDepth, params.rootDepth, leafIndex);
+        TessTriangle tri = tessDecodeTriangle(node, params.rootDepth);
+        vec3 wc0 = (params.model * vec4(tessCornerFromWeights(tri.w0, tri.rootSlot).pos, 1.0)).xyz;
+        vec3 wc1 = (params.model * vec4(tessCornerFromWeights(tri.w1, tri.rootSlot).pos, 1.0)).xyz;
+        vec3 wc2 = (params.model * vec4(tessCornerFromWeights(tri.w2, tri.rootSlot).pos, 1.0)).xyz;
+        vec3 center = (wc0 + wc1 + wc2) / 3.0;
+        float radius = max(distance(center, wc0), max(distance(center, wc1), distance(center, wc2)));
+        radius += abs(params.displacementScale) * 1.5;
+        bool visible = true;
+        for (int i = 0; i < 6; ++i) {
+            vec4 plane = cam.frustumPlanes[i];
+            if (dot(plane.xyz, center) + plane.w < -radius) { visible = false; break; }
+        }
+        if (visible) {
+            uint slot = atomicAdd(visibleCount, 1u);
+            payload.nodes[slot] = node;
+        }
+    }
+
+    barrier();
+    EmitMeshTasksEXT(visibleCount, 1u, 1u);
+}

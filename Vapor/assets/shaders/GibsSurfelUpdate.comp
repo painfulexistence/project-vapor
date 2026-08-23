@@ -1,0 +1,60 @@
+#version 460
+// GIBS surfel aging + eviction — GLSL twin of gibs_surfel_generation.metal's
+// `surfelUpdate` kernel. Ages every live surfel, staggers NEEDS_UPDATE marks
+// across frames, and evicts too-old / out-of-bounds surfels by clearing VALID
+// and pushing the slot onto the free-list so generation can reuse it.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+#include "include/gibs_common.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer SurfelBuf { Surfel surfels[]; };
+layout(std430, set = 0, binding = 1) buffer CounterBuf { uint counters[]; };
+layout(std430, set = 0, binding = 2) readonly buffer GIBSBuf { GIBSData gibs; };
+layout(std430, set = 0, binding = 3) buffer FreeListBuf { uint freeList[]; };
+
+const uint COUNTER_FREE_SURFELS = 2u;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= gibs.activeSurfelCount) {
+        return;
+    }
+
+    Surfel surfel = surfels[gid];
+
+    // Skip invalid surfels (already evicted; their slot is on the free-list).
+    if ((surfel.flags & SURFEL_FLAG_VALID) == 0u) {
+        return;
+    }
+
+    surfel.age += 1.0;
+
+    // Stagger static-surfel updates across frames (1/N per frame).
+    if ((surfel.flags & SURFEL_FLAG_STATIC) != 0u) {
+        uint updateInterval = 4u;
+        if (uint(surfel.age) % updateInterval == gibs.frameIndex % updateInterval) {
+            surfel.flags |= SURFEL_FLAG_NEEDS_UPDATE;
+        }
+    }
+    if ((surfel.flags & SURFEL_FLAG_DYNAMIC) != 0u) {
+        surfel.flags |= SURFEL_FLAG_NEEDS_UPDATE;
+    }
+
+    // Evict + reclaim: clear VALID and push the index onto the free-list.
+    if (surfel.age > 600.0 || !isInWorldBounds(surfel.position, gibs.worldMin, gibs.worldMax)) {
+        surfel.flags &= ~SURFEL_FLAG_VALID;
+        surfels[gid] = surfel;
+        uint slot = atomicAdd(counters[COUNTER_FREE_SURFELS], 1u);
+        if (slot < gibs.maxSurfels) {
+            freeList[slot] = gid;
+        } else {
+            // Free-list full (should never happen) — undo for consistency.
+            atomicAdd(counters[COUNTER_FREE_SURFELS], uint(-1));
+        }
+        return;
+    }
+
+    surfels[gid] = surfel;
+}

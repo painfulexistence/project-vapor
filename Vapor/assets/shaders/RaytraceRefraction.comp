@@ -1,0 +1,181 @@
+#version 460
+// RT refractions (KHR_materials_transmission) — GLSL ray-query twin of
+// 3d_raytrace_refraction.metal. Structural clone of RaytraceReflection.comp
+// with the ray direction swapped for a refracted one (fixed IOR 1.5, the glTF
+// default). Deliberate v1 trade-offs mirror the Metal kernel:
+//   - THIN-WALLED: one refraction event at the front surface, no exit event
+//     and no absorption; total internal reflection falls back to a reflect ray.
+//   - Sharp only (no roughness cone) — noise-free, no temporal denoise; the
+//     PBR composite fades it by roughness and weights by transmission.
+// Output: RGBA16F, rgb = transmitted radiance, a = 1 hit / 0 miss.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+#include "include/rt_common.glsl"
+#include "include/gibs_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D depthTexture;    // full-res
+layout(set = 2, binding = 1) uniform sampler2D normalTexture;   // full-res
+layout(set = 1, binding = 2) uniform writeonly image2D refractionTexture;
+layout(set = 2, binding = 3) uniform samplerCube envMap;        // prefiltered
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData camera; };
+layout(std430, set = 0, binding = 1) readonly buffer SurfelBuf { Surfel surfels[]; };
+layout(std430, set = 0, binding = 2) readonly buffer CellHeadBuf { uint cellHeads[]; };
+layout(std430, set = 0, binding = 3) readonly buffer SurfelNextBuf { uint surfelNext[]; };
+layout(std430, set = 0, binding = 4) readonly buffer GIBSBuf { GIBSData gibs; };
+layout(set = 3, binding = 5) uniform accelerationStructureEXT TLAS;
+layout(std430, set = 0, binding = 7) readonly buffer InstanceBuf { InstanceData instances[]; };
+layout(std430, set = 0, binding = 8) readonly buffer MaterialBuf { MaterialData materials[]; };
+layout(std430, set = 0, binding = 9) readonly buffer DirLightBuf { DirLight directionalLights[]; };
+layout(std430, set = 0, binding = 10) readonly buffer MergedVB { float meshVerts[]; };
+layout(std430, set = 0, binding = 11) readonly buffer MergedIB { uint meshIndices[]; };
+layout(set = 4, binding = 0) uniform texture2D materialTextures[];
+layout(set = 4, binding = 1) uniform sampler materialSampler;
+
+// setComputeBytes slot 6 -> push offset 96 (RefractionParams, 16 bytes).
+layout(push_constant) uniform PC {
+    layout(offset = 96) float rayBias;
+    layout(offset = 100) float rayMaxDistance;
+    layout(offset = 104) uint frameIndex;
+    layout(offset = 108) uint hasBindlessGeo;
+};
+
+const uint kFloatsPerVertex = 12u;  // packed VertexData: pos3 + uv2 + normal3 + tangent4
+
+vec3 vertexNormal(uint i) {
+    uint b = i * kFloatsPerVertex;
+    return vec3(meshVerts[b + 5u], meshVerts[b + 6u], meshVerts[b + 7u]);
+}
+
+vec2 vertexUV(uint i) {
+    uint b = i * kFloatsPerVertex;
+    return vec2(meshVerts[b + 3u], meshVerts[b + 4u]);
+}
+
+vec3 surfelRadianceAt(vec3 pos, vec3 normalApprox) {
+    if (gibs.totalCells == 0u || !isInWorldBounds(pos, gibs.worldMin, gibs.worldMax)) {
+        return vec3(0.0);
+    }
+    uint cellHash = computeCellHash(pos, gibs.worldMin, gibs.cellSize, gibs.gridSize);
+    if (cellHash >= gibs.totalCells) {
+        return vec3(0.0);
+    }
+    float bestWeight = 0.0;
+    vec3 best = vec3(0.0);
+    uint iter = 0u;
+    for (uint j = cellHeads[cellHash];
+         j != GIBS_INVALID_INDEX && iter < GIBS_MAX_CHAIN_LENGTH;
+         j = surfelNext[j], iter++) {
+        Surfel s = surfels[j];
+        if ((s.flags & SURFEL_FLAG_VALID) == 0u) continue;
+        float w = computeSurfelWeight(pos, normalApprox, s, gibs.cellSize * 2.0);
+        if (w > bestWeight) {
+            bestWeight = w;
+            best = s.irradiance + s.directLight;
+        }
+    }
+    return best;
+}
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(refractionTexture);
+    if (tid.x >= uint(outDim.x) || tid.y >= uint(outDim.y)) return;
+
+    ivec2 fullDim = textureSize(depthTexture, 0);
+    uvec2 scale = max(uvec2(fullDim) / uvec2(outDim), uvec2(1u));
+    ivec2 fullTid = ivec2(min(tid * scale, uvec2(fullDim) - 1u));
+
+    float depth = texelFetch(depthTexture, fullTid, 0).r;
+    if (depth >= 1.0) {
+        imageStore(refractionTexture, ivec2(tid), vec4(0.0));  // sky
+        return;
+    }
+
+    vec2 uv = (vec2(tid) + 0.5) / vec2(outDim);
+    vec3 worldPos = worldPosFromDepth(uv, depth, camera.invProj, camera.invView);
+    vec3 N = normalize(texelFetch(normalTexture, fullTid, 0).xyz);
+
+    vec3 V = normalize(worldPos - camera.position);  // camera -> surface
+
+    // Air -> glass, IOR 1.5 (glTF default; eta < 1 never total-internal-
+    // reflects, the fallback is pure robustness for degenerate normals).
+    const float kEta = 1.0 / 1.5;
+    vec3 T = refract(V, N, kEta);
+    bool refracted = dot(T, T) > 1e-6;
+    if (!refracted) {
+        T = reflect(V, N);
+    }
+    T = normalize(T);
+
+    // Refracted rays enter the surface: bias AGAINST the normal so the ray
+    // starts inside and doesn't re-hit the front face at t~0. The TIR/reflect
+    // fallback exits on the camera side and biases along the normal instead.
+    vec3 origin = worldPos + (refracted ? -N : N) * rayBias;
+
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, TLAS, gl_RayFlagsOpaqueEXT, 0xFF,
+                          origin, 0.001, T, rayMaxDistance);
+    while (rayQueryProceedEXT(rq)) {}
+
+    vec3 color;
+    float hitMask;
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+        float hitT = rayQueryGetIntersectionTEXT(rq, true);
+        vec3 hitPos = origin + T * hitT;
+
+        // Standalone hit shading — same recipe as the reflection kernel.
+        uint iid = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true));
+        InstanceData inst = instances[iid];
+        mat3 model33 = mat3(inst.model);
+        MaterialData mat = materials[inst.materialID];
+        vec3 base = mat.baseColorFactor.rgb;
+
+        vec3 hitN;
+        if (hasBindlessGeo != 0u) {
+            uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(rq, true));
+            uint b  = inst.rtIndexOffset + prim * 3u;
+            uint i0 = meshIndices[b + 0u] + inst.rtVertexOffset;
+            uint i1 = meshIndices[b + 1u] + inst.rtVertexOffset;
+            uint i2 = meshIndices[b + 2u] + inst.rtVertexOffset;
+            vec2 bc = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+            float w0 = 1.0 - bc.x - bc.y;
+            vec3 nObj = w0 * vertexNormal(i0) + bc.x * vertexNormal(i1) + bc.y * vertexNormal(i2);
+            hitN = normalize(model33 * nObj);
+            vec2 hitUV = w0 * vertexUV(i0) + bc.x * vertexUV(i1) + bc.y * vertexUV(i2);
+            base *= textureLod(sampler2D(materialTextures[nonuniformEXT(inst.materialID * 6u)],
+                                         materialSampler), hitUV, 0.0).rgb;
+        } else {
+            hitN = -T;
+        }
+        if (dot(hitN, T) > 0.0) hitN = -hitN;
+
+        DirLight sun = directionalLights[0];
+        vec3 L = normalize(-sun.direction);
+        float sunVis = 0.0;
+        float nl = max(dot(hitN, L), 0.0);
+        if (nl > 0.0) {
+            rayQueryEXT occ;
+            rayQueryInitializeEXT(occ, TLAS,
+                                  gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                                  0xFF, hitPos + hitN * rayBias, 0.001, L, rayMaxDistance);
+            rayQueryProceedEXT(occ);
+            sunVis = (rayQueryGetIntersectionTypeEXT(occ, true) ==
+                      gl_RayQueryCommittedIntersectionNoneEXT) ? 1.0 : 0.0;
+        }
+
+        vec3 ambient = textureLod(envMap, hitN, 4.0).rgb;
+
+        color = base * (sun.color * sun.intensity * (sunVis * nl) + ambient)
+              + mat.emissiveFactor * mat.emissiveStrength;
+        color += base * surfelRadianceAt(hitPos, hitN);
+        hitMask = 1.0;
+    } else {
+        color = textureLod(envMap, T, 0.0).rgb;
+        hitMask = 0.0;
+    }
+    imageStore(refractionTexture, ivec2(tid), vec4(color, hitMask));
+}

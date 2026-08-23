@@ -180,8 +180,19 @@ struct alignas(16) LightCullData {
     float _pad1 = 0.0f;
     glm::uvec3 gridSize;
     Uint32 lightCount;
-    Uint32 cullSpotCount;   // keep in step with Vapor::LightCullData
+    Uint32 cullSpotCount;   // keep in step with RHIMain.frag's LightCullBuf
     Uint32 cullRectCount;
+    // RT composite params for the Vulkan RHIMainRT.frag variants. The Metal
+    // PBR shader receives the same values through fragment bytes 15/17/18,
+    // which on Vulkan would alias real push-constant fields — so they ride in
+    // this per-frame buffer instead (same reasoning as iblIntensity above).
+    // rtFlags: bit0 = stochastic shadow RGB format active (point/rect/spot in
+    // R/G/B of texPointShadow), bit1 = GIBS GI bound, bit2 = RT sun shadow
+    // bound (texShadowRT replaces the near-map sample).
+    Uint32 rtFlags = 0;
+    float rtReflectionIntensity = 0.0f;  // 0 = reflection composite off
+    float rtRefractionIntensity = 0.0f;  // 0 = refraction composite off
+    float _pad2 = 0.0f;
 };
 
 struct alignas(16) IBLCaptureData {

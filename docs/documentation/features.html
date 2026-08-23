@@ -33,8 +33,8 @@
         <tr><td>GPU-Driven Instancing</td><td>5000+ simultaneous instances. Tested against the Bistro scene (2911 instances).</td></tr>
         <tr><td>Physically-Based Rendering</td><td>Disney BRDF shading model. Supports albedo, metallic, roughness, normal, and emissive maps.</td></tr>
         <tr><td>MSAA 4x</td><td>Hardware multi-sample anti-aliasing.</td></tr>
-        <tr><td>Raytraced Directional Shadow</td><td>Metal only. Raytraced hard shadows.</td></tr>
-        <tr><td>Stochastic RT Shadows + ReSTIR</td><td>Metal only. Stochastic shadows for point/rect/spot lights, denoised by ReSTIR</td></tr>
+        <tr><td>Raytraced Directional Shadow</td><td>Metal (Apple Silicon) and Vulkan (VK_KHR_ray_query, desktop RT GPUs). Capability-gated; skipped where hardware RT is absent (e.g. MoltenVK).</td></tr>
+        <tr><td>Stochastic RT Shadows + ReSTIR</td><td>Metal and Vulkan (capability-gated). Stochastic shadows for point/rect/spot lights, denoised by ReSTIR</td></tr>
         <tr><td>Bloom</td><td>HDR bloom post-processing.</td></tr>
         <tr><td>Volumetric Fog / God Rays</td><td>Volumetric fog and Tyndall light beam effect.</td></tr>
         <tr><td>Volumetric Clouds</td><td>Procedural volumetric cloud rendering.</td></tr>
@@ -45,7 +45,7 @@
         <tr><td>3D Batch Rendering</td><td>World-space batch rendering with depth testing.</td></tr>
         <tr><td>Sprite / Texture Quad</td><td>Textured quad rendering with rotation and tint.</td></tr>
         <tr><td>Bitmap Font Rendering</td><td>2D screen-space and 3D world-space text.</td></tr>
-        <tr><td>Multi-backend</td><td>Metal (macOS) and Vulkan (cross-platform) sharing the same API surface.</td></tr>
+        <tr><td>Multi-backend</td><td>Metal (macOS) and Vulkan (cross-platform) sharing the same RHI surface; features gate on runtime capabilities (raytracing, mesh shaders, bindless), not backend checks.</td></tr>
       </tbody>
     </table>
 

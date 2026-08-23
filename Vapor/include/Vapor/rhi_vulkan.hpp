@@ -31,8 +31,9 @@ public:
     void shutdown() override;
     void waitIdle() override;
 
-    // Raytracing (VK_KHR_acceleration_structure) is not implemented — passes
-    // that require it are skipped by the RenderGraph on this backend.
+    // Raytracing (VK_KHR_acceleration_structure + VK_KHR_ray_query) is
+    // enabled when the device supports it (desktop drivers; MoltenVK does not
+    // expose it, so RT passes are skipped by the RenderGraph on macOS).
     const RHICapabilities& getCapabilities() const override { return capabilities; }
 
     Uint32 getMaxFramesInFlight() const override { return MAX_FRAMES_IN_FLIGHT; }
@@ -132,6 +133,21 @@ public:
     void writeTextureArgumentTable(BufferHandle table, Uint32 entry, Uint32 slot,
                                    TextureHandle texture) override;
     void bindTextureArgumentTable(BufferHandle table) override;
+    // Compute-side bind of the same table (RT hit shading samples per-material
+    // albedo). `bufferIndex` is Metal's compute buffer slot — ignored here; the
+    // table always lands on compute set 4 (see the descriptor model).
+    void bindComputeTextureArgumentTable(BufferHandle table, Uint32 bufferIndex) override;
+
+    // Task/object-stage texture for mesh pipelines (Hi-Z pyramid the meshlet
+    // cull samples): mapped onto set 2 binding (OBJECT_TEXTURE_BASE + binding),
+    // which is visible to the task/mesh stages when mesh shaders are enabled.
+    void setObjectTexture(Uint32 binding, TextureHandle texture, SamplerHandle sampler) override;
+
+    // RenderDoc in-application capture: arms a one-shot capture of the NEXT
+    // frame when the process runs under RenderDoc (librenderdoc/renderdoc.dll
+    // already injected). `outPath` sets the capture-file template. No-op
+    // otherwise — the Metal backend's Xcode .gputrace equivalent.
+    void captureFrame(const char* outPath) override;
 
     // ========================================================================
     // Compute Commands
@@ -177,7 +193,7 @@ private:
     // ========================================================================
 
     SDL_Window* window = nullptr;
-    RHICapabilities capabilities;  // filled in initialize(); raytracing stays false
+    RHICapabilities capabilities;  // filled in initialize()/createLogicalDevice
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -266,12 +282,36 @@ private:
         VkPipelineLayout layout;
     };
 
+    // One buffer + VMA allocation pair owned by an acceleration structure
+    // (AS backing storage, build scratch, or TLAS instance staging).
+    struct AccelBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkDeviceSize size = 0;      // grow-only slot sizing
+        void* mapped = nullptr;     // instance staging only (host-visible)
+    };
+
     struct AccelStructResource {
-        // Vulkan ray tracing is not implemented yet
-        // Will use VK_KHR_acceleration_structure when needed
-        VkBuffer scratchBuffer;
-        VkDeviceMemory scratchMemory;
-        void* buildData;
+        AccelStructType type = AccelStructType::BottomLevel;
+        // Aliases of the most recently built slot (what setAccelerationStructure
+        // binds). For a BLAS, slot 0 is the only slot.
+        VkAccelerationStructureKHR accel = VK_NULL_HANDLE;
+        VkDeviceAddress deviceAddress = 0;
+        // Build inputs, copied from the desc (BLAS) / replaced by
+        // updateAccelerationStructure (TLAS) — same bookkeeping as Metal.
+        std::vector<AccelStructGeometry> geometries;
+        std::vector<AccelStructInstance> instances;
+        // TLAS slot rotation: rebuilding one TLAS in place while an in-flight
+        // frame's ray queries still traverse it is a GPU hazard (the Metal
+        // backend documents a hard GPU hang from this). kTlasSlots must be
+        // >= MAX_FRAMES_IN_FLIGHT; a BLAS (built once, at registration) only
+        // ever uses slot 0.
+        static constexpr Uint32 kTlasSlots = 3;
+        VkAccelerationStructureKHR accelSlots[kTlasSlots] = {};
+        AccelBuffer accelBufferSlots[kTlasSlots];
+        AccelBuffer scratchSlots[kTlasSlots];
+        AccelBuffer instanceSlots[kTlasSlots];
+        Uint32 nextSlot = 0;
     };
 
     Uint32 nextBufferId = 1;
@@ -330,13 +370,29 @@ private:
     // these would fail pipeline-layout creation. The meshlet vertex-stage binds
     // (slots 0-7) fit exactly.
     static constexpr Uint32 BINDINGS_PER_SET = 8;
+    // Compute storage buffers: the RT passes (reflection/refraction hit shading,
+    // stochastic shadows) bind up to slot 11, so desktop Vulkan sizes the
+    // compute buffer set to 16. MoltenVK stays at 8 (its per-stage storage
+    // buffer cap) — the RT passes never run there. Arrays are sized for the
+    // max; `computeBufferBindingCount` (set from the device limit) is what the
+    // set layout uses and what setComputeBuffer validates against.
+    static constexpr Uint32 COMPUTE_BUFFER_BINDINGS_MAX = 16;
     // The texture set (combined image samplers, device limit >= 16) holds the 10
     // material/shadow/AO/SSCS/near samplers (b0-b9) plus the 3 IBL maps the main
     // pass now samples: irradiance cube (b10), prefilter cube (b11), BRDF LUT
     // (b12). Additive capacity: the write loop only writes bound slots, so
     // pipelines that use fewer textures (bloom, IBL bake) are unaffected.
     // (Bindless MDI's material texture array lives in set 3, not here.)
+    // When raytracing is available the set grows to TEXTURE_BINDINGS_MAX so the
+    // main pass can also sample the RT outputs (stochastic shadow b13, GIBS GI
+    // b14, reflection b16, refraction b17) and the task stage can sample the
+    // Hi-Z pyramid (b18, see setObjectTexture); `textureBindingCount` is the
+    // runtime size. MoltenVK keeps 13 (16-sampler per-stage cap).
     static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 13;
+    static constexpr Uint32 TEXTURE_BINDINGS_MAX = 20;
+    // Task/object-stage textures (setObjectTexture) live at the top of the
+    // texture set: object binding b -> set 2 binding (OBJECT_TEXTURE_BASE + b).
+    static constexpr Uint32 OBJECT_TEXTURE_BASE = 18;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;
@@ -374,8 +430,12 @@ private:
 
     BufferBinding boundVertexBuffers[BINDINGS_PER_SET];
     BufferBinding boundFragmentBuffers[BINDINGS_PER_SET];
-    TextureBinding boundTextures[TEXTURE_BINDINGS_PER_SET];
+    TextureBinding boundTextures[TEXTURE_BINDINGS_MAX];
     bool descriptorsDirty = true;
+    // Runtime set sizes (see the constants above): fixed on MoltenVK, widened
+    // on desktop devices whose limits allow the RT/meshlet extras.
+    Uint32 textureBindingCount = TEXTURE_BINDINGS_PER_SET;
+    Uint32 computeBufferBindingCount = BINDINGS_PER_SET;
 
     // Compute follows the same model with its own global layout:
     //   set 0 = storage buffers  (setComputeBuffer)
@@ -393,7 +453,38 @@ private:
     VkShaderStageFlags graphicsStageFlags = 0;
     PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasks = nullptr;
     PFN_vkCmdDrawMeshTasksIndirectEXT pfnCmdDrawMeshTasksIndirect = nullptr;
-    BufferBinding boundComputeBuffers[BINDINGS_PER_SET];
+
+    // ------------------------------------------------------------------------
+    // Raytracing (VK_KHR_acceleration_structure + VK_KHR_ray_query)
+    // ------------------------------------------------------------------------
+    // Desktop-only: MoltenVK exposes neither extension, so on macOS this stays
+    // false and every RT pass is skipped by the RenderGraph (same gating the
+    // Metal backend applies through device->supportsRaytracing()). Enabled only
+    // when the extensions AND their features (accelerationStructure, rayQuery,
+    // bufferDeviceAddress) are all present.
+    bool raytracingEnabled = false;
+    // Scratch buffers must be aligned to this device property.
+    Uint32 accelScratchAlignment = 256;
+    PFN_vkCreateAccelerationStructureKHR pfnCreateAccelStruct = nullptr;
+    PFN_vkDestroyAccelerationStructureKHR pfnDestroyAccelStruct = nullptr;
+    PFN_vkGetAccelerationStructureBuildSizesKHR pfnGetAccelBuildSizes = nullptr;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR pfnGetAccelDeviceAddress = nullptr;
+    PFN_vkCmdBuildAccelerationStructuresKHR pfnCmdBuildAccelStructs = nullptr;
+    PFN_vkGetBufferDeviceAddress pfnGetBufferDeviceAddress = nullptr;
+
+    // Compute set 3: acceleration structures (see descriptor model below).
+    VkDescriptorSetLayout computeAccelSetLayout = VK_NULL_HANDLE;
+    VkAccelerationStructureKHR boundComputeAccels[BINDINGS_PER_SET] = {};
+
+    VkDeviceAddress getBufferAddress(VkBuffer buffer) const;
+    // (Re)allocate a grow-only AccelBuffer slot; hostVisible slots stay
+    // persistently mapped (TLAS instance staging).
+    void ensureAccelBuffer(AccelBuffer& slot, VkDeviceSize size, VkBufferUsageFlags usage,
+                           bool hostVisible, VkDeviceSize alignment = 0);
+    void releaseAccelBuffer(AccelBuffer& slot);
+    void buildBLAS(AccelStructResource& res);
+    void buildTLAS(AccelStructResource& res);
+    BufferBinding boundComputeBuffers[COMPUTE_BUFFER_BINDINGS_MAX];
     VkImageView boundComputeImages[BINDINGS_PER_SET] = {};
     TextureBinding boundComputeSampled[BINDINGS_PER_SET] = {};
     bool computeDescriptorsDirty = true;
@@ -500,6 +591,14 @@ private:
     PFN_vkCmdBeginDebugUtilsLabelEXT pfnCmdBeginDebugLabel = nullptr;
     PFN_vkCmdEndDebugUtilsLabelEXT pfnCmdEndDebugLabel = nullptr;
     bool renderPassLabelOpen = false;
+
+    // RenderDoc in-application capture (captureFrame): lazily-resolved
+    // RENDERDOC_API pointer (null when not running under RenderDoc) + the
+    // one-shot arm flag consumed at the next beginFrame.
+    void* rdocApi = nullptr;
+    bool rdocResolved = false;
+    bool captureArmed = false;
+    bool captureActive = false;
     Uint32 currentPassEndQuery = UINT32_MAX;  // pending end-timestamp for the open pass
     void beginDebugLabel(VkCommandBuffer cmd, const char* name);
     void endDebugLabel(VkCommandBuffer cmd);

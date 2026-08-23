@@ -149,6 +149,16 @@ layout(std430, set = 1, binding = 5) readonly buffer LightCullBuf {
     float _cpad1;
     uvec3 cullGridSize;
     uint cullLightCount;
+    uint cullSpotCount;
+    uint cullRectCount;
+    // RT composite params (Vapor::LightCullData tail; the Metal PBR receives
+    // the same values as fragment bytes 15/17/18). rtFlags: bit0 = stochastic
+    // shadow RGB format active, bit1 = GIBS GI bound, bit2 = RT sun shadow
+    // bound. Intensities are 0 while the corresponding effect is off.
+    uint rtFlags;
+    float rtReflectionIntensity;
+    float rtRefractionIntensity;
+    float _cpad2;
 };
 layout(std430, set = 1, binding = 6) readonly buffer SpotLightBuf {
     SpotLight spotLights[];
@@ -239,6 +249,17 @@ layout(set = 2, binding = 9) uniform sampler2D nearShadowTex;
 layout(set = 2, binding = 10) uniform samplerCube irradianceMap;
 layout(set = 2, binding = 11) uniform samplerCube prefilterMap;
 layout(set = 2, binding = 12) uniform sampler2D brdfLut;
+
+#ifdef RT
+// RT-output samplers, present only in the RHIMainRT variants (bound when
+// capabilities.raytracing; neutral white/black fallbacks otherwise — see
+// mainRenderPass). Slot numbers match the Metal system-table entries.
+layout(set = 2, binding = 13) uniform sampler2D texPointShadow;  // stochastic R/G/B = point/rect/spot
+layout(set = 2, binding = 14) uniform sampler2D gibsGITex;       // GIBS surfel GI gather
+layout(set = 2, binding = 15) uniform sampler2D texShadowRT;     // RT sun shadow (half-res, mipped)
+layout(set = 2, binding = 16) uniform sampler2D texReflection;   // RT mirror reflections (mipped)
+layout(set = 2, binding = 17) uniform sampler2D texRefraction;   // RT refractions
+#endif
 
 // PCF sample of one cascade. Returns 1.0 = lit, 0.0 = fully shadowed, or -1.0
 // when the world position falls outside this cascade's frustum.
@@ -550,7 +571,11 @@ vec3 disneyBRDF(vec3 N, vec3 T, vec3 B, vec3 L, vec3 V, Surface s) {
 }
 
 // ── Image-based lighting (twin of Metal's CalculateIBL) ─────────────────────
-vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
+// Split form: the RT composite REPLACES the specular half with the traced
+// reflection while keeping the diffuse half, so the two terms come out
+// separately (both already scaled by ao and the weather dimming).
+void calculateIBLSplit(vec3 N, vec3 V, Surface s, float ao,
+                       out vec3 outDiffuse, out vec3 outSpecular) {
     float NdotV = max(dot(N, V), 0.0);
     vec3 F0 = mix(vec3(0.04), s.color, s.metallic);
     vec3 F = fresnelSchlickRoughness(NdotV, F0, s.roughness);
@@ -564,7 +589,14 @@ vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
     vec2 brdf = texture(brdfLut, vec2(NdotV, s.roughness)).rg;
     vec3 specularIBL = prefiltered * (F * brdf.x + brdf.y);
     // cullIblIntensity: weather dims the baked environment under heavy cloud.
-    return (diffuseIBL + specularIBL) * ao * cullIblIntensity;
+    outDiffuse = diffuseIBL * ao * cullIblIntensity;
+    outSpecular = specularIBL * ao * cullIblIntensity;
+}
+
+vec3 calculateIBL(vec3 N, vec3 V, Surface s, float ao) {
+    vec3 d, sp;
+    calculateIBLSplit(N, V, s, ao, d, sp);
+    return d + sp;
 }
 
 void main() {
@@ -628,6 +660,11 @@ void main() {
     float viewDepth = -(cam.view * vec4(fragPos, 1.0)).z;
 
     vec3 color = vec3(0.0);
+#ifdef RT
+    // Shared screen UV for every RT product sample (they are all screen-sized
+    // or sampled bilinearly at half res).
+    vec2 rtUV = gl_FragCoord.xy / max(screenSize, vec2(1.0));
+#endif
     for (uint i = 0u; i < dirLightCount; ++i) {
         DirLight l = dirLights[i];
         vec3 Ldir = normalize(-l.direction);
@@ -635,7 +672,27 @@ void main() {
         // Only the first (sun) directional light casts the cascaded shadow.
         // Debug bit1 skips the PCF to isolate its cost.
         if (i == 0u && (mainDebugFlags & 2u) == 0u) {
-            float sh = sampleShadow(fragPos, N, Ldir, viewDepth);
+            float sh;
+#ifdef RT
+            // RT near-field sun shadow (rtFlags bit2) replaces the near-map
+            // region with crisp traced contact shadows, cross-fading into
+            // cascade 0 over the blend band — the raster near-map pass is
+            // skipped while the trace runs, so sampleShadow's near branch
+            // must not be reached here.
+            if ((rtFlags & 4u) != 0u && nearShadowEnd > 0.0 && viewDepth < nearShadowEnd) {
+                float rtSh = texture(texShadowRT, rtUV).r;
+                float blendW = max(cascadeBlendRange, 1e-4);
+                if (viewDepth > nearShadowEnd - blendW) {
+                    float c0 = sampleCascade(0, fragPos, max(0.0015 * (1.0 - dot(N, Ldir)), 0.0004));
+                    if (c0 < 0.0) c0 = 1.0;
+                    float t = (viewDepth - (nearShadowEnd - blendW)) / blendW;
+                    sh = mix(rtSh, c0, smoothstep(0.0, 1.0, t));
+                } else {
+                    sh = rtSh;
+                }
+            } else
+#endif
+            sh = sampleShadow(fragPos, N, Ldir, viewDepth);
             // Contact shadows tighten the near contact the cascade/near map miss.
             // min() = shadowed if either says so (no double-darkening from multiply).
             sh = min(sh, texture(sscsTex, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r);
@@ -662,6 +719,12 @@ void main() {
     uint tileIndex = tile.x + tile.y * cullGridSize.x
                    + tileZ * cullGridSize.x * cullGridSize.y;
     if ((mainDebugFlags & 1u) == 0u) {
+        // Stochastic RT point-shadow factor (R channel; white fallback = lit
+        // when the chain is off — same one-sample-per-pixel model as Metal).
+        float pointShadowF = 1.0;
+#ifdef RT
+        pointShadowF = texture(texPointShadow, rtUV).r;
+#endif
         uint count = min(tiles[tileIndex].lightCount, MAX_LIGHTS_PER_TILE);
         for (uint t = 0u; t < count; ++t) {
             PointLight l = pointLights[tiles[tileIndex].lightIndices[t]];
@@ -675,13 +738,18 @@ void main() {
             float dist = sqrt(dist2);
             float attenuation = (1.0 - smoothstep(l.radius * 0.8, l.radius, dist)) / dist2;
             vec3 radiance = l.color * l.intensity * attenuation;
-            color += disneyBRDF(N, T, B, normalize(toLight), V, surf) * radiance;
+            color += disneyBRDF(N, T, B, normalize(toLight), V, surf) * radiance * pointShadowF;
         }
     }
 
     // Spot lights (loop-all; typical scenes carry a handful). Same falloff as
     // point lights, windowed by a squared smooth cone factor between the inner
-    // and outer half-angle cosines. Unshadowed on Vulkan until RT lands here.
+    // and outer half-angle cosines. Shadowed by the stochastic pass's B channel
+    // when the RGB shadow format is active (rtFlags bit0).
+    float spotShadowF = 1.0;
+#ifdef RT
+    if ((rtFlags & 1u) != 0u) spotShadowF = texture(texPointShadow, rtUV).b;
+#endif
     uint clusterSpots = min(tiles[tileIndex].spotCount, MAX_SPOTS_PER_CLUSTER);
     for (uint sSlot = 0u; sSlot < clusterSpots; ++sSlot) {
         uint sIdx = tiles[tileIndex].spotIndices[sSlot];
@@ -696,13 +764,19 @@ void main() {
         float attenuation = (1.0 - smoothstep(sl.radius * 0.8, sl.radius, dist)) / dist2
                           * cone * cone;
         vec3 radiance = sl.color * sl.intensity * attenuation;
-        color += disneyBRDF(N, T, B, Ldir, V, surf) * radiance;
+        color += disneyBRDF(N, T, B, Ldir, V, surf) * radiance * spotShadowF;
     }
 
     // Rect area lights (loop-all): analytic diffuse + specular, combined the
-    // same way as the Metal CalculateRectLight. Unshadowed on Vulkan (the RT
-    // area shadow needs the raytracing port); video-textured lights fall back
-    // to their solid color (no video texture bound on this path).
+    // same way as the Metal CalculateRectLight. Shadowed by the stochastic
+    // pass's G channel (a per-frame random quad point, so temporal
+    // accumulation converges on the true soft penumbra) when the RGB shadow
+    // format is active; video-textured lights fall back to their solid color
+    // (no video texture bound on this path).
+    float rectShadowF = 1.0;
+#ifdef RT
+    if ((rtFlags & 1u) != 0u) rectShadowF = texture(texPointShadow, rtUV).g;
+#endif
     uint clusterRects = min(tiles[tileIndex].rectCount, MAX_RECTS_PER_CLUSTER);
     for (uint rSlot = 0u; rSlot < clusterRects; ++rSlot) {
         uint rIdx = tiles[tileIndex].rectIndices[rSlot];
@@ -713,17 +787,63 @@ void main() {
         vec3 spec = rectLightSpecular(N, V, fragPos, rl, albedo, metallic, roughness);
         vec3 F0r = mix(vec3(0.04), albedo, metallic);
         vec3 kD = (vec3(1.0) - F0r) * (1.0 - metallic);
-        color += (kD * albedo / PI * diffuseGeo + spec) * radiance;
+        color += (kD * albedo / PI * diffuseGeo + spec) * radiance * rectShadowF;
     }
 
     // Indirect term: IBL when the material enables it (matches Metal), else a
     // flat ambient floor. Screen-space AO darkens the indirect only.
     float screenAO = texture(texAO, gl_FragCoord.xy / max(screenSize, vec2(1.0))).r;
+#ifdef RT
+    // Split IBL so the RT composite can REPLACE the specular half (the traced
+    // reflection is the same term as the prefilter, against real geometry).
+    vec3 iblDiffuse = vec3(0.0);
+    vec3 iblSpecular = vec3(0.0);
+    if (mat.iblEnabled > 0.5) {
+        calculateIBLSplit(N, V, surf, occlusion, iblDiffuse, iblSpecular);
+    }
+    // Diffuse indirect: GIBS GI replaces the IBL irradiance when live
+    // (rtFlags bit1), matching the Metal PBR's branch order.
+    if ((rtFlags & 2u) != 0u) {
+        color += texture(gibsGITex, rtUV).rgb * occlusion * screenAO;
+    } else if (mat.iblEnabled > 0.5) {
+        color += iblDiffuse * screenAO;
+    } else {
+        color += albedo * 0.03 * occlusion * screenAO;
+    }
+    // Specular indirect: RT mirror reflection replaces the prefilter for
+    // smooth surfaces (blend weight 1 - roughness^2), Fresnel/F0-weighted.
+    vec3 envSpecular = iblSpecular;
+    if (rtReflectionIntensity > 0.0) {
+        float maxMip = float(textureQueryLevels(texReflection) - 1);
+        vec3 refl = textureLod(texReflection, rtUV, surf.roughness * maxMip).rgb;
+        float NdotVr = max(dot(N, V), 0.0);
+        vec3 F0r2 = mix(vec3(0.04), surf.color, surf.metallic);
+        vec3 Fr = fresnelSchlickRoughness(NdotVr, F0r2, surf.roughness);
+        vec3 rtSpecular = refl * Fr * rtReflectionIntensity;
+        float rtWeight = 1.0 - surf.roughness * surf.roughness;
+        envSpecular = mix(iblSpecular, rtSpecular, rtWeight);
+    }
+    color += envSpecular * screenAO;
+    // RT refractions (KHR_materials_transmission): the transmitted radiance
+    // REPLACES the accumulated response by the material's transmission (a
+    // transmissive surface trades its diffuse lobe for transmission), tinted
+    // by base color, (1 - F)-weighted, faded by roughness like the mirror ray.
+    if (rtRefractionIntensity > 0.0 && mat.transmission > 0.0) {
+        vec3 refr = texture(texRefraction, rtUV).rgb;
+        float NdotVt = max(dot(N, V), 0.0);
+        vec3 F0t = mix(vec3(0.04), surf.color, surf.metallic);
+        vec3 Ft = fresnelSchlickRoughness(NdotVt, F0t, surf.roughness);
+        float roughFade = (1.0 - surf.roughness) * (1.0 - surf.roughness);
+        vec3 transmitted = refr * surf.color * (1.0 - Ft) * rtRefractionIntensity;
+        color = mix(color, transmitted, mat.transmission * roughFade);
+    }
+#else
     if (mat.iblEnabled > 0.5) {
         color += calculateIBL(N, V, surf, occlusion) * screenAO;
     } else {
         color += albedo * 0.03 * occlusion * screenAO;
     }
+#endif
     color += emissive;
 
     // Cascade debug: tint by shadow region (near map = green, cascades =

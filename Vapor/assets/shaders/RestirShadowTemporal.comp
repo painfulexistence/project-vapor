@@ -1,0 +1,133 @@
+#version 460
+// ReSTIR stochastic-shadow pass 1: initial candidates + temporal reuse — GLSL
+// twin of 3d_restir_shadow_temporal.metal. Streams fresh light samples per
+// domain through a weighted reservoir (target = unshadowed contribution), then
+// merges the reprojected previous-frame reservoir under an M clamp. Pure ALU —
+// the resolve pass traces the winner.
+//
+// HALF-RES: each thread tid shades the representative FULL-res pixel fp=tid*2
+// against the full-res G-buffer; only the reservoir grid is half-sized.
+// params.screenSize stays the FULL resolution.
+#extension GL_GOOGLE_include_directive : require
+#include "include/rt_common.glsl"
+#include "include/restir_common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D depthTexture;
+layout(set = 2, binding = 1) uniform sampler2D normalTexture;
+layout(set = 2, binding = 2) uniform sampler2D velocityTexture;
+
+layout(std430, set = 0, binding = 0) readonly buffer CameraBuf { CameraData camera; };
+layout(std430, set = 0, binding = 1) readonly buffer PointLightBuf { PointLight pointLights[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ClusterBuf { Cluster clusters[]; };
+layout(std430, set = 0, binding = 3) readonly buffer SpotLightBuf { SpotLight spotLights[]; };
+layout(std430, set = 0, binding = 4) readonly buffer RectLightBuf { RectLight rectLights[]; };
+layout(std430, set = 0, binding = 5) readonly buffer HistoryBuf { ShadowReservoirSet history[]; };
+layout(std430, set = 0, binding = 6) buffer OutBuf { ShadowReservoirSet outReservoirs[]; };
+// RestirShadowParams (80 B — beyond a push slot) rides a host-visible buffer
+// at the same Metal slot index; see restirShadowPass.
+layout(std430, set = 0, binding = 7) readonly buffer ParamsBuf { RestirShadowParams params; };
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    uint w = uint(params.screenSize.x);
+    uint h = uint(params.screenSize.y);
+    uint halfW = (w + 1u) / 2u;
+    uint halfH = (h + 1u) / 2u;
+    if (tid.x >= halfW || tid.y >= halfH) return;
+    uint pixel = tid.y * halfW + tid.x;
+    uvec2 fp = tid * 2u;  // representative full-res pixel of this half texel
+
+    float depth = texelFetch(depthTexture, ivec2(fp), 0).r;
+    if (depth >= 1.0) {
+        // Sky: empty reservoirs (viewDepth 0 marks them unusable for reuse).
+        outReservoirs[pixel] = restirEmptySet(0.0);
+        return;
+    }
+
+    RestirSurface surf = restirReconstructSurface(fp, w, h, depth, camera);
+    vec3 worldNormal = normalize(texelFetch(normalTexture, ivec2(fp), 0).xyz);
+
+    uint rng = tid.x * 1973u + tid.y * 9277u + params.frameIndex * 26699u;
+
+    vec2 uv = vec2(fp) / vec2(w, h);
+    uint clusterIdx = restirClusterIndex(uv, params.gridDims);
+    uint lightCount = min(clusters[clusterIdx].lightCount, MAX_LIGHTS_PER_TILE);
+
+    // ---- Fresh candidates (uniform proposal q, resampling weight p̂/q) ----
+    WRSReservoir rPoint = wrsEmpty();
+    if (lightCount > 0u) {
+        uint candidates = (lightCount == 1u) ? 1u : params.pointCandidates;
+        for (uint i = 0u; i < candidates; i++) {
+            uint slot = min(uint(randomNext(rng) * float(lightCount)), lightCount - 1u);
+            uint li = clusters[clusterIdx].lightIndices[slot];
+            float pdf = restirPointPdf(pointLights[li], surf.worldPos, worldNormal);
+            wrsUpdate(rPoint, li, pdf * float(lightCount), pdf, randomNext(rng));
+        }
+    }
+
+    WRSReservoir rRect = wrsEmpty();
+    if (params.rectCount > 0u) {
+        // The candidate is the LIGHT; p̂ is estimated at a fresh quad point per
+        // draw (see restir_common.glsl), so no single-light shortcut.
+        for (uint i = 0u; i < params.rectCandidates; i++) {
+            uint ri = min(uint(randomNext(rng) * float(params.rectCount)), params.rectCount - 1u);
+            vec2 quadUV = vec2(randomNext(rng), randomNext(rng));
+            float pdf = restirRectPdf(rectLights[ri], quadUV, surf.worldPos, worldNormal);
+            wrsUpdate(rRect, ri, pdf * float(params.rectCount), pdf, randomNext(rng));
+        }
+    }
+
+    WRSReservoir rSpot = wrsEmpty();
+    if (params.spotCount > 0u) {
+        uint candidates = (params.spotCount == 1u) ? 1u : params.spotCandidates;
+        for (uint i = 0u; i < candidates; i++) {
+            uint si = min(uint(randomNext(rng) * float(params.spotCount)), params.spotCount - 1u);
+            float pdf = restirSpotPdf(spotLights[si], surf.worldPos, worldNormal);
+            wrsUpdate(rSpot, si, pdf * float(params.spotCount), pdf, randomNext(rng));
+        }
+    }
+
+    // ---- Temporal reuse ----------------------------------------------------
+    if (params.historyValid != 0u) {
+        // Velocity is (currNDC - prevNDC) * 0.5 in y-up NDC; y-down UV negates y.
+        vec2 velocity = texelFetch(velocityTexture, ivec2(fp), 0).rg;
+        vec2 prevUV = (vec2(fp) + 0.5) / vec2(w, h) - vec2(velocity.x, -velocity.y);
+        // Reproject on the half grid (uniform full-UV -> half-texel mapping).
+        ivec2 prevPix = ivec2(floor(prevUV * vec2(halfW, halfH)));
+        if (all(greaterThanEqual(prevPix, ivec2(0))) &&
+            prevPix.x < int(halfW) && prevPix.y < int(halfH)) {
+            ShadowReservoirSet hist = history[uint(prevPix.y) * halfW + uint(prevPix.x)];
+            // Disocclusion guards: same-ish depth (sky history carries 0) AND
+            // same-ish orientation.
+            if (hist.viewDepth != 0.0 &&
+                abs(hist.viewDepth - surf.viewDepth) <= params.depthTolerance * abs(surf.viewDepth) &&
+                dot(restirUnpackNormal(hist.packedNormal), worldNormal) >= params.normalTolerance) {
+                uint idx = restirUnpackIdx(hist.pointData);
+                float M = min(restirUnpackM(hist.pointData), params.pointMClamp);
+                if (idx < params.pointCount && M > 0.0 && hist.pointW > 0.0 && isFiniteF(hist.pointW)) {
+                    float pdf = restirPointPdf(pointLights[idx], surf.worldPos, worldNormal);
+                    wrsMerge(rPoint, idx, pdf, hist.pointW, M, randomNext(rng));
+                }
+
+                idx = restirUnpackIdx(hist.rectData);
+                M = min(restirUnpackM(hist.rectData), params.rectMClamp);
+                if (idx < params.rectCount && M > 0.0 && hist.rectW > 0.0 && isFiniteF(hist.rectW)) {
+                    vec2 quadUV = vec2(randomNext(rng), randomNext(rng));
+                    float pdf = restirRectPdf(rectLights[idx], quadUV, surf.worldPos, worldNormal);
+                    wrsMerge(rRect, idx, pdf, hist.rectW, M, randomNext(rng));
+                }
+
+                idx = restirUnpackIdx(hist.spotData);
+                M = min(restirUnpackM(hist.spotData), params.spotMClamp);
+                if (idx < params.spotCount && M > 0.0 && hist.spotW > 0.0 && isFiniteF(hist.spotW)) {
+                    float pdf = restirSpotPdf(spotLights[idx], surf.worldPos, worldNormal);
+                    wrsMerge(rSpot, idx, pdf, hist.spotW, M, randomNext(rng));
+                }
+            }
+        }
+    }
+
+    outReservoirs[pixel] = restirPackSet(rPoint, rRect, rSpot, surf.viewDepth, worldNormal);
+}

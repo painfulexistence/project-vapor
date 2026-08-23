@@ -1164,6 +1164,18 @@ private:
     bool stochasticShadowWritten = false;         // this frame
     bool stochasticShadowHistoryWritten = false;  // ever (since last RT rebuild)
     bool stochasticShadowDenoiseRan = false;      // this frame
+    // RT sun shadow traced this frame (Vulkan: the RT variant of RHIMain.frag
+    // then swaps the near-map sample for shadowRT, and the raster near-field
+    // map pass is skipped — Metal's RT path has no near map at all).
+    bool rtSunShadowWritten = false;
+    // Vulkan-only: param structs too large for a 16-byte push slot travel
+    // through small host-visible buffers bound at the same Metal slot index
+    // (the lightCullDataBuffer pattern): ReSTIR params (80 B, slots 7/8),
+    // GIBS SurfelGenerationParams (96 B, slot 3), GIBSSampleParams (96 B,
+    // slot 3). Created with the RT pipelines; invalid on Metal.
+    BufferHandle restirParamsBuffer;
+    BufferHandle gibsGenParamsBuffer;
+    BufferHandle gibsSampleParamsBuffer;
     // Stochastic point-shadow debug view (native stochasticShadowDebugMode):
     // 0 = visibility, 1 = tile light-count heatmap, 2 = ReSTIR winner id,
     // 3 = ReSTIR reservoir confidence (modes 2-3 need the ReSTIR path).
@@ -1436,6 +1448,10 @@ private:
         BufferHandle rootBuffer;      // TessRootGpu[]
         BufferHandle argsBuffer;      // TessArgs (GPU-written indirect args)
         BufferHandle leafDataBuffer;  // TessLeafDataGpu[maxLeaves] (compute path)
+        // Vulkan-only: TessParamsGpu (112 B) exceeds a 16-byte push slot, so
+        // it rides a per-instance host-visible buffer (updated once per frame
+        // in tessUpdatePass; Metal keeps setBytes).
+        BufferHandle paramsBuffer;
     };
     std::vector<TessInstance> m_tessInstances;
     Uint32 m_nextTessMeshId = 1;
@@ -1524,6 +1540,15 @@ private:
     bool restirShadowPass();  // false = couldn't run, caller uses the legacy kernel
     void stochasticShadowTemporalPass();
     void stochasticShadowDenoisePass();
+
+    // RT-kernel input binding: Metal's flat texture namespace reads G-buffer
+    // inputs with setComputeTexture; on Vulkan those reads go through the
+    // sampled set instead (a depth RT can't be a storage image), at the SAME
+    // slot number (set 1 outputs / set 2 inputs are separate namespaces).
+    void setComputeInputTexture(Uint32 slot, TextureHandle tex) {
+        if (backend == GraphicsBackend::Metal) rhi->setComputeTexture(slot, tex);
+        else rhi->setComputeSampledTexture(slot, tex, clampSampler);
+    }
 
     // Acceleration structures (for ray tracing)
     std::vector<AccelStructHandle> BLASs;  // Bottom-level acceleration structures (one per mesh)

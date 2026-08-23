@@ -99,49 +99,59 @@ void buildTessGrid(std::vector<glm::vec2>& outVerts, std::vector<Uint32>& outInd
 // ---- pipelines -------------------------------------------------------------
 
 void Renderer::createTessellationPipelines() {
-    // Compute chain (3d_tess_update.metal).
-    std::string upd = readFile("shaders/3d_tess_update.metal");
-    if (upd.empty()) return;
-    ShaderDesc d;
-    d.stage = ShaderStage::Compute;
-    d.code = upd.data();
-    d.codeSize = upd.size();
-    const auto makeKernel = [&](const char* entry, ShaderHandle& sh) {
-        d.entryPoint = entry;
+    // Compute chain: one MSL file with five entry points on Metal, one
+    // SPIR-V module per kernel on Vulkan (GLSL twins in Tess*.comp).
+    const bool vulkan = backend == GraphicsBackend::Vulkan;
+    std::string upd = vulkan ? std::string() : readFile("shaders/3d_tess_update.metal");
+    if (!vulkan && upd.empty()) return;
+    const auto makeKernel = [&](const char* entry, const char* spv, ShaderHandle& sh,
+                                Uint32 tgX) {
+        ShaderDesc d;
+        d.stage = ShaderStage::Compute;
+        std::string code;
+        if (vulkan) {
+            code = readFile(spv);
+            if (code.empty()) return ComputePipelineHandle{};
+            d.code = code.data();
+            d.codeSize = code.size();
+            d.entryPoint = "main";
+        } else {
+            d.code = upd.data();
+            d.codeSize = upd.size();
+            d.entryPoint = entry;
+        }
         sh = rhi->createShader(d);
         ComputePipelineDesc cd;
         cd.computeShader = sh;
-        cd.threadGroupSizeX = 64;
+        cd.threadGroupSizeX = tgX;
         return rhi->createComputePipeline(cd);
     };
-    tessClassifyPipeline = makeKernel("tessClassify", tessClassifyShader);
-    tessReduceFirstPipeline = makeKernel("tessReduceFirst", tessReduceFirstShader);
-    tessReduceLevelPipeline = makeKernel("tessReduceLevel", tessReduceLevelShader);
-    tessLeafPrepPipeline = makeKernel("tessLeafPrep", tessLeafPrepShader);
-    {
-        d.entryPoint = "tessPrepareArgs";
-        tessArgsShader = rhi->createShader(d);
-        ComputePipelineDesc cd;
-        cd.computeShader = tessArgsShader;
-        cd.threadGroupSizeX = 1;  // single-thread kernel
-        tessArgsPipeline = rhi->createComputePipeline(cd);
-    }
+    tessClassifyPipeline = makeKernel("tessClassify", "shaders/TessClassify.comp.spv", tessClassifyShader, 64);
+    if (!tessClassifyPipeline.isValid()) return;
+    tessReduceFirstPipeline = makeKernel("tessReduceFirst", "shaders/TessReduceFirst.comp.spv", tessReduceFirstShader, 64);
+    tessReduceLevelPipeline = makeKernel("tessReduceLevel", "shaders/TessReduceLevel.comp.spv", tessReduceLevelShader, 64);
+    tessLeafPrepPipeline = makeKernel("tessLeafPrep", "shaders/TessLeafPrep.comp.spv", tessLeafPrepShader, 64);
+    tessArgsPipeline = makeKernel("tessPrepareArgs", "shaders/TessPrepareArgs.comp.spv", tessArgsShader, 1);
 
     // Instanced compute path (3d_tess_render.metal): vertex-pulls the grid,
     // so no vertex layout. Same render-state contract as the meshlet main
     // pass: HDR color + depth. Cull off for bring-up (displacement can turn
     // triangles anyway); the geometry is still emitted with consistent CCW
     // winding for when it's enabled.
-    std::string rnd = readFile("shaders/3d_tess_render.metal");
-    if (!rnd.empty()) {
+    std::string rndVert = vulkan ? readFile("shaders/TessRender.vert.spv")
+                                 : readFile("shaders/3d_tess_render.metal");
+    std::string rndFrag = vulkan ? readFile("shaders/TessRender.frag.spv") : rndVert;
+    if (!rndVert.empty() && !rndFrag.empty()) {
         ShaderDesc v;
         v.stage = ShaderStage::Vertex;
-        v.code = rnd.data();
-        v.codeSize = rnd.size();
-        v.entryPoint = "tessVertexMain";
+        v.code = rndVert.data();
+        v.codeSize = rndVert.size();
+        v.entryPoint = vulkan ? "main" : "tessVertexMain";
         tessVertexShader = rhi->createShader(v);
         v.stage = ShaderStage::Fragment;
-        v.entryPoint = "tessFragmentMain";
+        v.code = rndFrag.data();
+        v.codeSize = rndFrag.size();
+        v.entryPoint = vulkan ? "main" : "tessFragmentMain";
         tessFragmentShader = rhi->createShader(v);
         PipelineDesc p;
         p.vertexShader = tessVertexShader;
@@ -155,21 +165,30 @@ void Renderer::createTessellationPipelines() {
         tessRenderPipeline = rhi->createPipeline(p);
     }
 
-    // Mesh/task path (3d_tess_mesh.metal), only where supported.
+    // Mesh/task path (3d_tess_mesh.metal / Tess.task+.mesh), only where
+    // supported. The Vulkan fragment reuses TessRender.frag — the mesh
+    // stage's output interface matches the instanced VS.
     if (capabilities.meshShaders) {
-        std::string msh = readFile("shaders/3d_tess_mesh.metal");
-        if (!msh.empty()) {
+        std::string mshTask = vulkan ? readFile("shaders/Tess.task.spv")
+                                     : readFile("shaders/3d_tess_mesh.metal");
+        std::string mshMesh = vulkan ? readFile("shaders/Tess.mesh.spv") : mshTask;
+        std::string mshFrag = vulkan ? readFile("shaders/TessRender.frag.spv") : mshTask;
+        if (!mshTask.empty() && !mshMesh.empty() && !mshFrag.empty()) {
             ShaderDesc m;
-            m.code = msh.data();
-            m.codeSize = msh.size();
+            m.code = mshTask.data();
+            m.codeSize = mshTask.size();
             m.stage = ShaderStage::Task;
-            m.entryPoint = "tessObjectMain";
+            m.entryPoint = vulkan ? "main" : "tessObjectMain";
             tessObjectShader = rhi->createShader(m);
+            m.code = mshMesh.data();
+            m.codeSize = mshMesh.size();
             m.stage = ShaderStage::Mesh;
-            m.entryPoint = "tessMeshMain";
+            m.entryPoint = vulkan ? "main" : "tessMeshMain";
             tessMeshShader = rhi->createShader(m);
+            m.code = mshFrag.data();
+            m.codeSize = mshFrag.size();
             m.stage = ShaderStage::Fragment;
-            m.entryPoint = "tessMeshFragmentMain";
+            m.entryPoint = vulkan ? "main" : "tessMeshFragmentMain";
             tessMeshFragShader = rhi->createShader(m);
             MeshPipelineDesc mp;
             mp.taskShader = tessObjectShader;
@@ -290,6 +309,16 @@ Uint32 Renderer::createTessellatedMesh(const Mesh& mesh, const TessellationDesc&
     lb.memoryUsage = MemoryUsage::GPU;
     t.leafDataBuffer = rhi->createBuffer(lb);
 
+    // Vulkan: TessParamsGpu rides a per-instance host-visible buffer (112 B
+    // exceeds a push slot); Metal keeps setBytes and never binds this.
+    if (backend == GraphicsBackend::Vulkan) {
+        BufferDesc pb;
+        pb.size = sizeof(TessParamsGpu);
+        pb.usage = BufferUsage::Storage;
+        pb.memoryUsage = MemoryUsage::CPUtoGPU;
+        t.paramsBuffer = rhi->createBuffer(pb);
+    }
+
     rhi->flushUploads();
     m_tessInstances.push_back(t);
     fmt::print("[Tess] mesh {}: {} roots (rootDepth {}), maxDepth {}, CBT {} KB\n",
@@ -304,6 +333,7 @@ void Renderer::destroyTessellatedMesh(Uint32 id) {
         rhi->destroyBuffer(it->rootBuffer);
         rhi->destroyBuffer(it->argsBuffer);
         rhi->destroyBuffer(it->leafDataBuffer);
+        if (it->paramsBuffer.isValid()) rhi->destroyBuffer(it->paramsBuffer);
         m_tessInstances.erase(it);
         return;
     }
@@ -350,6 +380,16 @@ void Renderer::tessUpdatePass() {
     rhi->beginComputePass("TessUpdate");
     for (const TessInstance& t : m_tessInstances) {
         const TessParamsGpu p = tessFillParams(t);
+        // TessParams delivery: Metal pushes the 112-byte struct as inline
+        // bytes at slot 4; on Vulkan it exceeds a push slot, so it rides the
+        // per-instance host-visible buffer bound at the same slot (updated
+        // once here — the render pass binds the same buffer at slot 3).
+        const bool paramsViaBuffer = backend == GraphicsBackend::Vulkan && t.paramsBuffer.isValid();
+        if (paramsViaBuffer) rhi->updateBuffer(t.paramsBuffer, &p, 0, sizeof(p));
+        const auto bindParams = [&](Uint32 slot) {
+            if (paramsViaBuffer) rhi->setComputeBuffer(slot, t.paramsBuffer, 0, sizeof(p));
+            else rhi->setComputeBytes(&p, sizeof(p), slot);
+        };
 
         // Classify: split/merge bit writes, sized by LAST frame's leaf count
         // (the args written by the previous frame's tessPrepareArgs).
@@ -358,7 +398,7 @@ void Renderer::tessUpdatePass() {
         rhi->setComputeBuffer(1, t.cbtBuffer);      // atomic write view (same buffer)
         rhi->setComputeBuffer(2, t.rootBuffer);
         rhi->setComputeBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-        rhi->setComputeBytes(&p, sizeof(p), 4);
+        bindParams(4);
         rhi->dispatchIndirect(t.argsBuffer, kTessArgsClassifyOffset);
         rhi->computeBarrier();
 
@@ -384,7 +424,7 @@ void Renderer::tessUpdatePass() {
         // and the next frame's classify.
         rhi->bindComputePipeline(tessArgsPipeline);
         rhi->setComputeBuffer(0, t.cbtBuffer);
-        rhi->setComputeBytes(&p, sizeof(p), 4);
+        bindParams(4);
         rhi->setComputeBuffer(5, t.argsBuffer);
         rhi->dispatch(1, 1, 1);
         rhi->computeBarrier();
@@ -396,7 +436,7 @@ void Renderer::tessUpdatePass() {
             rhi->setComputeBuffer(0, t.cbtBuffer);
             rhi->setComputeBuffer(2, t.rootBuffer);
             rhi->setComputeBuffer(3, cameraUniformBuffer, 0, sizeof(CameraRenderData));
-            rhi->setComputeBytes(&p, sizeof(p), 4);
+            bindParams(4);
             rhi->setComputeBuffer(6, t.leafDataBuffer);
             rhi->dispatchIndirect(t.argsBuffer, kTessArgsLeafPrepOffset);
         }
@@ -420,6 +460,14 @@ void Renderer::tessRenderPass() {
     rhi->beginRenderPass(rp);
     for (const TessInstance& t : m_tessInstances) {
         const TessParamsGpu p = tessFillParams(t);
+        // Same delivery split as tessUpdatePass: Metal pushes the struct,
+        // Vulkan binds the per-instance params buffer at the same slot (its
+        // content was uploaded by tessUpdatePass this frame).
+        const bool paramsViaBuffer = backend == GraphicsBackend::Vulkan && t.paramsBuffer.isValid();
+        const auto bindParamsVS = [&](Uint32 slot) {
+            if (paramsViaBuffer) rhi->setVertexBuffer(slot, t.paramsBuffer, 0, sizeof(p));
+            else rhi->setVertexBytes(&p, sizeof(p), slot);
+        };
         if (meshPath) {
             // setVertexBuffer/Bytes route to BOTH object and mesh stages for
             // mesh pipelines (see RHI_Metal). Task grid size is GPU-written.
@@ -427,7 +475,7 @@ void Renderer::tessRenderPass() {
             rhi->setVertexBuffer(0, t.cbtBuffer);
             rhi->setVertexBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setVertexBuffer(2, t.rootBuffer);
-            rhi->setVertexBytes(&p, sizeof(p), 3);
+            bindParamsVS(3);
             rhi->drawMeshTasksIndirect(t.argsBuffer, kTessArgsMeshTasksOffset);
         } else {
             // One grid instance per leaf; instanceCount is GPU-written.
@@ -435,7 +483,7 @@ void Renderer::tessRenderPass() {
             rhi->setVertexBuffer(0, tessGridVertexBuffer);
             rhi->setVertexBuffer(1, cameraUniformBuffer, 0, sizeof(CameraRenderData));
             rhi->setVertexBuffer(2, t.leafDataBuffer);
-            rhi->setVertexBytes(&p, sizeof(p), 3);
+            bindParamsVS(3);
             rhi->bindIndexBuffer(tessGridIndexBuffer);
             rhi->drawIndexedIndirect(t.argsBuffer, kTessArgsDrawOffset, 1,
                                      sizeof(Vapor::DrawCommand));

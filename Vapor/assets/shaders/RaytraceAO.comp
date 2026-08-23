@@ -1,0 +1,72 @@
+#version 460
+// True ray-traced AO — GLSL ray-query twin of 3d_raytrace_ao.metal. Two
+// cosine-hemisphere rays per pixel per frame into the noisy half-res aoRawRT;
+// the AOTemporal + AODenoise fragment passes produce the aoRT the lighting
+// samples (ADR-008 skeleton: few rays, temporal accumulation, spatial filter).
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#include "include/rt_common.glsl"
+
+// Metal dispatches (w, h) groups of 1x1 threads; keep the same grid semantics.
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 2, binding = 0) uniform sampler2D depthTexture;   // full-res
+layout(set = 2, binding = 1) uniform sampler2D normalTexture;  // full-res
+layout(set = 1, binding = 2) uniform writeonly image2D aoTexture;
+
+// Must match the FrameData pushed by raytraceAOPass.
+layout(std430, set = 0, binding = 0) readonly buffer FrameBuf {
+    uint frameNumber;
+    float time;
+    float deltaTime;
+};
+layout(std430, set = 0, binding = 1) readonly buffer CameraBuf { CameraData camera; };
+
+layout(set = 3, binding = 2) uniform accelerationStructureEXT TLAS;
+
+const uint RAYS_PER_PIXEL = 2u;     // temporal accumulation supplies the rest
+const float AO_RAY_LENGTH = 1.5;    // meters; also the falloff range
+
+void main() {
+    uvec2 tid = gl_GlobalInvocationID.xy;
+    ivec2 outDim = imageSize(aoTexture);
+    if (tid.x >= uint(outDim.x) || tid.y >= uint(outDim.y)) return;
+
+    // Resolution-agnostic: depth/normal may be higher-res than the AO target.
+    ivec2 fullDim = textureSize(depthTexture, 0);
+    uvec2 scale = max(uvec2(fullDim) / uvec2(outDim), uvec2(1u));
+    ivec2 fullTid = ivec2(min(tid * scale, uvec2(fullDim) - 1u));
+
+    float depth = texelFetch(depthTexture, fullTid, 0).r;
+    // Sky / far plane: fully unoccluded, no rays.
+    if (depth >= 0.999999) {
+        imageStore(aoTexture, ivec2(tid), vec4(1.0));
+        return;
+    }
+
+    vec2 uv = (vec2(tid) + 0.5) / vec2(outDim);
+    vec3 worldPos = worldPosFromDepth(uv, depth, camera.invProj, camera.invView);
+    vec3 worldNormal = normalize(texelFetch(normalTexture, fullTid, 0).xyz);
+
+    float occlusion = 0.0;
+    for (uint i = 0u; i < RAYS_PER_PIXEL; i++) {
+        // TODO: swap the hash for a tiled blue-noise texture (same note as Metal)
+        vec2 xi = rand2(tid.x + tid.y * uint(outDim.x) + i * 7919u + frameNumber * 26699u);
+        vec3 dir = sampleCosineWeightedHemisphere(xi, worldNormal);
+
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(rq, TLAS,
+                              gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                              0xFF, worldPos + worldNormal * 1e-3, 0.0, dir, AO_RAY_LENGTH);
+        rayQueryProceedEXT(rq);
+        if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+            // Distance falloff: nearby occluders matter more. With any-hit the
+            // reported distance is the first accepted hit, not the closest —
+            // an acceptable bias for AO.
+            float hitT = rayQueryGetIntersectionTEXT(rq, true);
+            occlusion += 1.0 - clamp(hitT / AO_RAY_LENGTH, 0.0, 1.0);
+        }
+    }
+    float ao = 1.0 - occlusion / float(RAYS_PER_PIXEL);
+    imageStore(aoTexture, ivec2(tid), vec4(ao, 0.0, 0.0, 0.0));
+}

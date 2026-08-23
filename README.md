@@ -35,7 +35,7 @@ The result is that I get the throughput benefits of agentic coding without cedin
 - Physically-based rendering with Disney BRDF
 - GLTF scene loading
 - Tiled Forward rendering
-- Raytraced hard shadow (Metal only)
+- Raytraced shadows / reflections / GI (capability-gated: Metal on Apple Silicon, Vulkan ray query on desktop RT GPUs)
 
 #### Engine
 - ECS architecture (EnTT) with a working game demo
