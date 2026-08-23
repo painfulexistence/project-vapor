@@ -1,7 +1,6 @@
 bin/
 build/
 build*/
-CMakeUserPresets.json
 Testing/
 *.spv
 *.ini
