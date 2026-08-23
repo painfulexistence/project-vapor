@@ -193,7 +193,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/vcpkg_installed
-          key: vcpkg-windows-${{ hashFiles('vcpkg.json', '.gitmodules') }}
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json', '.gitmodules', 'vcpkg-overlay-ports/**') }}
           restore-keys: |
             vcpkg-windows-
 
