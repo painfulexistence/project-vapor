@@ -9,45 +9,39 @@
       }
     },
     {
-      "name": "global-vcpkg",
-      "hidden": true,
+      "name": "dev",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build",
+      "inherits": ["local-vcpkg"],
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
       }
     },
     {
-      "name": "ninja-local-vcpkg",
-      "generator": "Ninja Multi-Config",
-      "binaryDir": "${sourceDir}/build",
-      "inherits": ["local-vcpkg"]
-    },
-    {
-      "name": "ninja-global-vcpkg",
-      "generator": "Ninja Multi-Config",
-      "binaryDir": "${sourceDir}/build",
-      "inherits": ["global-vcpkg"]
-    },
-    {
-      "name": "xcode-local-vcpkg",
-      "generator": "Xcode",
-      "binaryDir": "${sourceDir}/build-xcode",
-      "inherits": ["local-vcpkg"]
-    },
-    {
-      "name": "xcode-global-vcpkg",
-      "generator": "Xcode",
-      "binaryDir": "${sourceDir}/build-xcode",
-      "inherits": ["global-vcpkg"]
-    },
-    {
-      "name": "ci",
-      "generator": "Ninja Multi-Config",
-      "binaryDir": "${sourceDir}/build",
-      "inherits": ["global-vcpkg"],
+      "name": "dev-asan",
+      "inherits": ["dev"],
+      "binaryDir": "${sourceDir}/build-asan",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_C_FLAGS_DEBUG": "-g -fsanitize=address",
+        "CMAKE_CXX_FLAGS_DEBUG": "-g -fsanitize=address",
+        "CMAKE_EXE_LINKER_FLAGS_DEBUG": "-fsanitize=address"
       }
     }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev", "configuration": "Debug" },
+    { "name": "release", "configurePreset": "dev", "configuration": "Release" },
+    { "name": "dev-asan", "configurePreset": "dev-asan", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    { "name": "dev", "configurePreset": "dev", "configuration": "Debug", "output": { "outputOnFailure": true } },
+    { "name": "release", "configurePreset": "dev", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "dev-asan", "configurePreset": "dev-asan", "configuration": "Debug", "output": { "outputOnFailure": true } }
   ]
 }
