@@ -10233,7 +10233,9 @@ void Renderer::BatchRenderer::init(RHI* rhi, GraphicsBackend backend, bool is3D,
     std::string vertShaderCode;
     std::string fragShaderCode;
 
-    if (usesSpirv()) {
+    // usesSpirv() is a Renderer member and unreachable from this nested
+    // class — use the local `backend` parameter directly.
+    if (backend != GraphicsBackend::Metal) {
         // Load SPIR-V shaders
         vertShaderCode = readFile("shaders/RHIBatch.vert.spv");
         fragShaderCode = readFile("shaders/RHIBatch.frag.spv");
