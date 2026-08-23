@@ -31,6 +31,17 @@ find_package(EnTT CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Boost QUIET COMPONENTS pfr)
 
+if(WIN32)
+    # D3D12 backend: official headers (newer than any Windows SDK's), dxc's
+    # dxcapi.h (dxcompiler.dll is loaded at runtime), and spirv-cross for the
+    # load-time SPIR-V -> HLSL cross-compile.
+    find_package(directx-headers CONFIG REQUIRED)
+    find_package(directx-dxc CONFIG REQUIRED)
+    find_package(spirv_cross_core CONFIG REQUIRED)
+    find_package(spirv_cross_glsl CONFIG REQUIRED)
+    find_package(spirv_cross_hlsl CONFIG REQUIRED)
+endif()
+
 # Optional: FFmpeg for AV1 video recording/playback
 option(VAPOR_ENABLE_FFMPEG "Enable FFmpeg for video recording and playback" ON)
 if(VAPOR_ENABLE_FFMPEG)
@@ -140,6 +151,13 @@ else()
     )
 endif()
 
+if(WIN32)
+    list(APPEND SOURCES
+        src/rhi_d3d12.cpp
+        imgui/backends/imgui_impl_dx12.cpp
+    )
+endif()
+
 add_library(Vapor ${SOURCES})
 set_target_properties(Vapor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(Vapor PRIVATE cxx_std_20)
@@ -203,6 +221,25 @@ target_link_libraries(Vapor PRIVATE
 
 if(APPLE)
     target_link_libraries(Vapor PRIVATE metal)
+endif()
+
+if(WIN32)
+    # Windows header hygiene for every TU that transitively sees windows.h:
+    # NOGDI stops wingdi.h, whose OPAQUE/TRANSPARENT/ERROR macros collide with
+    # engine enumerators (AlphaMode::OPAQUE); NOMINMAX and LEAN_AND_MEAN cut
+    # the rest of the classic macro surface. PUBLIC so the app and tests get
+    # the same protection.
+    target_compile_definitions(Vapor PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX NOGDI)
+    target_link_libraries(Vapor PRIVATE
+        Microsoft::DirectX-Headers
+        Microsoft::DirectXShaderCompiler
+        spirv-cross-hlsl
+        spirv-cross-glsl
+        spirv-cross-core
+        d3d12
+        dxgi
+        dxguid
+    )
 endif()
 
 if(VAPOR_USE_TINYUSDZ)

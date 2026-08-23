@@ -503,6 +503,20 @@ private:
 
     GraphicsBackend backend;  // Store backend for ImGui shutdown
 
+    // True on every backend whose shaders come from the GLSL/SPIR-V corpus:
+    // Vulkan consumes the .spv directly, D3D12 cross-compiles it to DXIL at
+    // pipeline creation. Metal is the odd one out — it loads .metal sources
+    // with named entry points and delivers small param structs as inline
+    // setBytes rather than through a host-visible buffer.
+    //
+    // PREFER THIS over `backend == GraphicsBackend::Vulkan`. That comparison
+    // predates D3D12 and is now almost always a latent bug: it silently
+    // excludes D3D12 from shader loading, pipeline creation, and buffer-backed
+    // parameter delivery, and the failure mode is an invalid pipeline handle
+    // whose pass no-ops — no error, no CI signal. Reserve `== Vulkan` for
+    // genuinely Vulkan-API-specific code (e.g. ImGui_ImplVulkan_* calls).
+    bool usesSpirv() const { return backend != GraphicsBackend::Metal; }
+
     // ========================================================================
     // Render Graph
     // ========================================================================
@@ -1223,7 +1237,7 @@ private:
                                                : capabilities.multiDrawIndirect);
         return bindless ||
                (gpuDrivenIndirect() && gpuDrivenMDI &&
-                ((backend == GraphicsBackend::Vulkan && capabilities.multiDrawIndirect) ||
+                ((usesSpirv() && capabilities.multiDrawIndirect) ||
                  backend == GraphicsBackend::Metal));
     }
     // Whether the depth pre-pass runs fully GPU-driven this frame (so the CPU

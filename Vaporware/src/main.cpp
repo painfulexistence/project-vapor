@@ -8,6 +8,7 @@
 #include <glm/ext/vector_float3.hpp>
 #include <glm/trigonometric.hpp>
 #include <iostream>
+#include <stb_image_write.h>  // VAPOR_AUTOSHOT frame capture
 
 #include "Vapor/asset_manager.hpp"
 #include "Vapor/camera.hpp"
@@ -510,6 +511,7 @@ auto main(int argc, char* args[]) -> int {
     args::Group graphicsGroup(parser, "Graphics:", args::Group::Validators::AtMostOne);
     args::Flag useMetal(graphicsGroup, "Metal", "Use Metal backend", { "metal" });
     args::Flag useVulkan(graphicsGroup, "Vulkan", "Use Vulkan backend", { "vulkan" });
+    args::Flag useDX12(graphicsGroup, "DirectX 12", "Use Direct3D 12 backend (Windows)", { "dx12" });
     args::Group debugGroup(parser, "Debug:");
     args::Flag statsFlag(debugGroup, "stats", "Enable per-frame telemetry log (stderr + vapor_stats.log)", { "stats" });
     args::Group helpGroup(parser, "Help:");
@@ -550,6 +552,17 @@ auto main(int argc, char* args[]) -> int {
         winTitle = "Project Vapor (Metal)";
         winFlags |= SDL_WINDOW_METAL;
         gfxBackend = GraphicsBackend::Metal;
+    }
+#elif defined(_WIN32)
+    if (useDX12) {
+        // D3D12 presents through DXGI on the plain Win32 HWND — no SDL surface
+        // flag needed (SDL_WINDOW_VULKAN would force a Vulkan surface).
+        winTitle = "Project Vapor (Direct3D 12)";
+        gfxBackend = GraphicsBackend::D3D12;
+    } else {
+        winTitle = "Project Vapor (Vulkan)";
+        winFlags |= SDL_WINDOW_VULKAN;
+        gfxBackend = GraphicsBackend::Vulkan;
     }
 #else
     winTitle = "Project Vapor (Vulkan)";
@@ -1041,6 +1054,29 @@ auto main(int argc, char* args[]) -> int {
 
             ImGui::Render();
             renderer->endFrame();
+        }
+
+        // VAPOR_AUTOSHOT=<frame> captures that frame to autoshot.png next to the
+        // exe, then quits. Rendering bugs that validation cannot see (wrong
+        // sampling, bad transforms) need the frame itself to diagnose, and an
+        // unattended run has no other way to hand one back.
+        {
+            static const char* shotAt = std::getenv("VAPOR_AUTOSHOT");
+            static bool shotRequested = false;
+            static bool shotDone = false;
+            if (shotAt && !shotDone) {
+                const Uint32 target = static_cast<Uint32>(std::atoi(shotAt));
+                if (!shotRequested && frameCount >= target) {
+                    shotRequested = true;
+                    renderer->readPixelsAsync([&](const GpuImageData& img) {
+                        stbi_write_png("autoshot.png", img.width, img.height, img.channelCount,
+                                       img.data.data(), img.width * img.channelCount);
+                        fmt::print("autoshot: wrote autoshot.png {}x{}\n", img.width, img.height);
+                        shotDone = true;
+                    });
+                }
+                if (shotDone) quit = true;
+            }
         }
 
         frameCount++;

@@ -833,6 +833,7 @@ public:
 
 RHI* createRHIVulkan();
 RHI* createRHIMetal();
+RHI* createRHID3D12();  // Windows only (rhi_d3d12.cpp is WIN32-gated in CMake)
 
 } // namespace Vapor
 
