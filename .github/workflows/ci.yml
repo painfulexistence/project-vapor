@@ -55,17 +55,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/vcpkg_installed
-          key: vcpkg-macos-15-${{ hashFiles('vcpkg.json', '.gitmodules') }}
+          key: vcpkg-macos-15-${{ hashFiles('vcpkg.json', '.gitmodules', 'vcpkg-overlay-ports/**') }}
           restore-keys: |
             vcpkg-macos-15-
 
       - name: Configure (vcpkg + Ninja)
-        run: |
-          cmake --preset ninja-local-vcpkg \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-        env:
-          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: cmake --preset dev
 
       - name: Build tests only
         run: |
@@ -141,7 +136,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.strings.outputs.build-dir }}/vcpkg_installed
-          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', '.gitmodules') }}
+          key: vcpkg-${{ matrix.os }}-${{ hashFiles('vcpkg.json', '.gitmodules', 'vcpkg-overlay-ports/**') }}
           restore-keys: |
             vcpkg-${{ matrix.os }}-
 
@@ -150,19 +145,13 @@ jobs:
         run: ${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh
 
       - name: CMake Configure
-        run: >
-          cmake -G Ninja
-          -B ${{ steps.strings.outputs.build-dir }}
-          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
-          -DCMAKE_BUILD_TYPE=${{ matrix.build-type }}
-          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          -S ${{ github.workspace }}
+        run: cmake --preset dev
 
       - name: CMake Build
-        run: cmake --build ${{ steps.strings.outputs.build-dir }} --parallel $(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
+        run: cmake --build ${{ steps.strings.outputs.build-dir }} --config ${{ matrix.build-type }} --parallel $(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 
       - name: Install
-        run: cmake --install ${{ steps.strings.outputs.build-dir }} --prefix ${{ steps.strings.outputs.build-dir }}/install
+        run: cmake --install ${{ steps.strings.outputs.build-dir }} --config ${{ matrix.build-type }} --prefix ${{ steps.strings.outputs.build-dir }}/install
 
       - name: Upload VaporCAPI artifact
         uses: actions/upload-artifact@v4
