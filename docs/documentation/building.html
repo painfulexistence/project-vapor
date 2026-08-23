@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Building & IDE Setup — Project Vapor</title>
+  <link rel="stylesheet" href="../styles/global.css">
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a class="nav-logo" href="../index.html">Project Vapor</a>
+      <a href="index.html" class="active">Docs</a>
+      <a href="../devlog/index.html">Devlog</a>
+      <a href="../demo/index.html">Demo</a>
+      <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
+    </div>
+  </nav>
+  <main>
+    <div class="page-header">
+      <h1>Building & IDE Setup</h1>
+      <p class="muted">CMake preset model, per-platform setup, and how to bring your own IDE.</p>
+    </div>
+
+    <h2>Preset model</h2>
+    <p><code>CMakePresets.json</code> targets a single generator, <strong>Ninja Multi-Config</strong>, on every platform. There is no separate Visual Studio solution or Xcode project preset — one build graph, one set of flags to reason about, and Debug/Release/etc. are just <code>--config</code> at build time instead of a reconfigure.</p>
+    <table>
+      <tr><th>Preset</th><th>What it's for</th></tr>
+      <tr><td><code>dev</code></td><td>Configure. Everything builds from this — <code>--config Debug</code> / <code>--config Release</code> both work without reconfiguring.</td></tr>
+      <tr><td><code>dev</code> / <code>release</code></td><td>Build presets — same configure preset, <code>configuration</code> set to <code>Debug</code> / <code>Release</code>.</td></tr>
+      <tr><td><code>dev-asan</code></td><td>Configure + build preset with AddressSanitizer instrumentation on the Debug config. Separate <code>binaryDir</code> (<code>build-asan/</code>) so it doesn't fight <code>dev</code>'s cache. Not available on Windows (<code>condition</code> excludes it) — MSVC's ASan needs more than a compiler flag to work correctly and hasn't been wired up yet.</td></tr>
+    </table>
+    <p>vcpkg is a submodule vendored at <code>vcpkg/</code> — every preset points its toolchain file there, so <code>git clone --recurse-submodules</code> is the only setup a fresh checkout needs before <code>cmake --preset dev</code> works. There's no "global vcpkg install" preset: <code>CMakeUserPresets.json</code> is tracked in this repo as an empty scaffold for that kind of personal or situational override (point <code>CMAKE_TOOLCHAIN_FILE</code> at a system vcpkg, try a flag before it's worth promoting to the shared file, etc.) — see <a href="https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html">CMake's preset docs</a> for the inheritance mechanism.</p>
+
+    <h2>macOS</h2>
+    <pre><code>brew install ninja ccache
+git clone --recurse-submodules https://github.com/painfulexistence/project-vapor
+cd project-vapor
+cmake --preset dev
+cmake --build --preset dev --target main -j4
+./build/Vaporware/Debug/main          # Metal
+./build/Vaporware/Debug/main --vulkan # Vulkan (MoltenVK)</code></pre>
+
+    <h2>Linux</h2>
+    <pre><code>sudo apt install ninja-build ccache glslang-tools
+git clone --recurse-submodules https://github.com/painfulexistence/project-vapor
+cd project-vapor
+cmake --preset dev
+cmake --build --preset dev --target main -j4
+./build/Vaporware/Debug/main --vulkan</code></pre>
+    <p class="muted">Vulkan is the only backend on Linux — there's no Metal, and D3D12 is Windows-only.</p>
+
+    <h2>Windows</h2>
+    <p>Install the <strong>Desktop development with C++</strong> workload from the Visual Studio Installer (this gives you <code>cl.exe</code>, the Windows SDK, and the DirectX 12 headers — you don't need the VS IDE itself, Build Tools alone is enough), plus Ninja and ccache on <code>PATH</code> (<code>winget install Ninja-build.Ninja ccache</code> works).</p>
+    <p><strong>The one thing that trips people up:</strong> Ninja doesn't locate <code>cl.exe</code> the way the old Visual Studio generator did. Opened from a plain terminal, <code>cl.exe</code> isn't on <code>PATH</code> even with VS installed — it lives under a versioned path (<code>...\VC\Tools\MSVC\&lt;ver&gt;\bin\Hostx64\x64\</code>) that only gets added by running <code>vcvarsall.bat</code> first. Two ways to get there:</p>
+    <ul>
+      <li>Start Menu → <strong>"x64 Native Tools Command Prompt for VS 2022"</strong> (installed automatically with the C++ workload) — open it, <code>cd</code> into the repo, run cmake from there.</li>
+      <li>From any existing shell: <code>"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64</code> (path varies by edition — Community/Professional/BuildTools) before running cmake.</li>
+    </ul>
+    <p>Once the environment is active:</p>
+    <pre><code>git clone --recurse-submodules https://github.com/painfulexistence/project-vapor
+cd project-vapor
+cmake --preset dev
+cmake --build --preset dev --target main -j4
+set VAPOR_DUMP_HLSL=1
+.\build\Vaporware\Debug\main.exe --dx12</code></pre>
+    <p>If you'd rather not think about any of this, open the repo folder directly in <strong>Visual Studio 2022</strong> or <strong>CLion</strong> — both read <code>CMakePresets.json</code> natively and resolve the MSVC environment for you before invoking Ninja, no manual <code>vcvarsall</code> step needed. You get full IntelliSense/debugging through the same Ninja Multi-Config presets everyone else uses; there's no <code>.sln</code> and nothing extra to keep in sync.</p>
+
+    <h2>Xcode</h2>
+    <p>Not a committed preset — if you want an <code>.xcodeproj</code> for editing/building in Xcode's UI, generate it ad hoc into its own directory (kept separate from <code>build/</code> so it doesn't collide with the Ninja preset's cache):</p>
+    <pre><code>cmake -G Xcode -B build-xcode -S . \
+  -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake
+open build-xcode/vapor.xcodeproj</code></pre>
+    <p>You do <em>not</em> need this just to debug Metal — see below.</p>
+
+    <h2>GPU debugging</h2>
+    <p>Frame capture doesn't care how the binary was built — a Ninja-built executable is the same binary a VS-generated or Xcode-generated one would be, given the same compiler and flags.</p>
+    <ul>
+      <li><strong>RenderDoc</strong> (Vulkan, and D3D12 via the UI overlay/injection — in-app capture triggering isn't wired up for D3D12 yet): attach to <code>main.exe --dx12</code> or <code>main --vulkan</code> same as any other executable.</li>
+      <li><strong>Xcode GPU frame capture</strong> (Metal), without an Xcode-generated project: launch the Ninja-built binary with <code>MTL_CAPTURE_ENABLED=1</code>, then in Xcode use <strong>Debug → Attach to Process</strong>, and <strong>Debug → Capture GPU Frame</strong> once attached. This is Apple's documented workflow for engines that don't use Xcode as their build system, and it's fully independent of the <code>-G Xcode</code> generator above.</li>
+    </ul>
+  </main>
+</body>
+</html>
