@@ -336,7 +336,7 @@ private:
     // (b12). Additive capacity: the write loop only writes bound slots, so
     // pipelines that use fewer textures (bloom, IBL bake) are unaffected.
     // (Bindless MDI's material texture array lives in set 3, not here.)
-    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 13;
+    static constexpr Uint32 TEXTURE_BINDINGS_PER_SET = 14;
 
     struct BufferBinding {
         VkBuffer buffer = VK_NULL_HANDLE;

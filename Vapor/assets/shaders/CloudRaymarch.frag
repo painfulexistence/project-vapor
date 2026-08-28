@@ -10,6 +10,16 @@ layout(location = 0) in vec2 tex_uv;
 layout(location = 0) out vec4 outCloud;
 
 layout(set = 2, binding = 0) uniform sampler2D sceneDepth;
+// Baked tileable noise volumes (renderer createCloudNoiseTextures): one
+// trilinear fetch replaces the old per-sample procedural Perlin-Worley loops.
+// Octave frequencies are baked at the old shader ratios, so the UV scales
+// below are unchanged. Repeat sampler — the tiles wrap.
+layout(set = 2, binding = 1) uniform sampler3D shapeNoiseTex;   // 128^3 Perlin-Worley base
+layout(set = 2, binding = 2) uniform sampler3D detailNoiseTex;  // 32^3 Worley FBM erosion
+// 512^2 weather map, sampled at half frequency (~40 km tile): R = coverage
+// base (domain-warped FBM — fronts/streets), G = type, BA = signed de-tiling
+// warp applied to the shape volume lookup.
+layout(set = 2, binding = 3) uniform sampler2D weatherMapTex;
 
 // Must match Vapor::VolumetricCloudRenderData (std430).
 layout(std430, set = 1, binding = 0) readonly buffer CloudBuf {
@@ -110,20 +120,6 @@ float gradientNoise3D(vec3 p) {
                mix(mix(n001, n101, w.x), mix(n011, n111, w.x), w.y), w.z);
 }
 
-float worleyNoise3D(vec3 p) {
-    vec3 pi = floor(p);
-    vec3 pf = fract(p);
-    float minDist = 1.0;
-    for (int z = -1; z <= 1; z++)
-    for (int y = -1; y <= 1; y++)
-    for (int x = -1; x <= 1; x++) {
-        vec3 offset = vec3(x, y, z);
-        vec3 diff = offset + hash33(pi + offset) - pf;
-        minDist = min(minDist, dot(diff, diff));
-    }
-    return sqrt(minDist);
-}
-
 float remap(float value, float inMin, float inMax, float outMin, float outMax) {
     return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
 }
@@ -160,15 +156,38 @@ float cloudHeightGradient(float heightFraction, float type) {
     return saturate(gradient);
 }
 
-float sampleCloudShape(vec3 worldPos) {
+// Baked detail FBM's approximate mean. The LOD fade below blends toward it
+// rather than toward zero, so distant clouds lose the detail VARIANCE but keep
+// its average erosion — fading to zero would have made far clouds fatter.
+const float DETAIL_MEAN = 0.5;
+
+// Triangle-wave mirrored repeat: continuous, doubles the effective period and
+// yields 4 orientation variants per axis pair, which the eye does not match
+// up the way it matches translated copies.
+vec2 mirrorRepeat(vec2 u) { return abs(2.0 * fract(u * 0.5) - 1.0); }
+
+// Base shape lookup. The baked 128^3 volume tiles every 10 km of world space
+// (shapeNoiseScale 1 -> x0.0001). The pre-bake PROCEDURAL noise never tiled —
+// its lattice hash ran over unbounded integers — so the visible repetition is
+// a regression the bake introduced, and at low coverage it is maximally
+// obvious: the coverage remap keeps only the field's extreme peaks, about one
+// per tile, i.e. the same blob stamped on a 10 km grid to the horizon.
+// Three stacked measures kill it (validated in an offline density sim,
+// 10/30 km autocorrelation +0.88 -> ~0.00):
+//   1. `warp`: +-2.5 km displacement from the weather map's BA channels at a
+//      ~13.3 km wavelength — coprime with both the tile and its mirror, so no
+//      lag lines the pattern back up.
+//   2. Mirrored-repeat sampling (per axis) — translated copies become
+//      mirrored ones.
+//   3. An APERIODIC procedural break-up octave added onto the baked value
+//      (see sampleCloudDensity) — restores true non-repetition by shifting
+//      which peaks survive the coverage remap, region by region.
+float sampleCloudShape(vec3 worldPos, vec2 warp) {
     vec3 samplePos = worldPos + windOffset;
-    vec3 shapeUV = samplePos * shapeNoiseScale * 0.0001;
-    float perlin = gradientNoise3D(shapeUV * 4.0) * 0.5 + 0.5;
-    float worley1 = 1.0 - worleyNoise3D(shapeUV * 4.0);
-    float worley2 = 1.0 - worleyNoise3D(shapeUV * 8.0);
-    float worley3 = 1.0 - worleyNoise3D(shapeUV * 16.0);
-    float worleyFBM = worley1 * 0.625 + worley2 * 0.25 + worley3 * 0.125;
-    return saturate(remap(perlin, worleyFBM - 1.0, 1.0, 0.0, 1.0));
+    samplePos.xz += warp;
+    vec3 uvw = samplePos * (shapeNoiseScale * 0.0001);
+    uvw.xz = mirrorRepeat(uvw.xz);
+    return texture(shapeNoiseTex, uvw).r;
 }
 
 // Curl-ish vector noise: three decorrelated gradient noises. Not a true
@@ -181,6 +200,17 @@ vec3 curlDistort(vec3 p) {
 }
 
 float sampleCloudDetail(vec3 worldPos) {
+    float dist = length(worldPos - cameraPosition);
+    // Distance LOD. The 32^3 volume spans only 200 m of world space
+    // (detailNoiseScale 5 -> x0.005). Past ~12 km a single quarter-res pixel
+    // already covers more than that, so the octave is subpixel: it cannot add
+    // shape, only per-frame noise, which the temporal pass then averaged into
+    // flat grey (the "blurry" look) and which popped as shimmer whenever
+    // rotation dropped the history. Fade it out and let the 10 km base shape
+    // plus the aerial haze carry the far field.
+    float lodFade = 1.0 - smoothstep(12000.0, 30000.0, dist);
+    if (lodFade <= 0.001) return DETAIL_MEAN;
+
     vec3 samplePos = worldPos + windOffset * 1.5;
     // Wind-torn edges: distort the detail lookup with large-scale vector noise
     // (~500 m swirls at curlNoiseScale 1; strength 0.1 → ~30 m displacement).
@@ -189,33 +219,61 @@ float sampleCloudDetail(vec3 worldPos) {
         samplePos += curlDistort(samplePos * (curlNoiseScale * 0.002)) *
                      (curlNoiseStrength * 300.0);
     }
-    vec3 detailUV = samplePos * detailNoiseScale * 0.001;
-    float d1 = 1.0 - worleyNoise3D(detailUV * 2.0);
-    float d2 = 1.0 - worleyNoise3D(detailUV * 4.0);
-    float d3 = 1.0 - worleyNoise3D(detailUV * 8.0);
-    return d1 * 0.625 + d2 * 0.25 + d3 * 0.125;
+    float d = texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.001)).r;
+    // Close-range octave: the same 32^3 volume at 5x frequency (finest wisps
+    // ~25 m), UV-offset to decorrelate, faded out past ~2.5 km — at distance
+    // it would be subpixel noise (temporal shimmer). Signed perturbation, so
+    // the mean erosion (and the far look) is unchanged.
+    float nearW = 1.0 - smoothstep(800.0, 2500.0, dist);
+    if (nearW > 0.01) {
+        float hf = texture(detailNoiseTex, samplePos * (detailNoiseScale * 0.005) + vec3(0.37)).r;
+        d += (hf - 0.5) * 0.35 * nearW;
+    }
+    return mix(DETAIL_MEAN, d, lodFade);
 }
 
-vec2 sampleWeather(vec3 worldPos) {
-    vec2 weatherUV = worldPos.xz * 0.00005 + time * 0.001;
-    float coverage = valueNoise3D(vec3(weatherUV * 3.0, 0.0));
-    coverage = pow(coverage * 0.5 + 0.5, 0.5);
-    float type = valueNoise3D(vec3(weatherUV * 2.0 + 100.0, 0.0));
-    type = type * 0.5 + 0.5;
-    return vec2(coverage * cloudCoverage, type);
+// R = coverage base, G = type, BA = signed shape de-tiling warp (see the bake
+// in Renderer::createCloudNoiseTextures). Returns (coverage, type, warp.xy)
+// with the warp already decoded to metres.
+vec4 sampleWeather(vec3 worldPos) {
+    // Scroll the coverage field with the wind (slower than the in-cloud detail,
+    // so macro shapes lag the internal churn); small time term keeps the
+    // pattern evolving. Coverage/type come pre-shaped from the weather map.
+    vec2 weatherUV = (worldPos.xz + windOffset.xz * 0.6) * 0.00005 + time * 0.0002;
+    // Half frequency (40 km tile): the 20 km tile repeated 3-5x to the
+    // horizon and the eye locked onto the pattern.
+    vec4 w = texture(weatherMapTex, weatherUV * 0.5);
+    return vec4(w.r * cloudCoverage, w.g, (w.ba * 2.0 - 1.0) * 2500.0);
 }
 
 float sampleCloudDensity(vec3 worldPos, bool useCheap) {
     float heightFraction = saturate((worldPos.y - cloudLayerBottom) / cloudLayerThickness);
     if (heightFraction <= 0.0 || heightFraction >= 1.0) return 0.0;
 
-    vec2 weather = sampleWeather(worldPos);
+    vec4 weather = sampleWeather(worldPos);
     float coverage = weather.x;
     float type = mix(weather.y, cloudType, 0.5);
 
     float heightGradient = cloudHeightGradient(heightFraction, type);
-    float baseShape = sampleCloudShape(worldPos);
-    float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - coverage, 1.0, 0.0, 1.0));
+    float baseShape = sampleCloudShape(worldPos, weather.zw);
+    // Aperiodic break-up (de-tiling measure 3): a single unbounded-lattice
+    // gradient-noise octave (~6 km wavelength) added onto the baked value.
+    // The coverage remap slices the field near its maxima, so +-0.15 is
+    // enough to reshuffle which peaks survive — and their cut size — from
+    // region to region, with no repeat anywhere. Advects with the wind like
+    // the baked shape so the deck drifts as one field.
+    baseShape += gradientNoise3D((worldPos + windOffset) * (1.0 / 6000.0)) * 0.15;
+    // The coverage remap divides by `coverage` (remap's denominator is
+    // inMax - inMin = 1 - (1 - coverage)). coverage reaches exactly 0 — the
+    // weather map's R channel is 8-bit and bottoms out, and the weather system
+    // sweeps cloudCoverage through 0 on a state change — and 0/0 there is a
+    // NaN. saturate() does NOT launder it (clamp with a NaN argument is
+    // undefined and most drivers pass it through), so it lands in the cloud RT,
+    // enters the temporal history, and is then dragged one texel per frame by
+    // the reprojection: a permanent horizontal streak, with colour fringing
+    // because each channel carries the non-finite differently.
+    float cov = max(coverage, 1e-4);
+    float baseCloud = saturate(remap(baseShape * heightGradient, 1.0 - cov, 1.0, 0.0, 1.0));
 
     if (useCheap || baseCloud <= 0.0) return baseCloud * cloudDensity;
 
@@ -277,7 +335,12 @@ vec3 cloudLighting(vec3 worldPos, vec3 rayDir) {
     float sunPower = sunIntensity * sunLightScale;
     float dayFactor = smoothstep(-0.12, 0.08, sunDirection.y);  // 1 day, 0 night
 
-    vec3 lum = ambientColor * ambientIntensity * mix(0.3, 1.0, dayFactor);
+    // Sky ambient reaches the cloud top and is absorbed on the way down, so
+    // billows read dark-bottomed/bright-topped even where the sun term is
+    // fully self-shadowed. Without the gradient the in-cloud view (and any
+    // sun-occluded face) collapsed to one flat constant — a featureless blob.
+    float hf = saturate((worldPos.y - cloudLayerBottom) / cloudLayerThickness);
+    vec3 lum = ambientColor * ambientIntensity * (0.35 + 0.65 * hf) * mix(0.3, 1.0, dayFactor);
 
     if (dayFactor > 0.01) {
         float tr = lightMarch(worldPos, sunDirection);
@@ -308,31 +371,143 @@ vec4 raymarchClouds(vec3 rayOrigin, vec3 rayDir, float maxDist, float blueNoise)
     tRange.y = min(tRange.y, maxDist);
 
     float rayLength = tRange.y - tRange.x;
-    float stepSize = rayLength / float(primarySteps);
-    float t = tRange.x + stepSize * blueNoise;
 
     vec3 scattering = vec3(0.0);
     float transmittance = 1.0;
     float cosTheta = dot(rayDir, sunDirection);
 
-    for (uint i = 0u; i < primarySteps && t < tRange.y; i++) {
-        vec3 pos = rayOrigin + rayDir * t;
+    // Bound the step SIZE, not the step count. Splitting each ray into a fixed
+    // primarySteps made the step length depend entirely on view angle: 57 m at
+    // the zenith (5.5 km of layer) but 330 m near the horizon, where a ground
+    // ray enters the 9.5 km deck 55 km out and crosses 30 km of it. 330 m is
+    // longer than the whole 200 m detail-noise period, so every step sampled
+    // the detail octave at an unrelated point — per-frame noise that the
+    // temporal pass averaged into grey mush and that popped as vertical
+    // shudder when rotation invalidated the history.
+    //
+    // Fine steps are derived from the layer thickness instead, so the in-cloud
+    // sampling rate is view-angle independent; coarse steps (4x) skip the empty
+    // air, keeping the total step count in the same budget as before.
+    float baseFine = min(cloudLayerThickness / 96.0, max(rayLength / 32.0, 1.0));
+    // Inside the layer the ladder is finer (below) and there is far more of it
+    // in front of the eye, so give the fly-through a larger iteration budget.
+    bool insideLayer = (tRange.x <= 0.001);
+    uint maxIters = primarySteps * (insideLayer ? 3u : 2u);
+
+    // The ladder itself is undithered; each segment is instead sampled at a
+    // STRATIFIED point inside it (t + blueNoise * step). Two bugs this avoids:
+    // a single entry dither could not span fineStep once it grows up to 4x
+    // past ~20 km (it covered a quarter of the step, leaving the phase
+    // correlated across frames), and the coarse back-up below clamps to
+    // tIntegrated, which erased an entry dither outright whenever the FIRST
+    // probe hit — precisely the camera-inside-the-layer case (tRange.x == 0).
+    float t = tRange.x;
+    float tIntegrated = tRange.x;  // never integrate behind this (no double count)
+    float tFirstHit = 1e9;         // distance to the nearest contributing sample
+    bool inCloud = false;
+    int emptyRun = 0;
+
+    for (uint i = 0u; i < maxIters && t < tRange.y; i++) {
+        // Steps grow with distance, lagging the detail LOD fade above: by the
+        // time only the 10 km base shape survives, 4x coarser still gives ~40
+        // samples per feature.
+        // Near-field LOD. baseFine is ~57 m at every view angle, but at the
+        // shipped density (0.3/m) optical depth 1 is reached in 3.3 m — so one
+        // 57 m step drives transmittance from 1.0 to 3e-8 and EVERY cloud
+        // boundary is a hard 57 m staircase. That, not the RT resolution, is
+        // what caps sharpness when the camera is in the layer. Ramp the step
+        // with distance instead (12 m at the eye, baseFine again by ~2.9 km),
+        // so the step keeps a roughly constant angular footprint. Beyond
+        // 2.9 km the ladder — and the ground view, which never enters this
+        // range — is bit-for-bit what it was.
+        float nearFine = min(max(t * 0.02, 12.0), baseFine);
+        float fineStep = nearFine * mix(1.0, 4.0, smoothstep(20000.0, 45000.0, t));
+        // Guarantee the ladder REACHES tRange.y inside the budget. Without this
+        // a near-horizontal in-layer ray runs out of iterations mid-flight and
+        // simply stops: cloud beyond that point vanishes, and because the
+        // truncation distance is a function of elevation — i.e. of screen row —
+        // the boundary is a hard HORIZONTAL edge that slides as the camera
+        // turns. Coarsening the tail instead trades far-field precision (which
+        // the aerial haze is hiding anyway) for guaranteed coverage.
+        float itersLeft = float(maxIters - i);
+        fineStep = max(fineStep, (tRange.y - t) / max(itersLeft, 1.0));
+        float coarseStep = fineStep * 4.0;
+
+        if (!inCloud) {
+            // Empty-space skip on the cheap density. Detail only ever erodes,
+            // so the cheap value is an upper bound — this cannot step over a
+            // cloud that the full-quality path would have found.
+            vec3 pos = rayOrigin + rayDir * (t + blueNoise * coarseStep);
+            if (sampleCloudDensity(pos, true) > 0.0) {
+                // Back up one coarse step so the lit leading edge isn't clipped.
+                t = max(t - coarseStep, tIntegrated);
+                inCloud = true;
+                emptyRun = 0;
+            } else {
+                t += coarseStep;
+            }
+            continue;
+        }
+
+        // Stratified sample inside [t, t + fineStep]; dt stays fineStep, so
+        // the Beer-Lambert integral over the segment is unchanged.
+        vec3 pos = rayOrigin + rayDir * (t + blueNoise * fineStep);
         float density = sampleCloudDensity(pos, false);
         if (density > 0.001) {
+            tFirstHit = min(tFirstHit, t);
             vec3 luminance = cloudLighting(pos, rayDir);
-            float powder = beerPowderEnergy(density * stepSize * 10.0, cosTheta) * powderStrength +
+            float powder = beerPowderEnergy(density * fineStep * 10.0, cosTheta) * powderStrength +
                            (1.0 - powderStrength);
-            float stepTransmittance = beerLambert(density, stepSize);
+            float stepTransmittance = beerLambert(density, fineStep);
             scattering += transmittance * luminance * (1.0 - stepTransmittance) * powder;
             transmittance *= stepTransmittance;
             if (transmittance < 0.01) { transmittance = 0.0; break; }
+            emptyRun = 0;
+        } else if (++emptyRun >= 8) {
+            inCloud = false;  // out the far side — back to skipping
+            emptyRun = 0;
         }
-        t += stepSize;
+        t += fineStep;
+        tIntegrated = t;
     }
+
+    // Aerial perspective: distant decks sink into the horizon haze — the
+    // in-scattered light fades toward a sky tint and the cloud loses opacity,
+    // instead of staying crisp all the way to the horizon (~40 km e-folding).
+    // Keyed on the distance to the nearest CONTRIBUTING sample, not to the
+    // layer entry: inside the layer the entry is 0 by definition, which
+    // switched the haze and the distance fade off entirely and left a
+    // near-horizontal in-layer ray ending dead at the iteration budget with
+    // no fade at all. Outside the layer tFirstHit >= tRange.x, so the ground
+    // view is unchanged in practice.
+    float fadeDist = min(max(tFirstHit, tRange.x), 1e8);
+    float dayFactor = smoothstep(-0.12, 0.08, sunDirection.y);
+    float haze = 1.0 - exp(-max(fadeDist, 0.0) * 2.5e-5);
+    vec3 hazeTint = (sunColor * 0.25 + ambientColor * 0.75) *
+                    (sunIntensity * sunLightScale * 0.25) * mix(0.05, 1.0, dayFactor);
+    scattering = mix(scattering, hazeTint * (1.0 - transmittance), haze);
+    transmittance = mix(transmittance, 1.0, haze * 0.5);
+
+    // The march stops at maxDist (100 km for sky pixels), which on a flat deck
+    // is reached at ~5 deg elevation — without an explicit fade the clouds just
+    // ended there, leaving a hard line across the sky. Fade the contribution
+    // out before the cutoff so the deck dissolves into haze instead.
+    float distFade = smoothstep(60000.0, 95000.0, fadeDist);
+    scattering *= 1.0 - distFade;
+    transmittance = mix(transmittance, 1.0, distFade);
+
     return vec4(scattering, transmittance);
 }
 
 void main() {
+    // No sub-texel jitter here, deliberately. It is the textbook way to turn a
+    // reduced-res temporal pass into an upsampler, but measured against this
+    // pipeline it buys nothing: rotation already sweeps the sampling grid
+    // through every sub-texel phase (the drift is a non-integer number of
+    // texels per frame), so the phase diversity jitter would add is already
+    // there. Simulated flicker was identical with and without it, and on a
+    // hard edge it measured strictly worse. The clamp gate in
+    // CloudTemporal.frag is what actually lets the accumulation happen.
     float depth = texture(sceneDepth, tex_uv).r;
 
     // World-space view ray (same convention as VolumetricFog/Velocity).

@@ -13,13 +13,17 @@ namespace Vapor {
         mapKey(SDL_SCANCODE_R, InputAction::MoveUp);
         mapKey(SDL_SCANCODE_F, InputAction::MoveDown);
 
-        // Camera rotation (IJKL + UO)
-        mapKey(SDL_SCANCODE_I, InputAction::LookUp);
-        mapKey(SDL_SCANCODE_K, InputAction::LookDown);
-        mapKey(SDL_SCANCODE_J, InputAction::LookLeft);
-        mapKey(SDL_SCANCODE_L, InputAction::LookRight);
+        // Camera rotation (arrow keys + UO)
+        mapKey(SDL_SCANCODE_UP, InputAction::LookUp);
+        mapKey(SDL_SCANCODE_DOWN, InputAction::LookDown);
+        mapKey(SDL_SCANCODE_LEFT, InputAction::LookLeft);
+        mapKey(SDL_SCANCODE_RIGHT, InputAction::LookRight);
         mapKey(SDL_SCANCODE_U, InputAction::RollLeft);
         mapKey(SDL_SCANCODE_O, InputAction::RollRight);
+
+        // Fly-camera throttle (Z = slow down, X = speed up)
+        mapKey(SDL_SCANCODE_Z, InputAction::SpeedDown);
+        mapKey(SDL_SCANCODE_X, InputAction::SpeedUp);
 
         // General actions
         mapKey(SDL_SCANCODE_SPACE, InputAction::Jump);

@@ -445,6 +445,7 @@ private:
     void velocityPass();
     void particlePass();
     void volumetricCloudPass();
+    void cloudShadowPass();
 
     // RmlUI on the RHI (cross-backend): initUI() (declared above with the
     // IRenderer overrides) creates an RmlRendererRHI and registers it as Rml's
@@ -902,9 +903,32 @@ private:
     PipelineHandle cloudRaymarchPipeline;
     PipelineHandle cloudTemporalPipeline;
     PipelineHandle cloudCompositePipeline;
-    TextureHandle cloudRT;          // quarter-res current raymarch
+    PipelineHandle cloudShadowPipeline;
+    TextureHandle cloudRT;          // reduced-res current raymarch
     TextureHandle cloudHistoryRT;   // previous resolved frame
     TextureHandle cloudResolvedRT;  // temporal output (swapped with history)
+    // Cloud RT resolution divisor (2 = half res, 4 = quarter). Half by
+    // default: quarter was the fly-through sharpness ceiling — inside the
+    // layer every pixel is a close-range cloud edge. Panel-switchable;
+    // createCloudRenderTargets() rebuilds the trio (safe mid-frame, the RHIs
+    // defer destruction past in-flight frames).
+    Uint32 m_cloudResDivisor = 2;
+    void createCloudRenderTargets();
+    // Top-down sun transmittance over a camera-centered region (CloudShadow
+    // pass); the PBR passes multiply the sun term by it.
+    TextureHandle cloudShadowRT;
+    // Baked tileable cloud noise volumes (CPU-generated once at init): one
+    // trilinear fetch replaces the per-sample procedural Perlin-Worley loops.
+    TextureHandle cloudShapeNoiseTex;   // 128^3 R8: combined Perlin-Worley base shape
+    TextureHandle cloudDetailNoiseTex;  // 32^3 R8: Worley FBM erosion detail
+    TextureHandle cloudWeatherMapTex;   // 512^2 RGBA8: coverage/type/precip over 20 km tile
+    void createCloudNoiseTextures();
+    // Cloud-shadow blend strength (panel). Pushed as 0 while the clouds pass
+    // is disabled, so the ground never shows shadows from an invisible deck.
+    float m_cloudShadowStrength = 0.8f;
+    float cloudShadowStrengthEffective() const {
+        return (volumetricCloudsEnabled && cloudShadowRT.isValid()) ? m_cloudShadowStrength : 0.0f;
+    }
     BufferHandle cloudDataBuffer;
     VolumetricCloudRenderData cloudSettings;  // CPU copy (tunables + wind/time accumulation)
     // Shared wind magnitude from the ECS WindFieldComponent (via setWind).
@@ -1007,6 +1031,7 @@ private:
     ShaderHandle cloudRaymarchShader;
     ShaderHandle cloudTemporalShader;
     ShaderHandle cloudCompositeShader;
+    ShaderHandle cloudShadowShader;
     ShaderHandle shadowVertexShader;
     ShaderHandle shadowFragmentShader;
     static constexpr Uint32 SHADOW_MAP_SIZE = Vapor::kDirectionalShadowMapSize;  // shared (irenderer.hpp)
