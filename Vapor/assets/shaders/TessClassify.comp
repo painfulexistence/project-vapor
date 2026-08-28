@@ -1,0 +1,361 @@
+#version 450
+// Adaptive GPU tessellation — classify kernel (Vulkan twin of tessClassify in
+// 3d_tess_update.metal; the CPU reference is Vapor/cbt.hpp). One thread per
+// leaf of LAST frame's tree (indirect dispatch on TessArgs.classify): decode
+// the leaf, evaluate the screen-space LoD metric on its hypotenuse, and split
+// (conforming chain) or merge (diamond rule) via single-bit atomics on the
+// CBT bitfield. Terrain instances (TESS_FLAG_TERRAIN) measure the DISPLACED
+// hypotenuse — with up to heightScale of relief a flat-plane metric would
+// under-subdivide right where the camera looks.
+//
+// Binding contract (RHI::setComputeBuffer; matches the Metal slots, except
+// TessParams rides a small per-instance buffer at b4 — Vulkan's 64-byte
+// compute push range can't carry the 112-byte struct Metal passes with
+// setComputeBytes; the Metal-only b1 atomic view aliases b0's buffer and is
+// simply not declared here):
+//   b0 = CBT storage (counts + bitfield; atomicOr targets)
+//   b2 = TessRoot[] (corners + root adjacency)
+//   b3 = CameraData
+//   b4 = TessParams
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const uint TESS_FLAG_FREEZE = 1u;
+const uint TESS_FLAG_TERRAIN = 2u;
+
+// Mirrors TessRootGpu (tessellation.hpp) / TessRoot (3d_tess_lib.metal).
+struct TessRoot {
+    vec4 posU[3];  // xyz = object-space position of corner vi, w = uv.x
+    vec4 nrmV[3];  // xyz = object-space normal at corner vi,  w = uv.y
+    uint left;     // across edge (v1, v2)
+    uint right;    // across edge (v0, v1)
+    uint edge;     // across the bisected edge (v2, v0)
+    uint node;     // this root's own heap id
+};
+
+// Must match CameraRenderData (C++); same mirror as GpuCull.comp.
+struct CameraData {
+    mat4 proj;
+    mat4 view;
+    mat4 invProj;
+    mat4 invView;
+    float nearPlane;
+    float farPlane;
+    vec2 _pad;
+    vec3 position;
+    float _pad2;
+    vec4 frustumPlanes[6];
+};
+
+layout(std430, binding = 0) buffer CbtBuf { uint cbt[]; };
+layout(std430, binding = 2) readonly buffer RootBuf { TessRoot roots[]; };
+layout(std430, binding = 3) readonly buffer CameraBuf { CameraData cam; };
+// Mirrors TessParamsGpu (tessellation.hpp) / TessParams (3d_tess_lib.metal).
+layout(std430, binding = 4) readonly buffer ParamsBuf {
+    mat4 model;
+    uint maxDepth;
+    uint rootDepth;
+    uint rootCount;
+    uint maxLeaves;
+    float splitPixels;
+    float screenHeight;
+    float displacementScale;  // terrain instances: heightScale
+    uint flags;
+    uint gridIndexCount;
+    float terrainFrequency;
+    uint terrainSeed;
+    uint terrainOctaves;
+} params;
+
+// ── CBT storage access (mirror of 3d_tess_lib.metal / cbt.hpp) ──────────────
+
+uint tessDepthOf(uint node) { return uint(findMSB(node)); }
+
+uint tessBitfieldOffset(uint maxDepth) { return (2u << (maxDepth - 5u)) - 1u; }
+
+uint tessCeilBitOf(uint node, uint maxDepth) {
+    uint d = tessDepthOf(node);
+    return (node << (maxDepth - d)) & ((1u << maxDepth) - 1u);
+}
+
+uint tessHeapRead(uint maxDepth, uint node) {
+    if (node == 0u) return 0u;
+    uint d = tessDepthOf(node);
+    uint s = maxDepth - 5u;
+    if (d <= s) {
+        return cbt[(1u << d) - 1u + (node - (1u << d))];
+    }
+    uint first = tessCeilBitOf(node, maxDepth);
+    uint len = 1u << (maxDepth - d);  // <= 16, word-aligned range
+    uint word = cbt[tessBitfieldOffset(maxDepth) + (first >> 5u)];
+    uint mask = ((1u << len) - 1u) << (first & 31u);
+    return uint(bitCount(word & mask));
+}
+
+uint tessLeafCount() { return cbt[0]; }
+
+uint tessDecodeLeaf(uint maxDepth, uint rootDepth, uint leafIndex) {
+    uint node = 1u;
+    while (tessDepthOf(node) < rootDepth || tessHeapRead(maxDepth, node) > 1u) {
+        uint leftCount = tessHeapRead(maxDepth, node << 1u);
+        if (leafIndex < leftCount) {
+            node = node << 1u;
+        } else {
+            leafIndex -= leftCount;
+            node = node << 1u | 1u;
+        }
+        if (tessDepthOf(node) >= maxDepth) break;  // safety against racy reads
+    }
+    return node;
+}
+
+// ── LEB decoding (pure bit walks, no CBT reads) ─────────────────────────────
+
+struct TessTriangle {
+    vec3 w0;  // weights of corner v0 over (root v0, root v1, root v2)
+    vec3 w1;
+    vec3 w2;
+    uint rootSlot;
+};
+
+TessTriangle tessDecodeTriangle(uint node, uint rootDepth) {
+    uint lebDepth = tessDepthOf(node) - rootDepth;
+    TessTriangle t;
+    t.rootSlot = (node >> lebDepth) - (1u << rootDepth);
+    t.w0 = vec3(1, 0, 0);
+    t.w1 = vec3(0, 1, 0);
+    t.w2 = vec3(0, 0, 1);
+    for (uint k = lebDepth; k-- > 0u;) {
+        uint bit = (node >> k) & 1u;
+        vec3 mid = (t.w0 + t.w2) * 0.5;
+        if (bit == 0u) {
+            t.w2 = t.w1;
+            t.w1 = mid;
+        } else {
+            t.w0 = t.w1;
+            t.w1 = mid;
+        }
+    }
+    return t;
+}
+
+struct TessNeighbors {
+    uint left;
+    uint right;
+    uint edge;
+    uint node;
+};
+
+TessNeighbors tessNeighborsOf(uint node, uint rootDepth) {
+    uint lebDepth = tessDepthOf(node) - rootDepth;
+    uint slot = (node >> lebDepth) - (1u << rootDepth);
+    TessNeighbors n;
+    n.left = roots[slot].left;
+    n.right = roots[slot].right;
+    n.edge = roots[slot].edge;
+    n.node = roots[slot].node;
+    for (uint k = lebDepth; k-- > 0u;) {
+        uint bit = (node >> k) & 1u;
+        uint b2 = (n.right != 0u) ? 1u : 0u;
+        uint b3 = (n.edge != 0u) ? 1u : 0u;
+        TessNeighbors m;
+        if (bit == 0u) {
+            m.left = n.node << 1u | 1u;
+            m.right = n.edge << 1u | b3;
+            m.edge = n.right << 1u | b2;
+            m.node = n.node << 1u;
+        } else {
+            m.left = n.edge << 1u;
+            m.right = n.node << 1u;
+            m.edge = n.left << 1u;
+            m.node = n.node << 1u | 1u;
+        }
+        n = m;
+    }
+    return n;
+}
+
+vec3 tessCornerPos(vec3 w, uint rootSlot) {
+    return w.x * roots[rootSlot].posU[0].xyz + w.y * roots[rootSlot].posU[1].xyz
+        + w.z * roots[rootSlot].posU[2].xyz;
+}
+
+// Projected size (pixels) of the bounding sphere of a world-space edge — the
+// LoD metric, always evaluated on a hypotenuse.
+float tessProjectedPixels(vec3 wa, vec3 wb) {
+    vec3 c = (wa + wb) * 0.5;
+    float diameter = distance(wa, wb);
+    float d = max(distance(c, cam.position) - diameter * 0.5, cam.nearPlane);
+    return diameter / d * cam.proj[1][1] * 0.5 * params.screenHeight;
+}
+
+// ── Terrain height field — FastNoiseLite v1.1.1 OpenSimplex2 FBm, the same
+// GLSL port RHIMain.frag carries (see there / 3d_terrain_noise.metal): the
+// exact field TerrainWorld::heightAt builds the streamed meshes on.
+const int kFnlPrimeX = 501125321;
+const int kFnlPrimeY = 1136930381;
+const vec2 kFnlFan[24] = vec2[24](
+    vec2(0.130526192220052, 0.99144486137381),   vec2(0.38268343236509, 0.923879532511287),
+    vec2(0.608761429008721, 0.793353340291235),  vec2(0.793353340291235, 0.608761429008721),
+    vec2(0.923879532511287, 0.38268343236509),   vec2(0.99144486137381, 0.130526192220051),
+    vec2(0.99144486137381, -0.130526192220051),  vec2(0.923879532511287, -0.38268343236509),
+    vec2(0.793353340291235, -0.60876142900872),  vec2(0.608761429008721, -0.793353340291235),
+    vec2(0.38268343236509, -0.923879532511287),  vec2(0.130526192220052, -0.99144486137381),
+    vec2(-0.130526192220052, -0.99144486137381), vec2(-0.38268343236509, -0.923879532511287),
+    vec2(-0.608761429008721, -0.793353340291235),vec2(-0.793353340291235, -0.608761429008721),
+    vec2(-0.923879532511287, -0.38268343236509), vec2(-0.99144486137381, -0.130526192220052),
+    vec2(-0.99144486137381, 0.130526192220051),  vec2(-0.923879532511287, 0.38268343236509),
+    vec2(-0.793353340291235, 0.608761429008721), vec2(-0.608761429008721, 0.793353340291235),
+    vec2(-0.38268343236509, 0.923879532511287),  vec2(-0.130526192220052, 0.99144486137381));
+vec2 fnlGradient2(int pairIndex) {
+    return pairIndex < 120 ? kFnlFan[pairIndex % 24] : kFnlFan[1 + 3 * (pairIndex - 120)];
+}
+float fnlGradCoord(int seed, int xPrimed, int yPrimed, float xd, float yd) {
+    int hash = (seed ^ xPrimed ^ yPrimed) * 0x27d4eb2d;
+    hash ^= hash >> 15;
+    hash &= 127 << 1;
+    vec2 g = fnlGradient2(hash >> 1);
+    return xd * g.x + yd * g.y;
+}
+float fnlSimplex2(int seed, vec2 p) {
+    const float SQRT3 = 1.7320508075688772935;
+    const float G2 = (3.0 - SQRT3) / 6.0;
+    int i = int(floor(p.x)), j = int(floor(p.y));
+    float xi = p.x - float(i), yi = p.y - float(j);
+    float t = (xi + yi) * G2;
+    float x0 = xi - t, y0 = yi - t;
+    i *= kFnlPrimeX;
+    j *= kFnlPrimeY;
+    float n0 = 0.0, n1 = 0.0, n2 = 0.0;
+    float a = 0.5 - x0 * x0 - y0 * y0;
+    if (a > 0.0) n0 = (a * a) * (a * a) * fnlGradCoord(seed, i, j, x0, y0);
+    float c = (2.0 * (1.0 - 2.0 * G2) * (1.0 / G2 - 2.0)) * t
+            + ((-2.0 * (1.0 - 2.0 * G2) * (1.0 - 2.0 * G2)) + a);
+    if (c > 0.0) {
+        float x2 = x0 + (2.0 * G2 - 1.0), y2 = y0 + (2.0 * G2 - 1.0);
+        n2 = (c * c) * (c * c) * fnlGradCoord(seed, i + kFnlPrimeX, j + kFnlPrimeY, x2, y2);
+    }
+    if (y0 > x0) {
+        float x1 = x0 + G2, y1 = y0 + (G2 - 1.0);
+        float b = 0.5 - x1 * x1 - y1 * y1;
+        if (b > 0.0) n1 = (b * b) * (b * b) * fnlGradCoord(seed, i, j + kFnlPrimeY, x1, y1);
+    } else {
+        float x1 = x0 + (G2 - 1.0), y1 = y0 + G2;
+        float b = 0.5 - x1 * x1 - y1 * y1;
+        if (b > 0.0) n1 = (b * b) * (b * b) * fnlGradCoord(seed, i + kFnlPrimeX, j, x1, y1);
+    }
+    return (n0 + n1 + n2) * 99.83685446303647;
+}
+float trHeightAt(vec2 xz, float noiseFreq, int octaves, uint seed, float heightScale) {
+    vec2 p = xz * noiseFreq;
+    const float SQRT3 = 1.7320508075688772935;
+    const float F2 = 0.5 * (SQRT3 - 1.0);
+    p += vec2((p.x + p.y) * F2);
+    const float gain = 0.5;
+    float amp = gain, ampFractal = 1.0;
+    for (int i = 1; i < octaves; ++i) { ampFractal += amp; amp *= gain; }
+    int s = int(seed);
+    float sum = 0.0;
+    amp = 1.0 / ampFractal;  // fractalBounding
+    for (int i = 0; i < octaves; ++i) {
+        sum += fnlSimplex2(s++, p) * amp;
+        p *= 2.0;
+        amp *= gain;
+    }
+    return clamp(sum * 0.5 + 0.5, 0.0, 1.0) * heightScale;
+}
+
+float tessTerrainHeight(vec3 p) {
+    return trHeightAt(p.xz, params.terrainFrequency, int(params.terrainOctaves),
+                      params.terrainSeed, params.displacementScale);
+}
+
+// ── split / merge bit ops ───────────────────────────────────────────────────
+
+void tessSplitBit(uint node) {
+    uint d = tessDepthOf(node);
+    if (d >= params.maxDepth) return;
+    uint pos = tessCeilBitOf(node << 1u | 1u, params.maxDepth);
+    atomicOr(cbt[tessBitfieldOffset(params.maxDepth) + (pos >> 5u)], 1u << (pos & 31u));
+}
+
+// Conforming split: mark the node, then walk the compatibility chain across
+// hypotenuses (mirror of CBT::splitConforming — idempotent bit sets, safe
+// under concurrency).
+void tessSplitConforming(uint node) {
+    if (tessDepthOf(node) >= params.maxDepth) return;
+    tessSplitBit(node);
+    uint t = tessNeighborsOf(node, params.rootDepth).edge;
+    uint guard = 0u;
+    while (t != 0u && guard++ < 64u) {
+        tessSplitBit(t);
+        // A root's hypotenuse partner is the node the chain came from.
+        if (tessDepthOf(t) <= params.rootDepth) break;
+        t >>= 1u;
+        tessSplitBit(t);
+        t = tessNeighborsOf(t, params.rootDepth).edge;
+    }
+}
+
+// Diamond merge (mirror of CBT::mergeConforming): clear our pair's right
+// sibling if the parent holds exactly its two leaves and the parent's
+// hypotenuse partner holds at most two.
+void tessMergeConforming(uint leaf) {
+    uint d = tessDepthOf(leaf);
+    if (d <= params.rootDepth) return;
+    uint parent = leaf >> 1u;
+    if (tessHeapRead(params.maxDepth, parent) != 2u) return;
+    uint top = tessNeighborsOf(parent, params.rootDepth).edge;
+    if (top != 0u && tessHeapRead(params.maxDepth, top) > 2u) return;
+    uint pos = tessCeilBitOf(leaf | 1u, params.maxDepth);
+    atomicAnd(cbt[tessBitfieldOffset(params.maxDepth) + (pos >> 5u)], ~(1u << (pos & 31u)));
+}
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint leafCount = tessLeafCount();
+    if (tid >= leafCount) return;
+    if ((params.flags & TESS_FLAG_FREEZE) != 0u) return;
+
+    uint node = tessDecodeLeaf(params.maxDepth, params.rootDepth, tid);
+    TessTriangle tri = tessDecodeTriangle(node, params.rootDepth);
+
+    // World-space hypotenuse endpoints (v2, v0) — the LoD metric edge;
+    // terrain instances measure the DISPLACED edge (identity model: object ==
+    // world, see 3d_tess_lib.metal's terrain notes).
+    vec3 p0 = tessCornerPos(tri.w0, tri.rootSlot);
+    vec3 p2 = tessCornerPos(tri.w2, tri.rootSlot);
+    vec3 w0 = (params.model * vec4(p0, 1.0)).xyz;
+    vec3 w2 = (params.model * vec4(p2, 1.0)).xyz;
+    if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
+        w0.y += tessTerrainHeight(p0);
+        w2.y += tessTerrainHeight(p2);
+    }
+    float hypPx = tessProjectedPixels(w2, w0);
+
+    uint depth = tessDepthOf(node);
+    if (hypPx > params.splitPixels && depth < params.maxDepth) {
+        // Soft capacity guard: stop splitting well before the leaf cache
+        // fills so the draw clamp never truncates visible geometry.
+        if (leafCount * 4u < params.maxLeaves * 3u) {
+            tessSplitConforming(node);
+        }
+    } else if (depth > params.rootDepth) {
+        // Merge when even the PARENT's hypotenuse projects under the split
+        // threshold (hysteresis: a just-merged parent never immediately
+        // re-splits).
+        TessTriangle pt = tessDecodeTriangle(node >> 1u, params.rootDepth);
+        vec3 pp0 = tessCornerPos(pt.w0, pt.rootSlot);
+        vec3 pp2 = tessCornerPos(pt.w2, pt.rootSlot);
+        vec3 pw0 = (params.model * vec4(pp0, 1.0)).xyz;
+        vec3 pw2 = (params.model * vec4(pp2, 1.0)).xyz;
+        if ((params.flags & TESS_FLAG_TERRAIN) != 0u) {
+            pw0.y += tessTerrainHeight(pp0);
+            pw2.y += tessTerrainHeight(pp2);
+        }
+        float parentPx = tessProjectedPixels(pw2, pw0);
+        if (parentPx < params.splitPixels) {
+            tessMergeConforming(node);
+        }
+    }
+}

@@ -29,6 +29,17 @@ enum class MaterialType {
     Iridescent,
 };
 
+// Surface shader model — which shading the Main pass runs for this material.
+// Standard meshes shade with the PBR path; Terrain/Grass select their own
+// branch (detail-layer splat / instanced blades). Kept in sync with the GPU
+// MaterialData.shaderModel (graphics_gpu_structs.hpp) and the RHIMain.frag
+// dispatch.
+enum class MaterialShader : Uint32 {
+    Standard = 0,
+    Terrain = 1,
+    Grass = 2,
+};
+
 // Note: PipelineHandle, BufferHandle, TextureHandle are now defined in rhi.hpp
 // RenderTargetHandle is no longer used (replaced by RHI's RenderPassDesc)
 
@@ -89,6 +100,7 @@ struct Material {
     int prototypeUVMode = 0;
     float uvScale = 1.0f;
     MaterialType materialType = MaterialType::PBR;
+    MaterialShader materialShader = MaterialShader::Standard;  // Main-pass shading branch
     bool useIBL = false;
 
     // Renderer-assigned ID (assigned during registration)

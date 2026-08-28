@@ -63,8 +63,10 @@ namespace Vapor {
             registerComponent<Text2DComponent>("Text 2D");
             registerComponent<Shape2DComponent>("Shape 2D");
             // Procedural world: the auto-draw skips its Hidden<> state; the
-            // owning VoxelVolumeSystem picks up edits — tick `regenerate` after
-            // changing seeds/dims to rebuild.
+            // owning system (TerrainSystem / VoxelVolumeSystem) picks up
+            // edits — tick `regenerate` after changing seeds/rings/dims to
+            // rebuild.
+            registerComponent<StreamingTerrainComponent>("Streaming Terrain");
             registerComponent<VoxelVolumeComponent>("Voxel Volume");
         }
 

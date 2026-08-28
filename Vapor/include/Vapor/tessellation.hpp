@@ -40,14 +40,19 @@ struct alignas(16) TessParamsGpu {
     Uint32 maxLeaves;
     float splitPixels;
     float screenHeight;
-    float displacementScale;
-    Uint32 flags;  // bit0 = freeze
+    float displacementScale;  // terrain instances: heightScale
+    Uint32 flags;  // bit0 = freeze, bit1 = terrain heightfield displacement
     Uint32 gridIndexCount;
-    Uint32 pad0;
-    Uint32 pad1;
-    Uint32 pad2;
+    // Terrain heightfield descriptor (flags bit1) — the OpenSimplex2 FBm
+    // params of TerrainWorld::heightAt (see 3d_terrain_noise.metal).
+    float terrainFrequency;
+    Uint32 terrainSeed;
+    Uint32 terrainOctaves;
 };
 static_assert(sizeof(TessParamsGpu) == 112, "must match MSL TessParams");
+
+inline constexpr Uint32 kTessFlagFreeze = 1u;
+inline constexpr Uint32 kTessFlagTerrain = 2u;
 
 // GPU-written indirect args, one 64-byte block per tessellated mesh. Byte
 // offsets consumed by dispatchIndirect / drawIndexedIndirect /
@@ -90,6 +95,18 @@ struct TessellationDesc {
     Uint32 maxLeaves = 1u << 17;
     float displacementScale = 0.0f;
     glm::mat4 model = glm::mat4(1.0f);
+    // Terrain heightfield displacement: instead of the sin/cos placeholder,
+    // displace by the streamed-terrain OpenSimplex2 FBm field (FastNoiseLite
+    // — the SAME field TerrainWorld::heightAt builds tile meshes on), with
+    // displacementScale as heightScale, terrain-aware LoD classification and
+    // palette shading. The mesh should be a flat y = 0 plane and model
+    // identity: displacement is evaluated at OBJECT-space xz, and the metric/
+    // shading assume object == world (crack-free displacement must be a
+    // function of the undisplaced position only).
+    bool terrainHeightfield = false;
+    float terrainFrequency = 0.0007f;
+    int terrainOctaves = 9;
+    Uint32 terrainSeed = 20260705u;
 };
 
 // ---- builders (implemented in src/tessellation.cpp) ------------------------

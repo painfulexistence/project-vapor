@@ -44,6 +44,14 @@ struct SystemTexs {
     // take direct texture args, so these join the system table like the rest.
     texture2d<float, access::sample>     texReflection  [[id(10)]];
     texture2d<float, access::sample>     texRefraction  [[id(11)]];
+    // Terrain detail-layer arrays (grass/rock/dirt/snow albedo + tangent-space
+    // normal) for the shaderModel == 1 branch — the ICB path's stand-in for the
+    // bound path's direct texture(18)/texture(19) args. The renderer writes the
+    // staged arrays (or the default white array) every frame like the slots
+    // above, so the bindless terrain shades the full splat instead of falling
+    // back to the palette LUT.
+    texture2d_array<float, access::sample> terrainDetailAlbedo [[id(12)]];
+    texture2d_array<float, access::sample> terrainDetailNormal [[id(13)]];
 };
 
 struct RasterizerData {
@@ -105,6 +113,11 @@ vertex RasterizerData vertexMain(
     return vert;
 }
 
+// Terrain surface shading (shaderModel == 1) — shared with the meshlet
+// fragment; see 3d_terrain_shade.metal (splat weights + per-pixel FNL normal +
+// trgShadeTerrain).
+#include "Res/shaders/3d_terrain_shade.metal"
+
 fragment float4 fragmentMain(
     RasterizerData in [[stage_in]],
     // Per-draw material textures — bound path only. The bindless
@@ -136,6 +149,14 @@ fragment float4 fragmentMain(
     // system textures above. Resolved to locals at the top of the body.
     texture2d<float, access::sample> texReflectionArg [[texture(16), function_constant(kBoundMaterials)]], // RT mirror reflections
     texture2d<float, access::sample> texRefractionArg [[texture(17), function_constant(kBoundMaterials)]], // RT refractions (transmission)
+    // Terrain detail-layer arrays (grass/rock/dirt/snow albedo + tangent-space
+    // normal), world-space tiled — sampled only by the shaderModel == 1
+    // (Terrain) branch. Direct args on the bound path; the ICB/bindless path
+    // reads the same arrays from systemTexs ids 12/13 (resolved to locals at
+    // the top of the body like every other texture). Metal twin of
+    // RHIMain.frag set2 b13/b14.
+    texture2d_array<float, access::sample> terrainDetailAlbedo [[texture(18), function_constant(kBoundMaterials)]],
+    texture2d_array<float, access::sample> terrainDetailNormal [[texture(19), function_constant(kBoundMaterials)]],
     const device DirLight* directionalLights [[buffer(0)]],
     const device PointLight* pointLights [[buffer(1)]],
     const device Cluster* clusters [[buffer(2)]],
@@ -204,6 +225,10 @@ fragment float4 fragmentMain(
     texture2d<float, access::sample>     texSSCS        = kBindlessMaterials ? systemTexs->texSSCS        : texSSCSArg;
     texture2d<float, access::sample>     texReflection  = kBindlessMaterials ? systemTexs->texReflection  : texReflectionArg;
     texture2d<float, access::sample>     texRefraction  = kBindlessMaterials ? systemTexs->texRefraction  : texRefractionArg;
+    texture2d_array<float, access::sample> trnDetailAlbedo =
+        kBindlessMaterials ? systemTexs->terrainDetailAlbedo : terrainDetailAlbedo;
+    texture2d_array<float, access::sample> trnDetailNormal =
+        kBindlessMaterials ? systemTexs->terrainDetailNormal : terrainDetailNormal;
 
     // Prototype UV: triplanar mapping with world space or object space
     // Mode: 0 = Off, 1 = World Space (static objects), 2 = Object Space (dynamic objects)
@@ -275,6 +300,40 @@ fragment float4 fragmentMain(
         T = normalize(cross(up, N));
         B = cross(N, T);
     }
+
+    // Terrain: replace albedo + normal with the world-space detail-layer splat
+    // (mirrors RHIMain.frag's shaderModel == 1 branch). in.uv.x carries the
+    // baked height01; the geometric normal drives slope. Terrain then shades
+    // as a rough dielectric through the same lighting below. Runs on BOTH
+    // paths — the bound one samples the direct texture(18)/(19) args, the
+    // ICB/bindless one the same arrays from the system table (trnDetail*
+    // locals above). This branch must never be path-gated: it also neutralizes
+    // the Disney lobe fields the terrain material overloads as its height-field
+    // descriptor, and skipping it once left the bindless BRDF shading with
+    // specular = heightScale — the whole terrain blown out to white.
+    if (material.shaderModel == 1.0) {
+        float3 tAlbedo, tN;
+        // Height-field descriptor packed into the terrain material's spare fields
+        // (see renderer.cpp material upload). Seed is carried as raw bits.
+        float noiseFreq   = material.subsurface;
+        float heightScale = material.specular;
+        int   octaves     = int(material.specularTint + 0.5);
+        uint  seed        = as_type<uint>(material.anisotropic);
+        trgShadeTerrain(in.worldPosition.xyz, noiseFreq, octaves, seed, heightScale,
+                        clamp(in.uv.x, 0.0, 1.0), trnDetailAlbedo, trnDetailNormal, tAlbedo, tN);
+        surf.color = tAlbedo;  // detail albedo is already linearized in the blend
+        surf.roughness = 0.95;
+        surf.metallic = 0.0;
+        norm = tN;
+        // The Disney lobe fields were just read as the terrain height-field
+        // descriptor — reset them to neutral dielectric so the BRDF below does
+        // not shade with specular = heightScale / anisotropic = seed bits.
+        surf.subsurface = 0.0;
+        surf.specular = 0.5;
+        surf.specular_tint = 0.0;
+        surf.anisotropic = 0.0;
+    }
+
     float3 viewDir = normalize(camera.position - in.worldPosition.xyz);
 
     float2 screenUV = in.position.xy / screenSize;
@@ -353,10 +412,23 @@ fragment float4 fragmentMain(
     float3 shadowL = normalize(-directionalLights[0].direction);
 
     // Helper: sample a specific cascade
+    // Returns -1 when the fragment falls OUTSIDE this cascade's map, so the
+    // caller can fall through to a farther cascade and ultimately treat it as
+    // lit. Mirrors RHIMain.frag's sampleCascade. Without this test the
+    // clamp_to_edge sampler silently read the border texel, and proj.z > 1
+    // failed every less_equal compare — so everything past the last split
+    // (pssmShadowDistance, 2500 m by default, far short of the 30 km far
+    // plane) shaded FULLY SHADOWED. That is a camera-locked black band over
+    // the terrain: the regression the shadow-distance decoupling introduced
+    // on Metal, where the range beyond the cascades first came to exist.
     auto sampleCascade = [&](int ci) -> float {
         float4 lsPos = pssmData.lightSpaceMatrices[ci] * in.worldPosition;
         float3 proj  = lsPos.xyz / lsPos.w;
         float2 shadowUV = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+        if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
+            shadowUV.y < 0.0 || shadowUV.y > 1.0 || proj.z > 1.0) {
+            return -1.0;
+        }
         // Per-cascade + slope-scaled depth bias. A flat bias is fine for the
         // near cascade but far cascades cover far more world per texel, and
         // grazing surfaces (small N·L, e.g. a ceiling lit obliquely) self-shadow
@@ -406,14 +478,24 @@ fragment float4 fragmentMain(
         debugCascade = ci;
 
         shadowFactor = sampleCascade(ci);
+        // Left this cascade's box -> try the farther ones, then give up and
+        // call it lit. Fog/aerial perspective covers that range.
+        if (shadowFactor < 0.0 && ci < 1) { ci = 1; shadowFactor = sampleCascade(1); }
+        if (shadowFactor < 0.0 && ci < 2) { ci = 2; shadowFactor = sampleCascade(2); }
+        bool beyondAll = shadowFactor < 0.0;
+        if (beyondAll) shadowFactor = 1.0;  // past every cascade -> lit
+        debugCascade = beyondAll ? 3 : ci;
 
         // Cascade blend: smooth transition between cascades
         float cascadeBlend = pssmData.cascadeBlendRange;
-        if (cascadeBlend > 0.0 && ci < 2) {
+        if (cascadeBlend > 0.0 && ci < 2 && !beyondAll) {
             float cascadeEnd = (ci == 0) ? pssmData.cascadeSplits.y : pssmData.cascadeSplits.z;
             float blendStart = cascadeEnd - cascadeBlend;
             if (viewDepth > blendStart && viewDepth < cascadeEnd) {
                 float nextShadow = sampleCascade(ci + 1);
+                // The next cascade can be out of range too — blending -1 would
+                // darken toward black instead of fading to lit.
+                if (nextShadow < 0.0) nextShadow = 1.0;
                 float t = (viewDepth - blendStart) / cascadeBlend;
                 shadowFactor = mix(shadowFactor, nextShadow, smoothstep(0.0, 1.0, t));
             }
@@ -430,13 +512,14 @@ fragment float4 fragmentMain(
 
     // Debug visualization: show cascade colors
     if (pssmData.debugVisualize > 0) {
-        float3 cascadeColors[4] = {
+        float3 cascadeColors[5] = {
             float3(0.2, 0.8, 0.2), // RT = green
             float3(0.8, 0.2, 0.2), // Cascade 0 = red
             float3(0.2, 0.2, 0.8), // Cascade 1 = blue
-            float3(0.8, 0.8, 0.2)  // Cascade 2 = yellow
+            float3(0.8, 0.8, 0.2), // Cascade 2 = yellow
+            float3(0.4, 0.4, 0.4)  // beyond every cascade (unshadowed) = grey
         };
-        float3 cascadeColor = cascadeColors[debugCascade + 1];
+        float3 cascadeColor = cascadeColors[clamp(debugCascade + 1, 0, 4)];
         return float4(cascadeColor * shadowFactor, 1.0);
     }
 

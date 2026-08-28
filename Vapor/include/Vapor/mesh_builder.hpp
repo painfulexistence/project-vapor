@@ -2,7 +2,9 @@
 #include <SDL3/SDL_stdinc.h>
 #include <numbers>
 #include <array>
+#include <cmath>
 #include <memory>
+#include <vector>
 
 #include "graphics.hpp"
 #include "graphics_mesh.hpp"// WaterVertexData (buildWaterGrid) — keep this header self-contained
@@ -72,6 +74,53 @@ public:
             mesh->material = material;
         }
 
+        return mesh;
+    };
+
+    // UV sphere of the given radius. Winding matches buildCube's convention —
+    // each triangle's (v1-v0) x (v2-v0) points outward, same as its vertex
+    // normal — so it renders correctly under back-face culling.
+    static std::shared_ptr<Vapor::Mesh> buildSphere(float radius, int segments = 16, int rings = 12,
+                                                    std::shared_ptr<Vapor::Material> material = nullptr) {
+        const float pi = std::numbers::pi_v<float>;
+        const int stride = segments + 1;
+        std::vector<Vapor::VertexData> verts;
+        verts.reserve(static_cast<size_t>(rings + 1) * stride);
+        for (int r = 0; r <= rings; ++r) {
+            const float v = static_cast<float>(r) / static_cast<float>(rings);  // 0=top .. 1=bottom
+            const float phi = v * pi;
+            const float y = std::cos(phi);
+            const float rr = std::sin(phi);
+            for (int s = 0; s <= segments; ++s) {
+                const float u = static_cast<float>(s) / static_cast<float>(segments);
+                const float theta = u * 2.0f * pi;
+                const glm::vec3 n(rr * std::cos(theta), y, rr * std::sin(theta));
+                Vapor::VertexData vert {};
+                vert.position = n * radius;
+                vert.uv = glm::vec2(u, v);
+                vert.normal = n;
+                vert.tangent = glm::vec4(-std::sin(theta), 0.0f, std::cos(theta), 1.0f);
+                verts.push_back(vert);
+            }
+        }
+        std::vector<Uint32> tris;
+        tris.reserve(static_cast<size_t>(rings) * segments * 6);
+        for (int r = 0; r < rings; ++r) {
+            for (int s = 0; s < segments; ++s) {
+                const Uint32 a = static_cast<Uint32>(r * stride + s);      // (r,   s)   top-left
+                const Uint32 tr = a + 1;                                   // (r,   s+1) top-right
+                const Uint32 bl = a + static_cast<Uint32>(stride);         // (r+1, s)   bottom-left
+                const Uint32 br = bl + 1;                                  // (r+1, s+1) bottom-right
+                tris.insert(tris.end(), { a, tr, bl, tr, br, bl });
+            }
+        }
+        auto mesh = std::make_shared<Vapor::Mesh>();
+        mesh->hasPosition = true;
+        mesh->hasUV0 = true;
+        mesh->hasNormal = true;
+        mesh->primitiveMode = Vapor::PrimitiveMode::TRIANGLES;
+        mesh->initialize(verts.data(), verts.size(), tris.data(), tris.size());
+        if (material) mesh->material = material;
         return mesh;
     };
 
