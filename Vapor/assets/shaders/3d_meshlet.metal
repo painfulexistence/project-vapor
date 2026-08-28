@@ -55,6 +55,7 @@ struct MeshletParams {
     uint meshletOffset;
     uint meshletCount;
     float errorThreshold;  // screen fraction (pixel error / screen height)
+    uint statsEnabled;     // 1 = accumulate survivor count into cullStats (main pass only)
 };
 
 struct MeshletPayload {
@@ -126,9 +127,9 @@ static bool meshletOccludedByHiZ(device const CameraData& cam, float3 aabbMin, f
     device const InstanceData*  instances [[buffer(2)]],
     device const MeshletBounds* bounds    [[buffer(6)]],
     constant MeshletParams&     params    [[buffer(8)]],
+    device atomic_uint*         cullStats [[buffer(9)]],  // survivor counter (main pass only)
     // Hi-Z occlusion (main pass only; the pre-pass binds occ with
-    // occlusionEnabled 0 so the pyramid it FEEDS is complete). buffer(9) is left
-    // free for the survivor-stats counter on its own branch.
+    // occlusionEnabled 0 so the pyramid it FEEDS is complete).
     constant MeshletOccParams&  occ        [[buffer(10)]],
     texture2d<float>            hiz        [[texture(0)]],
     sampler                     hizSampler [[sampler(0)]],
@@ -209,6 +210,12 @@ static bool meshletOccludedByHiZ(device const CameraData& cam, float3 aabbMin, f
     uint count = simd_sum(vote);
     if (tid == 0u) {
         grid.set_threadgroups_per_grid(uint3(count, 1u, 1u));
+        // Accumulate survivors across every object threadgroup for the cull-stats
+        // HUD (main pass only; the pre-pass leaves statsEnabled 0 and cullStats
+        // unbound, so the atomic is never issued there).
+        if (params.statsEnabled != 0u) {
+            atomic_fetch_add_explicit(cullStats, count, memory_order_relaxed);
+        }
     }
 }
 
