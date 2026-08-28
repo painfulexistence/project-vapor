@@ -4924,6 +4924,7 @@ void Renderer::updateVoxelVolumeResources() {
     for (size_t i = 0; i < voxelVolumes.size(); i++) {
         VoxelVolumeGpu& gpu = voxelVolumes[i];
         gpu.origin = desired[i].origin;
+        gpu.rotation = desired[i].rotation;
         Vapor::VoxelWorld& world = *gpu.world;
 
         if (layoutChanged) {
@@ -5025,7 +5026,20 @@ void Renderer::microVoxelPass() {
         d.cameraPosition = glm::vec4(currentCamera.position, microVoxelSettings.cameraPosition.w);
         d.volumeOrigin = glm::vec4(gpu.origin, gpu.world->voxelSizeMeters());
         d.gridDim = glm::vec4(glm::vec3(gpu.world->dim()), microVoxelSettings.gridDim.w);
-        d.sunDirection = glm::vec4(sunDir, microVoxelSettings.sunDirection.w);
+        // Orientation for the shader's local-frame raymarch, and the sun
+        // pre-rotated into that same frame so every lighting term (direct sun,
+        // shadow ray, reflections, sky) stays consistent without the shader
+        // touching its helpers. Identity rotation leaves both unchanged.
+        d.rotationQuat = glm::vec4(gpu.rotation.x, gpu.rotation.y, gpu.rotation.z, gpu.rotation.w);
+        d.sunDirection = glm::vec4(glm::conjugate(gpu.rotation) * sunDir, microVoxelSettings.sunDirection.w);
+        // Tight solid bounds (local grid frame, meters): the box the vertex
+        // shader draws and the fragment slab both clip to this, so a ray skips
+        // the empty margin. +1 voxel on max to cover that voxel's far face.
+        glm::ivec3 obMin, obMax;
+        gpu.world->occupiedVoxelBounds(obMin, obMax);
+        const float vs = gpu.world->voxelSizeMeters();
+        d.boundsMin = glm::vec4(glm::vec3(obMin) * vs, 0.0f);
+        d.boundsMax = glm::vec4(glm::vec3(obMax + 1) * vs, 0.0f);
         d.sunColor = glm::vec4(atmosphereData.sunColor, atmosphereData.sunIntensity);
         d.params.w = voxelGIActiveThisFrame ? microVoxelGIStrength : 0.0f;
         // Shared-buffer ranges: the slice index doubles as the palette slot.
@@ -5060,7 +5074,32 @@ void Renderer::microVoxelPass() {
     rhi->setFragmentBuffer(1, voxelPageTableBuffer);
     rhi->setFragmentBuffer(2, voxelBrickPoolBuffer);
     rhi->setFragmentBuffer(3, voxelPaletteBuffer);
+    // Frustum-cull the primary boxes. data[] above stays fully populated for
+    // every volume — the GI trace bounces off-screen volumes' light into the
+    // frame — but an off-screen volume rasterizes no box here. A volume the
+    // camera sits inside always intersects the frustum, so digging or flying
+    // through one never culls it. No near-to-far sort: the fragment writes
+    // gl_FragDepth, so early-Z is off and draw order can't reject an overlapped
+    // fragment before its DDA runs — sorting would cost time for no shading win.
+    // (The pipeline culls front faces, so each covered pixel marches once.)
+    const Frustum frustum = extractFrustum(viewProj);
     for (Uint32 i = 0; i < written; i++) {
+        const VoxelVolumeGpu& gpu = voxelVolumes[i];
+        // World AABB of the (possibly rotated) volume box: the 8 corners rotated
+        // about the pivot, then min/max'd. Identity rotation gives exactly
+        // [origin, origin + extent].
+        const glm::vec3 ext = gpu.world->extent();
+        const glm::vec3 cXZ(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+        const glm::vec3 pivot = gpu.origin + cXZ;
+        glm::vec3 aabbMin(std::numeric_limits<float>::max());
+        glm::vec3 aabbMax(-std::numeric_limits<float>::max());
+        for (int c = 0; c < 8; c++) {
+            const glm::vec3 local((c & 1) ? ext.x : 0.0f, (c & 2) ? ext.y : 0.0f, (c & 4) ? ext.z : 0.0f);
+            const glm::vec3 w = pivot + gpu.rotation * (local - cXZ);
+            aabbMin = glm::min(aabbMin, w);
+            aabbMax = glm::max(aabbMax, w);
+        }
+        if (!frustum.isBoxVisible(aabbMin, aabbMax)) continue;
         const size_t offset = static_cast<size_t>(i) * sizeof(MicroVoxelRenderData);
         rhi->setVertexBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
         rhi->setFragmentBuffer(0, microVoxelDataBuffer, offset, sizeof(MicroVoxelRenderData));
@@ -6899,8 +6938,13 @@ void Renderer::createRenderPipeline() {
                 "shaders/VolumeRaymarch.frag.spv", volumeRaymarchShader, BlendMode::Opaque);
 
             // MicroVoxel primary: box-rasterized voxel DDA. Not the fullscreen
-            // lambda — it draws AABB cubes (cull off, camera may sit inside)
-            // and writes gl_FragDepth, so depth test AND write are on.
+            // lambda — it draws AABB cubes and writes gl_FragDepth, so depth
+            // test AND write are on. Front faces are culled so each covered
+            // pixel runs the DDA exactly once (not twice, front + back): the
+            // cube's outward faces are wound CCW-from-outside (front, given the
+            // negative-height viewport), so culling front keeps only the far
+            // (back) faces — which cover the footprint whether the camera is
+            // outside the box or sitting inside it.
             {
                 std::string mvVertCode = readFile("shaders/MicroVoxel.vert.spv");
                 std::string mvFragCode = readFile("shaders/MicroVoxel.frag.spv");
@@ -6928,7 +6972,7 @@ void Renderer::createRenderPipeline() {
                     d.depthTest = true;
                     d.depthWrite = true;
                     d.depthCompareOp = CompareOp::Less;
-                    d.cullMode = CullMode::None;
+                    d.cullMode = CullMode::Front;  // draw back faces only: 1 DDA per pixel, camera-inside safe
                     d.sampleCount = 1;
                     d.hasDepthAttachment = true;
                     d.depthAttachmentFormat = PixelFormat::Depth32Float;

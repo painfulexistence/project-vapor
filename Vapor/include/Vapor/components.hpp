@@ -62,6 +62,72 @@ namespace Vapor {
         glm::vec3 halfSize = glm::vec3(0.5f);
     };
 
+    struct VoxelColliderBuild;// voxel_collider_build.hpp — in-flight async extraction
+
+    // Derives a collider from the entity's VoxelVolumeComponent once that
+    // volume has finished generating (VoxelColliderSystem builds it). The
+    // paired RigidbodyComponent's motion type picks the shape: a Static body
+    // gets the exposed-face triangle mesh (Jolt's mesh shape cannot move), a
+    // Dynamic or Kinematic body gets a convex hull of the solid voxels. The
+    // body is placed at the entity transform, which is the volume's pivot, so
+    // the collider lines up with what the raymarch draws — including rotation.
+    struct VoxelColliderComponent {
+        // Support directions sampled for the dynamic hull; more is rounder.
+        int hullDirections = 64;
+        // Mesh extraction is O(surface area) and runs inline on the frame the
+        // volume completes, so a huge streaming world would stall it. Volumes
+        // with more grid voxels than this get no mesh collider (0 = no limit).
+        // The default admits the 256^3 demo terrain (16.7M) and rejects the
+        // 1024x256x1024 --big world (268M).
+        Uint32 maxMeshVoxels = 32u * 1024u * 1024u;
+        // Set true to drop the body and rebuild it from the current voxels
+        // (e.g. after a large edit); cleared once the rebuild is queued.
+        bool rebuild = false;
+        // Split a static collider into a grid of chunks this many voxels on a
+        // side, each its own body (0 = one body for the whole world). This is
+        // what makes digging affordable: a carve re-meshes only the chunks it
+        // touched, around a millisecond, instead of the whole world — tens of
+        // milliseconds at 256^3, every frame the dig key is held. Costs a few
+        // percent more triangles, since greedy runs cannot span chunk
+        // boundaries. Should be a multiple of the 8-voxel brick.
+        int chunkVoxels = 0;
+        // Carving a prop away: once its remaining solid voxels fall below this
+        // fraction of what it was built with, `destroyed` is set (0 disables).
+        // Deliberately NOT "re-hull and carry on" — a convex hull is the
+        // object's outer envelope, so hollowing a crate out does not change it
+        // at all, and no amount of rebuilding lets you fall through the hole.
+        // Erode the silhouette, then break the thing. Dynamic bodies only.
+        float destroyBelowSolidFraction = 0.4f;
+        // Above that threshold, re-hull once this much of the ORIGINAL volume
+        // has been carved away since the last rebuild, so the silhouette
+        // follows corners being knocked off without re-hulling every dig frame
+        // (0 disables). Dynamic bodies only.
+        float rehullAfterSolidFraction = 0.08f;
+
+        // ---- Runtime state, owned by VoxelColliderSystem ------------------
+        // One entry per chunk of the static collider; an invalid handle means
+        // that chunk holds no surface. Empty for an unchunked collider, which
+        // uses RigidbodyComponent::body as before.
+        std::vector<BodyHandle> chunkBodies;
+        std::vector<glm::ivec3> chunkMin;
+        std::vector<glm::ivec3> chunkMax;
+        // Chunks queued for re-meshing.
+        std::vector<int> dirtyChunks;
+        // Solid voxels when the collider was first built, and at the last
+        // rebuild. The ratio against the first is what the thresholds test.
+        Uint64 initialSolidVoxels = 0;
+        Uint64 solidAtLastBuild = 0;
+        // Set once the prop drops below destroyBelowSolidFraction. The system
+        // only reports it; what destruction means (despawn, spawn debris, swap
+        // in a broken variant) is the game's call.
+        bool destroyed = false;
+        // In-flight asynchronous extraction, if any (see
+        // voxel_collider_build.hpp). The tasks hold their own references to
+        // both the build and the VoxelWorld, so destroying this component
+        // mid-build is safe — the result is simply never applied.
+        Hidden<std::shared_ptr<VoxelColliderBuild>> build = {};
+    };
+
     struct SphereColliderComponent {
         float radius = 0.5f;
     };
@@ -257,6 +323,10 @@ namespace Vapor {
         float voxelSize = 0.05f;                         // meters per voxel (5 cm)
         Uint32 seed = 1337u;
         Uint32 brickCapacity = 262144u;                  // pool budget (x 576 bytes)
+        // Generator: 0 = terrain (streaming heightfield), 1 = crate, 2 = boulder,
+        // 3 = crystal cluster. Object kinds are small props (<= 64 voxels/edge)
+        // for the big-terrain-plus-many-props layout. Authored as an int in JSON.
+        VoxelKind kind = VoxelKind::Terrain;
         bool regenerate = false;   // set true (e.g. from the inspector) to rebuild
         Hidden<std::shared_ptr<VoxelWorld>> world = {};  // owned; created by the system
         Hidden<Uint32> _generatedSeed = {0u};            // seed the world was built with

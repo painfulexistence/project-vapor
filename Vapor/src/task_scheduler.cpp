@@ -52,6 +52,10 @@ namespace Vapor {
         }
 
         m_scheduler->WaitforAll();
+        // Everything just completed; free the parked task objects (and the
+        // captures they pin).
+        std::lock_guard<std::mutex> lock(m_taskMutex);
+        m_tasks.clear();
     }
 
     void TaskScheduler::processMainThreadTasks() {

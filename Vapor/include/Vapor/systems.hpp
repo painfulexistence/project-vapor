@@ -8,6 +8,7 @@
 #include "render_data.hpp"
 #include "renderer.hpp"
 #include "render_scene.hpp"
+#include "voxel_collider_build.hpp"
 #include "voxel_world.hpp"
 #include <entt/entt.hpp>
 #include <algorithm>
@@ -447,6 +448,30 @@ namespace Vapor {
         }
     };
 
+    // Queue a rebuild of just the chunks of a static voxel collider that
+    // overlap a voxel-space box — what a carve calls, so a dug hole becomes
+    // something you can walk into rather than a purely visual one. Marks made
+    // while a rebuild is already pending simply coalesce. Free-standing rather
+    // than a VoxelColliderSystem member because VoxelVolumeSystem::dig, which
+    // is declared first, needs it.
+    inline void markColliderDirtyRegion(VoxelColliderComponent& vc, const glm::ivec3& voxelMin,
+                                        const glm::ivec3& voxelMax) {
+        for (size_t i = 0; i < vc.chunkMin.size(); i++) {
+            // Grow the test by one voxel: removing a voxel at a chunk's edge
+            // uncovers a face on the far side of the boundary, which belongs to
+            // the neighbour. Missing that would leave a one-voxel wall standing
+            // where the dig went through.
+            if (voxelMax.x < vc.chunkMin[i].x - 1 || voxelMin.x > vc.chunkMax[i].x + 1) continue;
+            if (voxelMax.y < vc.chunkMin[i].y - 1 || voxelMin.y > vc.chunkMax[i].y + 1) continue;
+            if (voxelMax.z < vc.chunkMin[i].z - 1 || voxelMin.z > vc.chunkMax[i].z + 1) continue;
+            const int idx = static_cast<int>(i);
+            if (std::find(vc.dirtyChunks.begin(), vc.dirtyChunks.end(), idx) == vc.dirtyChunks.end()) {
+                vc.dirtyChunks.push_back(idx);
+            }
+        }
+    }
+
+
     // ============================================================================
     // MicroVoxel volumes — owns each VoxelVolumeComponent's VoxelWorld and
     // pushes the live volume list to the renderer (setVoxelVolumes) per frame.
@@ -468,6 +493,7 @@ namespace Vapor {
                 VoxelVolumeDraw d;
                 d.world = vv.world.value;
                 d.origin = volumeOrigin(reg, entity, *vv.world.value);
+                if (auto* t = reg.try_get<TransformComponent>(entity)) d.rotation = t->rotation;
                 draws.push_back(d);
             }
             renderer->setVoxelVolumes(draws);
@@ -488,25 +514,50 @@ namespace Vapor {
                         float maxDist, float radius) {
             float best = std::numeric_limits<float>::max();
             VoxelWorld* bestWorld = nullptr;
+            entt::entity bestEntity = entt::null;
             glm::vec3 bestLocalHit(0.0f);
             auto view = reg.view<VoxelVolumeComponent>();
             for (auto entity : view) {
                 auto& vv = view.get<VoxelVolumeComponent>(entity);
                 if (!vv.world.value) continue;
                 const glm::vec3 origin = volumeOrigin(reg, entity, *vv.world.value);
+                // Transform the world ray into the volume's grid frame ([0,
+                // extent]), matching the shader: rotate by the conjugate of the
+                // orientation about the pivot (= entity position = origin + the
+                // x/z half-extent). Identity rotation reduces to ro - origin.
+                glm::quat q(1.0f, 0.0f, 0.0f, 0.0f);
+                glm::vec3 pivot = origin;
+                if (auto* t = reg.try_get<TransformComponent>(entity)) {
+                    q = t->rotation;
+                    pivot = t->position;
+                }
+                const glm::vec3 ext = vv.world.value->extent();
+                const glm::vec3 cXZ(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+                const glm::quat qc = glm::conjugate(q);
+                const glm::vec3 localRo = qc * (ro - pivot) + cXZ;
+                const glm::vec3 localRd = glm::normalize(qc * rd);
                 glm::vec3 localHit;
                 glm::ivec3 cell;
-                if (vv.world.value->raycast(ro - origin, rd, maxDist, localHit, cell)) {
-                    const float d = glm::length(localHit - (ro - origin));
+                if (vv.world.value->raycast(localRo, localRd, maxDist, localHit, cell)) {
+                    const float d = glm::length(localHit - localRo);
                     if (d < best) {
                         best = d;
                         bestWorld = vv.world.value.get();
+                        bestEntity = entity;
                         bestLocalHit = localHit;
                     }
                 }
             }
             if (!bestWorld) return false;
-            return bestWorld->carveSphere(bestLocalHit, radius);
+            glm::ivec3 carvedMin, carvedMax;
+            if (!bestWorld->carveSphere(bestLocalHit, radius, carvedMin, carvedMax)) return false;
+            // Tell the collider what changed, so the hole is something you can
+            // walk into rather than a purely visual one. Only the chunks the
+            // carve overlapped get re-meshed.
+            if (auto* vc = reg.try_get<VoxelColliderComponent>(bestEntity)) {
+                markColliderDirtyRegion(*vc, carvedMin, carvedMax);
+            }
+            return true;
         }
 
     private:
@@ -514,7 +565,7 @@ namespace Vapor {
             vv.regenerate = false;
             vv._generatedSeed.value = vv.seed;
             auto world = std::make_shared<VoxelWorld>();
-            world->configure(vv.gridDim, vv.voxelSize, vv.brickCapacity);
+            world->configure(vv.gridDim, vv.voxelSize, vv.brickCapacity, vv.kind);
             world->prepareGeneration(vv.seed);
             vv.world.value = world;
             // One job per column chunk; chunks are disjoint, so any number may
@@ -527,6 +578,171 @@ namespace Vapor {
                     scheduler.submitTask([world, cx, cz] { world->generateColumnChunk(cx, cz); });
                 }
             }
+        }
+    };
+
+    // ============================================================================
+    // VoxelColliderSystem — gives voxel volumes a physics body.
+    //
+    // Reactive, mirroring the app-side body-create systems: an entity carrying
+    // {VoxelVolumeComponent, VoxelColliderComponent, RigidbodyComponent,
+    // TransformComponent} with an invalid BodyHandle gets a Jolt body the frame
+    // its volume finishes generating. The rigidbody's motion type picks the
+    // shape — Static takes the exposed-face triangle mesh (Jolt mesh shapes are
+    // static-only), Dynamic/Kinematic take a convex hull of the solid voxels.
+    //
+    // Shape coordinates are grid-local, but the body sits at the entity
+    // transform, which is the volume's PIVOT (the grid centred in x/z, rising
+    // from y). Both are offset by the same half-extent the OBB raymarch uses,
+    // so collider and visuals agree, rotation included: Physics3D::process
+    // writes each dynamic body's pose back to the TransformComponent, and
+    // VoxelVolumeSystem then hands that pose to the renderer the same frame.
+    //
+    // Digging does NOT refresh the collider yet; set VoxelColliderComponent::
+    // rebuild to force one (cheap for props, a full re-mesh for terrain).
+    // ============================================================================
+    class VoxelColliderSystem {
+    public:
+        static void update(entt::registry& reg, Physics3D* physics) {
+            if (!physics) return;
+            auto& scheduler = EngineCore::Get()->getTaskScheduler();
+            auto view = reg.view<VoxelVolumeComponent, VoxelColliderComponent, RigidbodyComponent,
+                                 TransformComponent>();
+            for (auto entity : view) {
+                auto& vc = view.get<VoxelColliderComponent>(entity);
+                auto& rb = view.get<RigidbodyComponent>(entity);
+                auto& vv = view.get<VoxelVolumeComponent>(entity);
+                if (!vv.world.value) continue;
+
+                // A finished asynchronous build lands here; an unfinished one
+                // parks the entity (dirty marks and rebuild requests keep
+                // accumulating meanwhile and are picked up next round).
+                if (vc.build.value) {
+                    if (!vc.build.value->ready()) continue;
+                    _applyBuild(*physics, vc, rb, view.get<TransformComponent>(entity));
+                    vc.build.value.reset();
+                }
+
+                // A full rebuild request re-queues everything; the old bodies
+                // stay live until the replacements land, so the world never
+                // goes briefly collider-less the way the old drop-then-rebuild
+                // did.
+                if (vc.rebuild) {
+                    vc.rebuild = false;
+                    if (!vc.chunkMin.empty()) {
+                        vc.dirtyChunks.clear();
+                        for (size_t i = 0; i < vc.chunkMin.size(); i++) vc.dirtyChunks.push_back(static_cast<int>(i));
+                    } else if (rb.motionType != BodyMotionType::Static && rb.body.valid()) {
+                        // Force the prop's hull to re-cook regardless of the
+                        // erosion thresholds.
+                        vc.solidAtLastBuild = 0;
+                    }
+                }
+
+                // Nothing builds from a half-generated world: it would mesh to
+                // a collider full of holes that never gets corrected.
+                if (!vv.world.value->generationComplete()) continue;
+                const VoxelWorld& world = *vv.world.value;
+                if (world.solidVoxels() == 0) continue;
+
+                const glm::vec3 ext = world.extent();
+                const glm::vec3 pivotOffset(ext.x * 0.5f, 0.0f, ext.z * 0.5f);
+
+                if (rb.motionType == BodyMotionType::Static) {
+                    const glm::ivec3 d = world.dim();
+                    const auto voxels = static_cast<Uint64>(d.x) * static_cast<Uint64>(d.y) * static_cast<Uint64>(d.z);
+                    if (vc.maxMeshVoxels != 0 && voxels > static_cast<Uint64>(vc.maxMeshVoxels)) continue;
+                    // chunkVoxels == 0 degenerates to a single chunk covering
+                    // the grid, so the unchunked collider rides the same path.
+                    if (vc.chunkMin.empty()) _initChunks(vc, d);
+                    if (!vc.dirtyChunks.empty()) {
+                        vc.build.value = startChunkColliderBuild(
+                            scheduler, *physics, vv.world.value, std::move(vc.dirtyChunks), vc.chunkMin, vc.chunkMax,
+                            pivotOffset
+                        );
+                        vc.dirtyChunks.clear();// moved-from; make the state explicit
+                    }
+                    continue;
+                }
+
+                // Dynamic prop. First build cooks the hull; afterwards erode,
+                // then break: re-hull once the silhouette has actually moved,
+                // report destroyed once too little is left to simulate.
+                if (!rb.body.valid()) {
+                    vc.build.value =
+                        startHullColliderBuild(scheduler, *physics, vv.world.value, vc.hullDirections, pivotOffset);
+                    continue;
+                }
+                if (vc.destroyed || vc.initialSolidVoxels == 0) continue;
+                const Uint64 solid = world.solidVoxels();
+                const float remaining = static_cast<float>(solid) / static_cast<float>(vc.initialSolidVoxels);
+                if (vc.destroyBelowSolidFraction > 0.0f && remaining < vc.destroyBelowSolidFraction) {
+                    vc.destroyed = true;
+                    continue;
+                }
+                if (vc.rehullAfterSolidFraction <= 0.0f || solid >= vc.solidAtLastBuild) continue;
+                const float carved =
+                    static_cast<float>(vc.solidAtLastBuild - solid) / static_cast<float>(vc.initialSolidVoxels);
+                if (carved < vc.rehullAfterSolidFraction) continue;
+                vc.build.value =
+                    startHullColliderBuild(scheduler, *physics, vv.world.value, vc.hullDirections, pivotOffset);
+            }
+        }
+
+    private:
+        // Lay out the chunk grid. Rounded to whole bricks so a chunk never
+        // splits one — the mesher's page-table fast path assumes that.
+        static void _initChunks(VoxelColliderComponent& vc, const glm::ivec3& dim) {
+            constexpr int kBrick = 8;
+            const int requested = vc.chunkVoxels > 0 ? vc.chunkVoxels : std::max(dim.x, std::max(dim.y, dim.z));
+            const int cv = std::max(kBrick, (requested / kBrick) * kBrick);
+            vc.chunkMin.clear();
+            vc.chunkMax.clear();
+            for (int z = 0; z < dim.z; z += cv)
+                for (int y = 0; y < dim.y; y += cv)
+                    for (int x = 0; x < dim.x; x += cv) {
+                        vc.chunkMin.push_back(glm::ivec3(x, y, z));
+                        vc.chunkMax.push_back(glm::min(glm::ivec3(x + cv - 1, y + cv - 1, z + cv - 1), dim - 1));
+                    }
+            vc.chunkBodies.assign(vc.chunkMin.size(), BodyHandle{});
+            vc.dirtyChunks.clear();
+            for (size_t i = 0; i < vc.chunkMin.size(); i++) vc.dirtyChunks.push_back(static_cast<int>(i));
+        }
+
+        // Main-thread half of a finished build: wrap the baked shapes in
+        // bodies (chunks) or swap the hull into the existing one. Static chunk
+        // bodies are replaced, not swapped — they have no velocity to keep,
+        // and replacement keeps the geometry and the body reading it in step.
+        static void _applyBuild(
+            Physics3D& physics, VoxelColliderComponent& vc, RigidbodyComponent& rb, const TransformComponent& tf
+        ) {
+            const VoxelColliderBuild& build = *vc.build.value;
+            if (build.buildHull) {
+                if (!build.hullShape.valid()) return;// degenerate: nothing to hull
+                if (rb.body.valid()) {
+                    physics.setBodyShape(rb.body, build.hullShape);
+                } else {
+                    rb.body = physics.createBodyFromShape(build.hullShape, tf.position, tf.rotation, rb.motionType);
+                    if (rb.body.valid()) physics.addBody(rb.body, true);
+                }
+                if (vc.initialSolidVoxels == 0) vc.initialSolidVoxels = build.solidAtBuild;
+                vc.solidAtLastBuild = build.solidAtBuild;
+                return;
+            }
+            for (size_t k = 0; k < build.chunkIndex.size(); k++) {
+                const int idx = build.chunkIndex[k];
+                if (idx < 0 || static_cast<size_t>(idx) >= vc.chunkBodies.size()) continue;
+                if (vc.chunkBodies[idx].valid()) {
+                    physics.destroyBody(vc.chunkBodies[idx]);
+                    vc.chunkBodies[idx] = BodyHandle{};
+                }
+                if (!build.chunkShapes[k].valid()) continue;// chunk holds no surface now
+                vc.chunkBodies[idx] =
+                    physics.createBodyFromShape(build.chunkShapes[k], tf.position, tf.rotation, BodyMotionType::Static);
+                if (vc.chunkBodies[idx].valid()) physics.addBody(vc.chunkBodies[idx], false);
+            }
+            if (vc.initialSolidVoxels == 0) vc.initialSolidVoxels = build.solidAtBuild;
+            vc.solidAtLastBuild = build.solidAtBuild;
         }
     };
 

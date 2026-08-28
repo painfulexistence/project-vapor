@@ -1,7 +1,9 @@
 #include "voxel_world.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <limits>
 
 namespace Vapor {
 
@@ -84,11 +86,112 @@ static float MvGradFbm01(glm::vec3 p, int octaves, Uint32 seed) {
 }
 
 // ============================================================================
+// Small-object generators (crate / boulder / crystal cluster). Each fills a
+// dense scratch grid for the WHOLE volume in one pass; objects are <= 64 voxels
+// per edge, so they always land in a single generation chunk. Materials reuse
+// the shared default palette. Ported from the Atmospheric object volumes.
+// ============================================================================
 
-void VoxelWorld::configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn) {
+static inline Uint8& mvScratchAt(std::vector<Uint8>& s, const glm::ivec3& dim, int x, int y, int z) {
+    return s[(static_cast<size_t>(z) * dim.x * dim.y) + (static_cast<size_t>(y) * dim.x) + x];
+}
+
+// A hollow wooden crate: thick walls (nice to dig open), alternating plank
+// stripes, darker frame beams along the edges. Fills the grid minus a 1-voxel
+// margin so the object spans its box.
+static void mvFillCrate(std::vector<Uint8>& s, const glm::ivec3& dim, Uint32 /*seed*/) {
+    const int N = std::min(std::min(dim.x, dim.y), dim.z);
+    const int lox = 1, loy = 1, loz = 1;
+    const int hix = dim.x - 2, hiy = dim.y - 2, hiz = dim.z - 2;
+    const int wall = std::max(2, N / 12);
+    for (int z = loz; z <= hiz; z++) {
+        for (int y = loy; y <= hiy; y++) {
+            for (int x = lox; x <= hix; x++) {
+                const bool sx = (x - lox < wall) || (hix - x < wall);
+                const bool sy = (y - loy < wall) || (hiy - y < wall);
+                const bool sz = (z - loz < wall) || (hiz - z < wall);
+                if (!(sx || sy || sz)) continue;  // hollow interior
+                const int shells = (sx ? 1 : 0) + (sy ? 1 : 0) + (sz ? 1 : 0);
+                Uint8 mat = (shells >= 2) ? VoxelWorld::MatDirt                          // edge/corner beams
+                          : (((y / 3) % 2 == 0) ? VoxelWorld::MatSand : VoxelWorld::MatDirt);  // plank stripes
+                mvScratchAt(s, dim, x, y, z) = mat;
+            }
+        }
+    }
+}
+
+// An fbm-perturbed ellipsoid of stone with occasional ore speckles.
+static void mvFillBoulder(std::vector<Uint8>& s, const glm::ivec3& dim, Uint32 seed) {
+    const glm::vec3 c(0.5f * dim.x, 0.42f * dim.y, 0.5f * dim.z);
+    const glm::vec3 r(0.44f * dim.x, 0.42f * dim.y, 0.44f * dim.z);
+    const float inv = 6.0f / static_cast<float>(std::max(1, std::min(std::min(dim.x, dim.y), dim.z)));
+    for (int z = 0; z < dim.z; z++) {
+        for (int y = 0; y < dim.y; y++) {
+            for (int x = 0; x < dim.x; x++) {
+                const glm::vec3 p = (glm::vec3(x, y, z) + 0.5f - c) / r;
+                float d = glm::length(p) + 0.28f * (MvFbm3(glm::vec3(x, y, z) * inv, 3, seed + 5u) - 0.5f);
+                if (d > 1.0f) continue;
+                Uint8 mat = VoxelWorld::MatStone;
+                if (MvHashNoise(x, y, z, seed + 13u) > 0.99f) mat = VoxelWorld::MatOre;
+                mvScratchAt(s, dim, x, y, z) = mat;
+            }
+        }
+    }
+}
+
+// A stone mound sprouting a few emissive crystal spikes.
+static void mvFillCrystalCluster(std::vector<Uint8>& s, const glm::ivec3& dim, Uint32 seed) {
+    const int N = std::min(std::min(dim.x, dim.y), dim.z);
+    auto put = [&](int x, int y, int z, Uint8 mat) {
+        if (x < 0 || y < 0 || z < 0 || x >= dim.x || y >= dim.y || z >= dim.z) return;
+        mvScratchAt(s, dim, x, y, z) = mat;
+    };
+    // Stone base: squashed hemisphere on the grid floor.
+    const glm::vec3 bc(0.5f * dim.x, 0.0f, 0.5f * dim.z);
+    const glm::vec3 br(0.42f * dim.x, 0.30f * dim.y, 0.42f * dim.z);
+    const float inv = 5.0f / static_cast<float>(std::max(1, N));
+    for (int z = 0; z < dim.z; z++) {
+        for (int y = 0; y < dim.y; y++) {
+            for (int x = 0; x < dim.x; x++) {
+                const glm::vec3 p = (glm::vec3(x, y, z) + 0.5f - bc) / br;
+                float d = glm::length(p) + 0.2f * (MvFbm3(glm::vec3(x, y, z) * inv, 2, seed + 3u) - 0.5f);
+                if (d <= 1.0f) put(x, y, z, VoxelWorld::MatStone);
+            }
+        }
+    }
+    // Crystal spikes: tapered cones leaning outward from the mound.
+    const int spikes = 3 + static_cast<int>(MvHashNoise(0, 9, 0, seed) * 2.99f);
+    for (int sp = 0; sp < spikes; sp++) {
+        const float ang = 2.0f * 3.1415927f * MvHashNoise(sp, 1, 0, seed + 41u);
+        const float lean = 0.35f * MvHashNoise(sp, 2, 0, seed + 41u);
+        const glm::vec3 dir = glm::normalize(glm::vec3(std::cos(ang) * lean, 1.0f, std::sin(ang) * lean));
+        const glm::vec3 base((0.35f + 0.3f * MvHashNoise(sp, 3, 0, seed + 41u)) * dim.x, 0.10f * dim.y,
+                             (0.35f + 0.3f * MvHashNoise(sp, 4, 0, seed + 41u)) * dim.z);
+        const float len = (0.45f + 0.35f * MvHashNoise(sp, 5, 0, seed + 41u)) * N;
+        const float r0 = (0.08f + 0.06f * MvHashNoise(sp, 6, 0, seed + 41u)) * N;
+        const int steps = static_cast<int>(len);
+        for (int i = 0; i <= steps; i++) {
+            const float t = static_cast<float>(i) / static_cast<float>(std::max(steps, 1));
+            const glm::vec3 pc = base + dir * (t * len);
+            const float rad = r0 * (1.0f - t);
+            const int ri = static_cast<int>(rad) + 1;
+            for (int dz = -ri; dz <= ri; dz++)
+                for (int dy = -ri; dy <= ri; dy++)
+                    for (int dx = -ri; dx <= ri; dx++)
+                        if (glm::length(glm::vec3(dx, dy, dz)) <= rad)
+                            put(static_cast<int>(pc.x) + dx, static_cast<int>(pc.y) + dy,
+                                static_cast<int>(pc.z) + dz, VoxelWorld::MatCrystal);
+        }
+    }
+}
+
+// ============================================================================
+
+void VoxelWorld::configure(glm::ivec3 gridDimIn, float voxelSizeIn, Uint32 brickCapacityIn, VoxelKind kindIn) {
     gridDim = glm::max((gridDimIn / BRICK_DIM) * BRICK_DIM, glm::ivec3(BRICK_DIM));
     voxelSize = voxelSizeIn;
     brickCapacity = std::max(brickCapacityIn, 1u);
+    kind = kindIn;
 }
 
 void VoxelWorld::setDefaultPalette() {
@@ -169,12 +272,21 @@ void VoxelWorld::prepareGeneration(Uint32 seedIn) {
     dirtyBrickSlots.clear();
     solidCount.store(0, std::memory_order_relaxed);
     droppedCount.store(0, std::memory_order_relaxed);
+    occMin = glm::ivec3(INT_MAX);
+    occMax = glm::ivec3(INT_MIN);
     pageTableDirty = true;
     paletteDirty = true;
+    // Every chunk the caller is about to run must report back before consumers
+    // that need the finished volume (collision geometry) may read it.
+    const glm::ivec2 chunks = columnChunkCount();
+    pendingChunks.store(static_cast<Uint32>(std::max(chunks.x, 0) * std::max(chunks.y, 0)),
+                        std::memory_order_release);
 
-    // Feature placements, scaled so the density per footprint area matches the
-    // original 256^2 diorama (which placed 4 crystals and 6 glowstone orbs).
+    // Feature placements (terrain only — object kinds carry their own shape),
+    // scaled so the density per footprint area matches the original 256^2
+    // diorama (which placed 4 crystals and 6 glowstone orbs).
     features.clear();
+    if (kind != VoxelKind::Terrain) return;
     const float footprintScale = static_cast<float>(gridDim.x) * static_cast<float>(gridDim.z) / (256.0f * 256.0f);
     const int crystalCount = std::max(4, static_cast<int>(4.0f * footprintScale));
     const int glowCount = std::max(6, static_cast<int>(6.0f * footprintScale));
@@ -204,6 +316,17 @@ void VoxelWorld::prepareGeneration(Uint32 seedIn) {
 }
 
 void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
+    generateColumnChunkImpl(chunkX, chunkZ);
+    // Report completion on every path (including the out-of-range early out)
+    // so generationComplete() can never stall.
+    Uint32 remaining = pendingChunks.load(std::memory_order_relaxed);
+    while (remaining > 0 &&
+           !pendingChunks.compare_exchange_weak(remaining, remaining - 1, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)) {
+    }
+}
+
+void VoxelWorld::generateColumnChunkImpl(int chunkX, int chunkZ) {
     const int x0 = chunkX * GEN_CHUNK_DIM;
     const int z0 = chunkZ * GEN_CHUNK_DIM;
     if (x0 >= gridDim.x || z0 >= gridDim.z || x0 < 0 || z0 < 0) return;
@@ -211,6 +334,22 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     const int zw = std::min(GEN_CHUNK_DIM, gridDim.z - z0);
     const int ny = gridDim.y;
 
+    // Dense scratch for this column block; index = x + y*xw + z*xw*ny.
+    std::vector<Uint8> scratch(static_cast<size_t>(xw) * ny * zw, 0);
+    auto at = [&](int x, int y, int z) -> Uint8& {
+        return scratch[static_cast<size_t>(z) * xw * ny + static_cast<size_t>(y) * xw + x];
+    };
+
+    if (kind != VoxelKind::Terrain) {
+        // Small prop: the whole object (<= 64 voxels/edge) lands in this single
+        // chunk (columnChunkCount() is 1x1), so fill the full grid here.
+        switch (kind) {
+        case VoxelKind::Crate: mvFillCrate(scratch, gridDim, seed); break;
+        case VoxelKind::Boulder: mvFillBoulder(scratch, gridDim, seed); break;
+        case VoxelKind::CrystalCluster: mvFillCrystalCluster(scratch, gridDim, seed); break;
+        default: break;
+        }
+    } else {
     const float snowLine = (0.10f + 0.75f * 0.34f) * static_cast<float>(ny);
     const float sandLine = (0.10f + 0.12f * 0.34f) * static_cast<float>(ny);
     // Water fills valleys up to just under the sand line, so beaches ring it.
@@ -219,12 +358,6 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     std::vector<float> heights(static_cast<size_t>(xw) * zw);
     for (int z = 0; z < zw; z++)
         for (int x = 0; x < xw; x++) heights[static_cast<size_t>(z) * xw + x] = terrainHeight(x0 + x, z0 + z);
-
-    // Dense scratch for this column block only; index = x + y*xw + z*xw*ny.
-    std::vector<Uint8> scratch(static_cast<size_t>(xw) * ny * zw, 0);
-    auto at = [&](int x, int y, int z) -> Uint8& {
-        return scratch[static_cast<size_t>(z) * xw * ny + static_cast<size_t>(y) * xw + x];
-    };
 
     // Column fill: terrain crust/biomes, caves, ore — global coordinates feed
     // the noise so chunk boundaries are seamless.
@@ -283,6 +416,7 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
             }
         }
     }
+    }  // end terrain-vs-object fill
 
     // Pack the scratch into pool bricks. Fully-empty bricks stay PAGE_EMPTY,
     // single-material bricks collapse to a uniform page entry (no pool cost).
@@ -290,6 +424,9 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     const int bx0 = x0 / BRICK_DIM, bx1 = (x0 + xw) / BRICK_DIM;
     const int bz0 = z0 / BRICK_DIM, bz1 = (z0 + zw) / BRICK_DIM;
     const int by1 = ny / BRICK_DIM;
+    // Chunk-local tight bounds (brick granularity), merged into the shared
+    // occMin/occMax under the mutex once the chunk finishes.
+    glm::ivec3 cMin(INT_MAX), cMax(INT_MIN);
     Brick staged;
     for (int bz = bz0; bz < bz1; bz++) {
         for (int by = 0; by < by1; by++) {
@@ -316,6 +453,9 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
                     }
                 }
                 if (solid == 0) continue;  // page entry already PAGE_EMPTY
+                // This brick has content: union its voxel range into the bounds.
+                cMin = glm::min(cMin, glm::ivec3(bx, by, bz) * BRICK_DIM);
+                cMax = glm::max(cMax, glm::ivec3(bx, by, bz) * BRICK_DIM + (BRICK_DIM - 1));
                 const size_t page = pageIndex({ bx, by, bz });
                 if (uniform && solid == BRICK_VOXELS) {
                     pageTable[page] = PAGE_UNIFORM_BIT | uniformMat;
@@ -339,6 +479,10 @@ void VoxelWorld::generateColumnChunk(int chunkX, int chunkZ) {
     {
         std::lock_guard<std::mutex> lock(poolMutex);
         pageTableDirty = true;
+        if (cMax.x >= cMin.x) {  // this chunk had solids: grow the shared bounds
+            occMin = glm::min(occMin, cMin);
+            occMax = glm::max(occMax, cMax);
+        }
     }
 }
 
@@ -364,6 +508,236 @@ Uint8 VoxelWorld::voxelAt(const glm::ivec3& cell) const {
 Uint32 VoxelWorld::residentBricks() const {
     std::lock_guard<std::mutex> lock(poolMutex);
     return static_cast<Uint32>(bricks.size() - freeSlots.size());
+}
+
+// ============================================================================
+// Collision geometry. Both walk the finished voxel data without taking the pool
+// mutex (like voxelAt), so call them once generation for the volume is done.
+// Output is grid-local meters; see the header for the pivot caveat.
+// ============================================================================
+
+void VoxelWorld::buildSurfaceMesh(std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices) const {
+    buildSurfaceMeshRegion(outVertices, outIndices, glm::ivec3(0), gridDim - 1);
+}
+
+void VoxelWorld::buildSurfaceMeshRegion(
+    std::vector<glm::vec3>& outVertices, std::vector<Uint32>& outIndices, const glm::ivec3& regionMin,
+    const glm::ivec3& regionMax
+) const {
+    outVertices.clear();
+    outIndices.clear();
+    if (pageTable.empty() || solidCount.load(std::memory_order_relaxed) == 0) return;
+
+    glm::ivec3 solidLo, solidHi;
+    occupiedVoxelBounds(solidLo, solidHi);
+    // Sweep only where the region and the occupied bounds overlap. voxelAt
+    // below still reads the whole grid, so faces on the region boundary are
+    // judged against the neighbours outside it — that is what keeps chunks
+    // seamless.
+    const glm::ivec3 lo = glm::max(regionMin, solidLo);
+    const glm::ivec3 hi = glm::min(regionMax, solidHi);
+    if (lo.x > hi.x || lo.y > hi.y || lo.z > hi.z) return;
+    const glm::ivec3 bg = brickGrid();
+
+    auto brickEmpty = [&](const glm::ivec3& b) {
+        if (b.x < 0 || b.y < 0 || b.z < 0 || b.x >= bg.x || b.y >= bg.y || b.z >= bg.z) return true;
+        return pageTable[pageIndex(b)] == PAGE_EMPTY;
+    };
+
+    // Per-axis sweep: for each plane between two voxel slabs, mark the faces
+    // where exactly one side is solid (+1 = normal along +d, -1 = along -d),
+    // then merge equal-sign runs into maximal rectangles (greedy meshing).
+    std::vector<int8_t> mask;
+    for (int d = 0; d < 3; d++) {
+        const int u = (d + 1) % 3, v = (d + 2) % 3;  // (u, v, d) is right-handed: u x v = +d
+        const int du = hi[u] - lo[u] + 1;
+        const int dv = hi[v] - lo[v] + 1;
+        if (du <= 0 || dv <= 0) continue;
+        mask.assign(static_cast<size_t>(du) * dv, 0);
+
+        // A face lives on the plane between voxels s-1 and s, so the plane at
+        // hi+1 is shared with the region above: both would emit it and the
+        // surface would be doubled there. Give each plane one owner — the
+        // region whose voxels start at it — and let only the topmost region
+        // close off the far side, since nothing above it will.
+        const int sEnd = (hi[d] >= solidHi[d]) ? hi[d] + 1 : hi[d];
+        for (int s = lo[d]; s <= sEnd; s++) {
+            std::fill(mask.begin(), mask.end(), static_cast<int8_t>(0));
+            const bool aInside = (s - 1 >= 0);
+            const bool bInside = (s < gridDim[d]);
+            const int baD = aInside ? (s - 1) / BRICK_DIM : -1;
+            const int bbD = bInside ? s / BRICK_DIM : -1;
+
+            // Fill the mask a brick block at a time so empty regions cost one
+            // page lookup per 8x8 block instead of 64 voxel lookups.
+            for (int v0 = lo[v]; v0 <= hi[v];) {
+                const int vEnd = std::min(hi[v], (v0 / BRICK_DIM + 1) * BRICK_DIM - 1);
+                for (int u0 = lo[u]; u0 <= hi[u];) {
+                    const int uEnd = std::min(hi[u], (u0 / BRICK_DIM + 1) * BRICK_DIM - 1);
+                    glm::ivec3 ba(0), bb(0);
+                    ba[d] = baD;
+                    ba[u] = u0 / BRICK_DIM;
+                    ba[v] = v0 / BRICK_DIM;
+                    bb[d] = bbD;
+                    bb[u] = ba[u];
+                    bb[v] = ba[v];
+                    if (!brickEmpty(ba) || !brickEmpty(bb)) {
+                        for (int vv = v0; vv <= vEnd; vv++) {
+                            for (int uu = u0; uu <= uEnd; uu++) {
+                                glm::ivec3 ca(0), cb(0);
+                                ca[d] = s - 1;
+                                ca[u] = uu;
+                                ca[v] = vv;
+                                cb[d] = s;
+                                cb[u] = uu;
+                                cb[v] = vv;
+                                const bool sa = aInside && voxelAt(ca) != 0;
+                                const bool sb = bInside && voxelAt(cb) != 0;
+                                if (sa == sb) continue;  // both solid or both air: no face
+                                mask[static_cast<size_t>(vv - lo[v]) * du + (uu - lo[u])] =
+                                    sa ? static_cast<int8_t>(1) : static_cast<int8_t>(-1);
+                            }
+                        }
+                    }
+                    u0 = uEnd + 1;
+                }
+                v0 = vEnd + 1;
+            }
+
+            // Greedy merge: grow a run along u, then extend it along v while
+            // every cell of the run matches, emit one quad, clear, continue.
+            for (int j = 0; j < dv; j++) {
+                for (int i = 0; i < du;) {
+                    const int8_t m = mask[static_cast<size_t>(j) * du + i];
+                    if (m == 0) {
+                        i++;
+                        continue;
+                    }
+                    int w = 1;
+                    while (i + w < du && mask[static_cast<size_t>(j) * du + i + w] == m) w++;
+                    int h = 1;
+                    for (bool grow = true; grow && j + h < dv; ) {
+                        for (int k = 0; k < w; k++) {
+                            if (mask[static_cast<size_t>(j + h) * du + i + k] != m) {
+                                grow = false;
+                                break;
+                            }
+                        }
+                        if (grow) h++;
+                    }
+
+                    // Rectangle corners in voxel units, on the plane d = s.
+                    auto corner = [&](int uu, int vv) {
+                        glm::vec3 p(0.0f);
+                        p[d] = static_cast<float>(s);
+                        p[u] = static_cast<float>(uu);
+                        p[v] = static_cast<float>(vv);
+                        return p * voxelSize;
+                    };
+                    const glm::vec3 p00 = corner(lo[u] + i, lo[v] + j);
+                    const glm::vec3 p10 = corner(lo[u] + i + w, lo[v] + j);
+                    const glm::vec3 p11 = corner(lo[u] + i + w, lo[v] + j + h);
+                    const glm::vec3 p01 = corner(lo[u] + i, lo[v] + j + h);
+
+                    const auto base = static_cast<Uint32>(outVertices.size());
+                    outVertices.insert(outVertices.end(), { p00, p10, p11, p01 });
+                    // CCW seen from the outside: +u then +v for a +d normal.
+                    if (m > 0) {
+                        outIndices.insert(outIndices.end(),
+                                          { base, base + 1, base + 2, base, base + 2, base + 3 });
+                    } else {
+                        outIndices.insert(outIndices.end(),
+                                          { base, base + 2, base + 1, base, base + 3, base + 2 });
+                    }
+
+                    for (int b = 0; b < h; b++)
+                        for (int a = 0; a < w; a++) mask[static_cast<size_t>(j + b) * du + i + a] = 0;
+                    i += w;
+                }
+            }
+        }
+    }
+}
+
+void VoxelWorld::buildConvexHullPoints(std::vector<glm::vec3>& outPoints, int directions) const {
+    outPoints.clear();
+    if (pageTable.empty() || solidCount.load(std::memory_order_relaxed) == 0) return;
+
+    glm::ivec3 lo, hi;
+    occupiedVoxelBounds(lo, hi);
+
+    // Roughly even directions (Fibonacci sphere) plus the 6 axes, so the
+    // object's AABB extremes are always represented exactly.
+    std::vector<glm::vec3> dirs;
+    const int n = std::max(6, directions);
+    dirs.reserve(static_cast<size_t>(n) + 6);
+    constexpr float kGoldenAngle = 2.39996323f;
+    for (int i = 0; i < n; i++) {
+        const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(n);
+        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        const float a = kGoldenAngle * static_cast<float>(i);
+        dirs.push_back({ r * std::cos(a), r * std::sin(a), z });
+    }
+    dirs.insert(dirs.end(), { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } });
+
+    // A voxel is an axis-aligned unit cube, so for a given direction the
+    // maximizing corner offset is fixed (1 where the component is positive).
+    // The support search is then one dot per voxel per direction on the min
+    // corner, and the winning corner is recovered afterwards.
+    std::vector<float> best(dirs.size(), -std::numeric_limits<float>::max());
+    std::vector<glm::ivec3> bestCell(dirs.size(), glm::ivec3(0));
+    const glm::ivec3 bg = brickGrid();
+
+    for (int z = lo.z; z <= hi.z; z++) {
+        for (int y = lo.y; y <= hi.y; y++) {
+            for (int x = lo.x; x <= hi.x;) {
+                const glm::ivec3 bc(x / BRICK_DIM, y / BRICK_DIM, z / BRICK_DIM);
+                if (bc.x >= bg.x || bc.y >= bg.y || bc.z >= bg.z || pageTable[pageIndex(bc)] == PAGE_EMPTY) {
+                    x = (bc.x + 1) * BRICK_DIM;  // whole brick is air: skip the run
+                    continue;
+                }
+                if (voxelAt({ x, y, z }) != 0) {
+                    const glm::vec3 p(x, y, z);
+                    for (size_t k = 0; k < dirs.size(); k++) {
+                        const float dp = glm::dot(dirs[k], p);
+                        if (dp > best[k]) {
+                            best[k] = dp;
+                            bestCell[k] = { x, y, z };
+                        }
+                    }
+                }
+                x++;
+            }
+        }
+    }
+
+    outPoints.reserve(dirs.size());
+    for (size_t k = 0; k < dirs.size(); k++) {
+        if (best[k] == -std::numeric_limits<float>::max()) continue;
+        const glm::vec3 off(dirs[k].x > 0.0f ? 1.0f : 0.0f, dirs[k].y > 0.0f ? 1.0f : 0.0f,
+                            dirs[k].z > 0.0f ? 1.0f : 0.0f);
+        outPoints.push_back((glm::vec3(bestCell[k]) + off) * voxelSize);
+    }
+    // Several directions usually land on the same corner; drop the repeats.
+    std::sort(outPoints.begin(), outPoints.end(), [](const glm::vec3& a, const glm::vec3& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
+    outPoints.erase(std::unique(outPoints.begin(), outPoints.end(),
+                                [](const glm::vec3& a, const glm::vec3& b) { return a == b; }),
+                    outPoints.end());
+}
+
+void VoxelWorld::occupiedVoxelBounds(glm::ivec3& outMin, glm::ivec3& outMax) const {
+    std::lock_guard<std::mutex> lock(poolMutex);
+    if (occMax.x < occMin.x) {  // still empty: fall back to the full grid
+        outMin = glm::ivec3(0);
+        outMax = gridDim - 1;
+        return;
+    }
+    outMin = glm::clamp(occMin, glm::ivec3(0), gridDim - 1);
+    outMax = glm::clamp(occMax, glm::ivec3(0), gridDim - 1);
 }
 
 Uint32 VoxelWorld::allocSlotLocked() {
@@ -416,11 +790,25 @@ Uint32 VoxelWorld::resolveForEdit(const glm::ivec3& brickCell) {
 }
 
 bool VoxelWorld::carveSphere(const glm::vec3& localCenter, float radius) {
+    glm::ivec3 ignoredMin, ignoredMax;
+    return carveSphere(localCenter, radius, ignoredMin, ignoredMax);
+}
+
+bool VoxelWorld::carveSphere(const glm::vec3& localCenter, float radius, glm::ivec3& outMin, glm::ivec3& outMax) {
+    outMin = glm::ivec3(0);
+    outMax = glm::ivec3(-1);  // empty box until we know better
     if (pageTable.empty() || radius <= 0.0f) return false;
+    // Exclusive against collider extraction reading these voxels on a worker
+    // (see lockVoxelsShared): a carve can materialize bricks and grow the
+    // pool, which would reallocate the array a concurrent reader is walking.
+    // Uncontended unless an edit lands exactly during a rebuild stripe.
+    const std::unique_lock<std::shared_mutex> editLock(editMutex);
     const glm::vec3 c = localCenter / voxelSize;  // sphere center in voxels
     const float rv = radius / voxelSize;
     const glm::ivec3 lo = glm::clamp(glm::ivec3(glm::floor(c - rv)), glm::ivec3(0), gridDim - 1);
     const glm::ivec3 hi = glm::clamp(glm::ivec3(glm::ceil(c + rv)), glm::ivec3(0), gridDim - 1);
+    outMin = lo;
+    outMax = hi;
     const float rv2 = rv * rv;
 
     bool changed = false;
@@ -497,7 +885,7 @@ bool VoxelWorld::raycast(const glm::vec3& localRo, const glm::vec3& localRd, flo
     if (pageTable.empty()) return false;
     const glm::vec3 bmax = extent();
     const glm::vec3 rd = localRd;
-    const glm::vec3 invD = 1.0f / rd;  // view rays are never exactly axis-aligned
+    const glm::vec3 invD = 1.0f / rd;  // inf on axis-aligned components; guarded below
 
     const glm::vec3 t0 = (glm::vec3(0.0f) - localRo) * invD;
     const glm::vec3 t1 = (bmax - localRo) * invD;
@@ -516,9 +904,22 @@ bool VoxelWorld::raycast(const glm::vec3& localRo, const glm::vec3& localRd, flo
     glm::ivec3 bcell = glm::clamp(glm::ivec3(glm::floor((localRo + rd * t) / brickSize)), glm::ivec3(0), bg - 1);
 
     const glm::ivec3 step = glm::ivec3(glm::sign(rd));
-    const glm::vec3 tDelta = glm::abs(glm::vec3(brickSize) * invD);
+    glm::vec3 tDelta = glm::abs(glm::vec3(brickSize) * invD);
     const glm::vec3 stepPos = glm::vec3(glm::greaterThan(rd, glm::vec3(0.0f)));
     glm::vec3 tMax = ((glm::vec3(bcell) + stepPos) * brickSize - localRo) * invD;
+    // An axis the ray does not travel along is never crossed, so its next
+    // crossing is at infinity. Computing it gives 0 * inf = NaN — the boundary
+    // offset is exactly zero there — and since every comparison against NaN is
+    // false, the walk below would pick that axis every iteration, advance by
+    // step = 0 and spin on one cell until the budget ran out. A perfectly
+    // vertical probe ray (0, -1, 0) hits this exactly and reported a miss
+    // straight through solid ground.
+    for (int k = 0; k < 3; k++) {
+        if (rd[k] == 0.0f) {
+            tMax[k] = std::numeric_limits<float>::infinity();
+            tDelta[k] = std::numeric_limits<float>::infinity();
+        }
+    }
 
     // Fine walk of one occupied brick's bitmask, starting at ray parameter tIn.
     auto walkBrick = [&](const glm::ivec3& brickCell, const Brick& b, float tIn, float& tHit,
@@ -526,8 +927,14 @@ bool VoxelWorld::raycast(const glm::vec3& localRo, const glm::vec3& localRd, flo
         const glm::ivec3 lo = brickCell * BRICK_DIM;
         glm::ivec3 cell =
             glm::clamp(glm::ivec3(glm::floor((localRo + rd * (tIn + eps)) / voxelSize)), lo, lo + (BRICK_DIM - 1));
-        const glm::vec3 vDelta = glm::abs(glm::vec3(voxelSize) * invD);
+        glm::vec3 vDelta = glm::abs(glm::vec3(voxelSize) * invD);
         glm::vec3 vMax = ((glm::vec3(cell) + stepPos) * voxelSize - localRo) * invD;
+        for (int k = 0; k < 3; k++) {  // same NaN guard as the brick walk above
+            if (rd[k] == 0.0f) {
+                vMax[k] = std::numeric_limits<float>::infinity();
+                vDelta[k] = std::numeric_limits<float>::infinity();
+            }
+        }
         float tv = tIn;
         for (int i = 0; i < 3 * BRICK_DIM + 1; i++) {
             const int vi = voxelIndexInBrick(cell - lo);

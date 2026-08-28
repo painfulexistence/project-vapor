@@ -44,7 +44,20 @@ layout(std430, set = 1, binding = 0) readonly buffer ParamsBuf {
     vec4 ambientGround;    // xyz; w = albedo hash variation strength
     vec4 params;           // x = aoStrength, y = debugMode, z = reflectionsEnabled, w = giStrength
     vec4 extra0;           // x = volumeIndex, y = pageTableOffset, z = brickPoolBase, w = paletteBase
+    vec4 rotationQuat;     // volume orientation (x,y,z,w); identity = axis-aligned
+    vec4 boundsMin;        // tight solid bounds, LOCAL grid frame (meters)
+    vec4 boundsMax;
 };
+
+// Active rotation v' = q v q* for a unit quaternion q = (x,y,z,w). The DDA
+// works in the volume's axis-aligned grid frame, so the view ray is rotated
+// into it by the conjugate and the hit/normal are rotated back out.
+vec3 quatRotate(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+vec4 quatConj(vec4 q) {
+    return vec4(-q.xyz, q.w);
+}
 layout(std430, set = 1, binding = 1) readonly buffer PageBuf { uint pageTable[]; };
 layout(std430, set = 1, binding = 2) readonly buffer BrickBuf { uint brickPool[]; };
 // 256 materials, 2 words each: word0 = R|G<<8|B<<16|emission<<24,
@@ -150,12 +163,16 @@ bool traverseBrick(vec3 ro, vec3 rd, vec3 invD, uint slot, ivec3 bcell, float tI
 }
 
 // Full traversal in LOCAL space (volume min corner at the origin, meters).
+// The slab test clips to the tight solid bounds (boundsMin/boundsMax) rather
+// than the full grid, so the ray skips the empty margin before entering the
+// occupied region; the brick DDA below still indexes the full grid.
 bool raycast(vec3 ro, vec3 rd, float maxDist, out Hit hit) {
     float voxelSize = volumeOrigin.w;
-    vec3 bmax = gridDim.xyz * voxelSize;
+    vec3 bmin = boundsMin.xyz;
+    vec3 bmax = boundsMax.xyz;
     vec3 invD = 1.0 / rd;  // IEEE inf on axis-parallel components works with min/max
 
-    vec3 t0 = (vec3(0.0) - ro) * invD;
+    vec3 t0 = (bmin - ro) * invD;
     vec3 t1 = (bmax - ro) * invD;
     vec3 tsmall = min(t0, t1);
     vec3 tbig = max(t0, t1);
@@ -238,7 +255,12 @@ float voxelHash(ivec3 c) {
 }
 
 vec3 skyRadiance(vec3 dir) {
-    return mix(ambientGround.xyz, ambientSky.xyz, dir.y * 0.5 + 0.5) * ambientSky.w;
+    // The sky hemisphere is defined by WORLD up, but the traversal (and every
+    // dir passed here) lives in the volume's grid frame, so measure against
+    // grid-space up = world up rotated into the grid. Identity rotation
+    // collapses this to dir.y, byte-identical to the axis-aligned path.
+    vec3 up = quatRotate(quatConj(rotationQuat), vec3(0.0, 1.0, 0.0));
+    return mix(ambientGround.xyz, ambientSky.xyz, dot(dir, up) * 0.5 + 0.5) * ambientSky.w;
 }
 
 // Classic corner AO: 8 taps in the voxel layer one step outside the hit face,
@@ -392,10 +414,17 @@ vec3 transmitRadiance(vec3 entryPos, vec3 tdir, float ior, vec3 mediumAlbedo, fl
 
 void main() {
     float voxelSize = volumeOrigin.w;
-    // Traverse in local space: the volume min corner sits at the origin, so
-    // the DDA math matches the CPU reference exactly.
-    vec3 ro = cameraPosition.xyz - volumeOrigin.xyz;
-    vec3 rd = normalize(v_worldPos - cameraPosition.xyz);
+    // Traverse in the volume's grid frame: min corner at the origin, spanning
+    // [0, extent]. For a rotated volume the view ray is transformed into that
+    // frame by the conjugate of the orientation (a rigid rotation about the
+    // pivot = volume min corner + half the x/z extent), so the axis-aligned DDA
+    // is unchanged and still matches the CPU reference. Identity rotation makes
+    // every line below collapse to `cameraPosition - volumeOrigin` etc.
+    vec3 ext = gridDim.xyz * voxelSize;
+    vec3 cXZ = vec3(ext.x * 0.5, 0.0, ext.z * 0.5);
+    vec4 q = rotationQuat;
+    vec3 ro = quatRotate(quatConj(q), cameraPosition.xyz - volumeOrigin.xyz - cXZ) + cXZ;
+    vec3 rd = normalize(quatRotate(quatConj(q), v_worldPos - cameraPosition.xyz));
 
     Hit hit;
     if (!raycast(ro, rd, 1e9, hit)) {
@@ -403,7 +432,7 @@ void main() {
     }
 
     vec3 hitLocal = ro + rd * hit.t;
-    vec3 hitWorld = hitLocal + volumeOrigin.xyz;
+    vec3 hitWorld = volumeOrigin.xyz + cXZ + quatRotate(q, hitLocal - cXZ);
 
     vec3 albedo;
     float emission, reflectivity, roughness, transmission, ior;

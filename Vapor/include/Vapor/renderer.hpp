@@ -1,5 +1,6 @@
 #pragma once
 #include "irenderer.hpp"
+#include <glm/gtc/quaternion.hpp>  // glm::quat (VoxelVolumeGpu orientation)
 #include "rhi.hpp"
 #include "render_data.hpp"
 #include "render_graph.hpp"
@@ -820,6 +821,7 @@ private:
     struct VoxelVolumeGpu {
         std::shared_ptr<Vapor::VoxelWorld> world;
         glm::vec3 origin = glm::vec3(0.0f);
+        glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);  // volume orientation about its pivot
         Uint32 pageTableOffset = 0;  // first page entry in the shared table
         Uint32 brickPoolBase = 0;    // first pool slot in the shared pool
         Uint32 pageEntryCount = 0;   // page-table entries this volume owns
@@ -829,7 +831,12 @@ private:
     BufferHandle voxelPageTableBuffer;  // concatenated per-volume page tables
     BufferHandle voxelBrickPoolBuffer;  // concatenated per-volume slot ranges
     BufferHandle voxelPaletteBuffer;    // MAX_VOXEL_VOLUMES x 256 materials
-    static constexpr Uint32 MAX_VOXEL_VOLUMES = 8;
+    // One big terrain plus many small prop volumes (the demo's layout, and the
+    // headroom the physics/fracture work needs). All derived sizes — the data,
+    // palette, and per-frame slice buffers, and the GI's dynamic volume array —
+    // scale from this, and the page/brick pools are sized to the cumulative
+    // per-volume need, so this is the only knob.
+    static constexpr Uint32 MAX_VOXEL_VOLUMES = 16;
     std::vector<VoxelVolumeGpu> voxelVolumes;          // renderer-owned GPU mirrors
     std::vector<Vapor::VoxelVolumeDraw> pendingVoxelVolumes;  // last ECS push
     PipelineHandle microVoxelPipeline;
