@@ -397,6 +397,14 @@ struct RenderPassDesc {
     // Load/store operations (true = load, false = clear)
     std::vector<bool> loadColor;
     bool loadDepth = false;
+    // The pass depth-tests but never writes depth, AND samples the same depth
+    // image (a read-only depth feedback loop — the water surface tests against
+    // and refracts through the scene depth). The Vulkan backend then keeps the
+    // attachment in DEPTH_STENCIL_READ_ONLY_OPTIMAL, which is legal to both
+    // depth-test and sample at once; the pipeline must have depthWrite off.
+    // No-op on Metal (its hazard tracking handles the aliasing). Ignored unless
+    // depthAttachment is set.
+    bool depthReadOnly = false;
 };
 
 struct ComputePipelineDesc {

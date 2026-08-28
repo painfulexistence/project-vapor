@@ -7,6 +7,7 @@
 #include "fsm.hpp"
 #include "mesh_builder.hpp"
 #include "meshlet_builder.hpp"
+#include "procgen_patterns.hpp"  // TilePanelDesc/buildTilePanel for the "tilePanel" generator
 #include "render_scene.hpp"
 
 #include <algorithm>
@@ -111,6 +112,9 @@ BlueprintComponents& BlueprintComponents::instance() {
         r.registerComponent<SkyComponent>("sky");
         r.registerComponent<TimeOfDayComponent>("timeOfDay");
         r.registerComponent<VolumetricFogComponent>("volumetricFog");
+        // water: nested grid/look/caustics/spectrum groups, which the PFR path
+        // walks as aggregates. WaterSystem pushes it to the renderer.
+        r.registerComponent<WaterComponent>("water");
         // weather: hand-written for the string-authored state (the PFR path
         // only reads enums as integers). Runtime blend fields stay at their
         // defaults — a loaded scene starts settled in its authored state.
@@ -276,6 +280,41 @@ static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) 
                 fmt::print(stderr, "parseSceneBlueprint: primitive material '{}' not declared\n", matName);
         }
     }
+    if (j.contains("procMesh") && j.at("procMesh").is_object()) {
+        const auto& pm = j.at("procMesh");
+        // Type-checked rather than pm.value(): that throws type_error.302 on a
+        // wrong-typed field, and parse promises ok=false over a throw.
+        const auto genIt = pm.find("generator");
+        if (genIt != pm.end() && genIt->is_string()) e.procMesh.generator = genIt->get<std::string>();
+        if (e.procMesh.generator.empty()) {
+            fmt::print(stderr, "parseSceneBlueprint: procMesh needs a \"generator\"\n");
+        } else {
+            // Params ride as text so the blueprint (and its cook) stay
+            // independent of any particular generator's parameter struct.
+            if (pm.contains("params") && pm.at("params").is_object())
+                e.procMesh.paramsJson = pm.at("params").dump();
+            // Bucket name -> material, resolved by declared name like
+            // primitives are (materials[] parses before entities[]).
+            if (pm.contains("materials") && pm.at("materials").is_object()) {
+                for (const auto& [bucket, value] : pm.at("materials").items()) {
+                    if (!value.is_string()) continue;
+                    const std::string matName = value.get<std::string>();
+                    int index = -1;
+                    for (size_t m = 0; m < out.materials.size(); ++m) {
+                        if (out.materials[m] && out.materials[m]->name == matName) {
+                            index = static_cast<int>(m);
+                            break;
+                        }
+                    }
+                    if (index < 0)
+                        fmt::print(stderr,
+                                   "parseSceneBlueprint: procMesh material '{}' (bucket '{}') "
+                                   "not declared\n", matName, bucket);
+                    e.procMesh.bucketMaterials.emplace_back(bucket, index);
+                }
+            }
+        }
+    }
     if (j.contains("light")) {
         out.lights.push_back(parseLight(j.at("light")));
         e.lights.push_back(static_cast<int>(out.lights.size()) - 1);
@@ -289,10 +328,303 @@ static void parseEntityRec(const json& j, int parentIndex, SceneBlueprint& out) 
     }
 }
 
-// One declared material. Texture fields hold the asset path; parse creates a
-// uri-only Image stub per unique path (pure — no I/O), and loadSceneBlueprint
-// fills in the pixels afterwards.
-static void parseMaterial(const json& j, SceneBlueprint& out) {
+// ── Procedural texture generators ───────────────────────────────────────────
+
+namespace {
+
+// Small typed accessors: scene JSON is hand-authored, so a wrong-typed or
+// missing field falls back to the generator's own default rather than throwing.
+float pf(const json& j, const char* key, float fallback) {
+    const auto it = j.find(key);
+    return (it != j.end() && it->is_number()) ? it->get<float>() : fallback;
+}
+// JSON draws no line between 4 and 4.0, so an integer field must accept both:
+// rejecting the float spelling substitutes the generator's default without a
+// word, and a mistyped "size": 32.0 would then bake a 256px image instead of a
+// 32px one. Exact integers keep their exact path; a float is range-checked as
+// a double FIRST, because get<int64_t>() on something like 1e300 is undefined.
+int pi(const json& j, const char* key, int fallback) {
+    const auto it = j.find(key);
+    if (it == j.end() || !it->is_number()) return fallback;
+    if (it->is_number_integer()) {
+        const int64_t v = it->get<int64_t>();
+        return (v < INT32_MIN || v > INT32_MAX) ? fallback : int(v);
+    }
+    const double d = it->get<double>();
+    if (!(d >= double(INT32_MIN) && d <= double(INT32_MAX))) return fallback;
+    return int(d);
+}
+uint32_t pu(const json& j, const char* key, uint32_t fallback) {
+    // Reads the full unsigned range: seeds are naturally uint32, and routing
+    // them through int would drop everything at or above 2^31 onto the
+    // fallback. Negatives and out-of-range values keep the fallback.
+    const auto it = j.find(key);
+    if (it == j.end() || !it->is_number()) return fallback;
+    if (it->is_number_integer()) {
+        const int64_t v = it->get<int64_t>();
+        return (v < 0 || v > int64_t(UINT32_MAX)) ? fallback : uint32_t(v);
+    }
+    const double d = it->get<double>();
+    if (!(d >= 0.0 && d <= double(UINT32_MAX))) return fallback;
+    return uint32_t(d);
+}
+bool pb(const json& j, const char* key, bool fallback) {
+    // json::value() would be shorter but throws type_error.302 on a
+    // wrong-typed field, and these params come straight off disk.
+    const auto it = j.find(key);
+    return (it != j.end() && it->is_boolean()) ? it->get<bool>() : fallback;
+}
+glm::vec3 pv3(const json& j, const char* key, glm::vec3 fallback) {
+    const auto it = j.find(key);
+    if (it == j.end()) return fallback;
+    // Elements must be type-checked before get<float>(): parseSceneBlueprint
+    // parses with allow_exceptions=false and promises ok=false rather than a
+    // throw, but get<float>() on a non-number raises nlohmann::type_error.
+    if (it->is_array() && it->size() >= 3) {
+        const json& a = *it;
+        if (!a[0].is_number() || !a[1].is_number() || !a[2].is_number()) return fallback;
+        return { a[0].get<float>(), a[1].get<float>(), a[2].get<float>() };
+    }
+    // A scalar is accepted as a grey triple — "rimTint": 0.86 reads naturally.
+    if (it->is_number()) return glm::vec3(it->get<float>());
+    return fallback;
+}
+
+// FNV-1a over the BAKED PIXELS. Hashing the output rather than the params is
+// what makes the uri a sound texture-cache key: two entries whose params differ
+// only in spelling (`4` vs `4.0`, a field left at its default vs written out) bake
+// identical images and must share one GPU upload, while any params change that
+// actually alters a texel produces a different key.
+std::string contentDigest(const std::vector<Uint8>& pixels) {
+    uint64_t h = 1469598103934665603ull;
+    for (Uint8 c : pixels) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return fmt::format("{:016x}", h);
+}
+
+}  // namespace
+
+TextureGenerators& TextureGenerators::instance() {
+    static TextureGenerators registry = [] {
+        TextureGenerators r;
+        using namespace Vapor::proctex;
+        // The version is provenance only (it rides in the uri); the cache key
+        // is the pixel hash, so a changed generator invalidates on its own.
+        r.add("tileAlbedo", 1, [](const json& p) {
+            return tileAlbedo(pv3(p, "base", glm::vec3(0.8f)), pv3(p, "rimTint", glm::vec3(0.85f)),
+                              pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("tileNormal", 1, [](const json& p) {
+            return tileNormal(pf(p, "pillow", 0.3f), pf(p, "waviness", 0.1f),
+                              pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("tileRoughness", 1, [](const json& p) {
+            return tileRoughness(pf(p, "centerRoughness", 0.1f), pf(p, "rimRoughness", 0.3f),
+                                 pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("noisyAlbedo", 1, [](const json& p) {
+            return noisyAlbedo(pv3(p, "base", glm::vec3(0.7f)), pf(p, "variation", 0.1f),
+                               pi(p, "period", 8), pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("noisyNormal", 1, [](const json& p) {
+            return noisyNormal(pf(p, "strength", 0.3f), pi(p, "period", 8),
+                               pu(p, "seed", 0u), pu(p, "size", 256u));
+        });
+        r.add("brushedMetalAlbedo", 1, [](const json& p) {
+            return brushedMetalAlbedo(pv3(p, "base", glm::vec3(0.75f)), pu(p, "seed", 0u),
+                                      pu(p, "size", 256u));
+        });
+        r.add("brushedMetalRoughness", 1, [](const json& p) {
+            return brushedMetalRoughness(pf(p, "base", 0.3f), pu(p, "seed", 0u),
+                                         pu(p, "size", 256u));
+        });
+        return r;
+    }();
+    return registry;
+}
+
+std::shared_ptr<Image> TextureGenerators::generate(const std::string& name,
+                                                   const nlohmann::json& params) const {
+    const auto it = m_generators.find(name);
+    if (it == m_generators.end()) return nullptr;
+
+    // Both arms must be lvalues: a `json::object()` temporary here would make
+    // the conditional a prvalue, deep-copying `params` on every call (and
+    // leaving the binding's validity resting on lifetime extension).
+    static const json kNoParams = json::object();
+    const json& p = params.is_object() ? params : kNoParams;
+    proctex::TextureData baked = it->second.fn(p);
+    if (baked.empty()) {
+        fmt::print(stderr, "TextureGenerators: '{}' produced an empty image\n", name);
+        return nullptr;
+    }
+
+    auto img = std::make_shared<Image>();
+    img->width = baked.size;
+    img->height = baked.size;
+    img->channelCount = 4;
+    img->byteArray = std::move(baked.pixels);
+    // Synthetic, content-addressed key. Never opened as a file: byteArray is
+    // populated, and the stub-resolution loop skips images that already hold
+    // pixels. The renderer's texture cache dedupes on exactly this string; the
+    // generator name and version ride along as human-readable provenance.
+    img->uri = fmt::format("proc://{}#v{}-{}", name, it->second.version,
+                           contentDigest(img->byteArray));
+    return img;
+}
+
+// ── Procedural mesh generators ──────────────────────────────────────────────
+
+MeshGenerators& MeshGenerators::instance() {
+    static MeshGenerators registry = [] {
+        MeshGenerators r;
+        using namespace Vapor::procgen;
+
+        // Thin wrappers over the procgen primitives. Anything more structural
+        // than these (a whole room, a staircase) belongs in an app-registered
+        // composite generator, where the cross-element decisions live.
+        r.add("tilePanel", 1, [](const json& p) {
+            GeneratedContent out;
+            TilePanelDesc d;
+            d.width = pf(p, "width", 1.0f);
+            d.height = pf(p, "height", 1.0f);
+            d.tileW = pf(p, "tileW", 0.20f);
+            d.tileH = pf(p, "tileH", 0.20f);
+            d.groutWidth = pf(p, "groutWidth", 0.010f);
+            d.groutDepth = pf(p, "groutDepth", 0.005f);
+            d.bevel = pf(p, "bevel", 0.007f);
+            d.uPhase = pf(p, "uPhase", 0.0f);
+            d.vPhase = pf(p, "vPhase", 0.0f);
+            buildTilePanel(pv3(p, "origin", glm::vec3(0.0f)),
+                           pv3(p, "u", glm::vec3(1, 0, 0)), pv3(p, "v", glm::vec3(0, 1, 0)),
+                           d, out.bucket("tiles"), out.bucket("grout"));
+            return out;
+        });
+        r.add("lathe", 1, [](const json& p) {
+            GeneratedContent out;
+            std::vector<glm::vec2> profile;
+            const auto it = p.find("profile");
+            if (it != p.end() && it->is_array()) {
+                for (const auto& pt : *it)
+                    if (pt.is_array() && pt.size() >= 2 && pt[0].is_number() && pt[1].is_number())
+                        profile.push_back({ pt[0].get<float>(), pt[1].get<float>() });
+            }
+            lathe(profile, pi(p, "segments", 24), out.bucket("surface"));
+            return out;
+        });
+        r.add("tube", 1, [](const json& p) {
+            GeneratedContent out;
+            std::vector<glm::vec3> path;
+            const auto it = p.find("path");
+            if (it != p.end() && it->is_array()) {
+                for (const auto& pt : *it)
+                    if (pt.is_array() && pt.size() >= 3 && pt[0].is_number() && pt[1].is_number() &&
+                        pt[2].is_number())
+                        path.push_back({ pt[0].get<float>(), pt[1].get<float>(), pt[2].get<float>() });
+            }
+            sweepTube(path, pf(p, "radius", 0.05f), pi(p, "sides", 12), pf(p, "vTile", 0.25f),
+                      out.bucket("surface"), pb(p, "capEnds", true));
+            return out;
+        });
+        r.add("extrude", 1, [](const json& p) {
+            GeneratedContent out;
+            auto readRing = [](const json& arr) {
+                std::vector<glm::vec2> ring;
+                if (!arr.is_array()) return ring;
+                for (const auto& pt : arr)
+                    if (pt.is_array() && pt.size() >= 2 && pt[0].is_number() && pt[1].is_number())
+                        ring.push_back({ pt[0].get<float>(), pt[1].get<float>() });
+                return ring;
+            };
+            std::vector<glm::vec2> outer;
+            std::vector<std::vector<glm::vec2>> holes;
+            const auto o = p.find("outline");
+            if (o != p.end()) outer = readRing(*o);
+            const auto h = p.find("holes");
+            if (h != p.end() && h->is_array())
+                for (const auto& ring : *h) holes.push_back(readRing(ring));
+            const float depth = pf(p, "depth", 0.1f);
+            if (depth > 0.0f)
+                extrudePolygon(pv3(p, "origin", glm::vec3(0.0f)),
+                               pv3(p, "u", glm::vec3(1, 0, 0)), pv3(p, "v", glm::vec3(0, 1, 0)),
+                               outer, holes, depth, pf(p, "uvScale", 1.0f), out.bucket("surface"));
+            else  // a flat cap: the same outline without the walls
+                polygonCap(pv3(p, "origin", glm::vec3(0.0f)),
+                           pv3(p, "u", glm::vec3(1, 0, 0)), pv3(p, "v", glm::vec3(0, 1, 0)),
+                           outer, holes, pf(p, "uvScale", 1.0f), out.bucket("surface"));
+            return out;
+        });
+        r.add("boxes", 1, [](const json& p) {
+            GeneratedContent out;
+            std::vector<Box3> solid;
+            auto readBoxes = [&](const json& arr, std::vector<Box3>& dst) {
+                if (!arr.is_array()) return;
+                for (const auto& b : arr) {
+                    if (!b.is_object()) continue;
+                    const glm::vec3 lo = pv3(b, "min", glm::vec3(0.0f));
+                    const glm::vec3 hi = pv3(b, "max", glm::vec3(0.0f));
+                    dst.push_back({ glm::min(lo, hi), glm::max(lo, hi) });
+                }
+            };
+            const auto add = p.find("add");
+            if (add != p.end()) readBoxes(*add, solid);
+            const auto sub = p.find("subtract");
+            if (sub != p.end() && sub->is_array()) {
+                std::vector<Box3> cutters;
+                readBoxes(*sub, cutters);
+                for (const Box3& c : cutters) subtractBox(solid, c);
+            }
+            emitBoxes(solid, pf(p, "uvScale", 1.0f), out.bucket("surface"));
+            boxesToColliders(solid, out.colliders);
+            return out;
+        });
+        return r;
+    }();
+    return registry;
+}
+
+GeneratedContent MeshGenerators::generate(const std::string& name,
+                                          const nlohmann::json& params) const {
+    GeneratedContent out;
+    const auto it = m_generators.find(name);
+    if (it == m_generators.end()) return out;
+
+    static const json kNoParams = json::object();
+    out = it->second.fn(params.is_object() ? params : kNoParams);
+
+    // Drop geometry that would throw out of Mesh::initialize() (MikkTSpace
+    // rejects degenerate UV triangles) or render inside-out. A generator bug
+    // must cost its own bucket, not the whole scene load.
+    for (auto bucketIt = out.buckets.begin(); bucketIt != out.buckets.end();) {
+        if (bucketIt->second.empty()) {
+            bucketIt = out.buckets.erase(bucketIt);
+            continue;
+        }
+        const procgen::ValidationReport report = procgen::validate(bucketIt->second);
+        if (!report.ok()) {
+            fmt::print(stderr,
+                       "MeshGenerators: '{}' bucket '{}' failed validation "
+                       "({} tris: {} OOB, {} non-finite, {} degenerate, {} bad UV, {} inverted) "
+                       "— dropped\n",
+                       name, bucketIt->first, report.triangles, report.outOfBoundsIndices,
+                       report.nonFinite, report.degenerateGeo, report.degenerateUV,
+                       report.windingMismatch);
+            bucketIt = out.buckets.erase(bucketIt);
+            continue;
+        }
+        ++bucketIt;
+    }
+    return out;
+}
+
+// One declared material. A texture field holds either "@name" (a texture from
+// the scene's "textures" block, already baked) or an asset path, for which
+// parse creates a uri-only Image stub per unique path (pure — no I/O) that
+// loadSceneBlueprint fills in afterwards.
+static void parseMaterial(const json& j, SceneBlueprint& out,
+                          const std::unordered_map<std::string, std::shared_ptr<Image>>& generated) {
     auto material = std::make_shared<Material>();
     material->name = j.value("name", "");
     if (j.contains("baseColorFactor")) {
@@ -305,6 +637,10 @@ static void parseMaterial(const json& j, SceneBlueprint& out) {
     material->clearcoat = j.value("clearcoat", material->clearcoat);
     material->clearcoatGloss = j.value("clearcoatGloss", material->clearcoatGloss);
     material->useIBL = j.value("useIBL", material->useIBL);
+    // Multiplies emissiveFactor. Without this an emissive material authored in
+    // JSON is stuck at 1.0 — the field existed on Material but was never
+    // reachable from a scene file.
+    material->emissiveStrength = j.value("emissiveStrength", material->emissiveStrength);
     {
         const std::string type = j.value("type", "");
         if (type == "iridescent") material->materialType = MaterialType::Iridescent;
@@ -319,6 +655,17 @@ static void parseMaterial(const json& j, SceneBlueprint& out) {
     const auto stubFor = [&](const char* key) -> std::shared_ptr<Image> {
         const std::string path = j.value(key, "");
         if (path.empty()) return nullptr;
+        // "@name" refers to a generated texture from the scene's "textures"
+        // block; anything else is a file path resolved from disk later.
+        if (path.front() == '@') {
+            const std::string ref = path.substr(1);
+            const auto found = generated.find(ref);
+            if (found != generated.end()) return found->second;
+            fmt::print(stderr,
+                       "parseSceneBlueprint: material '{}' references unknown texture '@{}'\n",
+                       material->name, ref);
+            return nullptr;
+        }
         for (const auto& img : out.images)// share one stub per unique path
             if (img && img->uri == path && img->byteArray.empty()) return img;
         auto stub = std::make_shared<Image>(Image{ .uri = path });
@@ -342,9 +689,72 @@ SceneBlueprint parseSceneBlueprint(const std::string& jsonText, const std::strin
         return bp;
     }
     bp.name = root.value("name", nameHint);
+    // Procedural textures first — materials reference them by "@name", and a
+    // generated image is baked here (pixels and all) so the disk-loading pass
+    // in loadSceneBlueprint skips right over it.
+    std::unordered_map<std::string, std::shared_ptr<Image>> generatedTextures;
+    if (root.contains("textures")) {
+        const auto& arr = root.at("textures");
+        if (!arr.is_array()) {
+            fmt::print(stderr, "parseSceneBlueprint: \"textures\" must be an array ({})\n", bp.name);
+        } else {
+            for (const auto& t : arr) {
+                if (!t.is_object()) {
+                    fmt::print(stderr,
+                               "parseSceneBlueprint: \"textures\" entries must be objects ({})\n",
+                               bp.name);
+                    continue;
+                }
+                const std::string name = t.value("name", "");
+                const std::string gen = t.value("generator", "");
+                if (name.empty() || gen.empty()) {
+                    fmt::print(stderr,
+                               "parseSceneBlueprint: texture entry needs both \"name\" and "
+                               "\"generator\" ({})\n", bp.name);
+                    continue;
+                }
+                if (generatedTextures.count(name)) {
+                    fmt::print(stderr, "parseSceneBlueprint: duplicate texture name '{}' ({})\n",
+                               name, bp.name);
+                    continue;
+                }
+                const json params = t.contains("params") ? t.at("params") : json::object();
+                auto img = TextureGenerators::instance().generate(gen, params);
+                if (!img) {
+                    // Distinguish "no such generator" from "the generator ran
+                    // and produced nothing" — generate() already reported the
+                    // latter, and conflating them sends the author hunting for
+                    // a registration bug that isn't there.
+                    if (!TextureGenerators::instance().has(gen)) {
+                        std::string known;
+                        for (const auto& n : TextureGenerators::instance().names())
+                            known += (known.empty() ? "" : ", ") + n;
+                        fmt::print(stderr,
+                                   "parseSceneBlueprint: unknown texture generator '{}' for '{}' "
+                                   "({}); registered: {}\n",
+                                   gen, name, bp.name, known);
+                    }
+                    continue;
+                }
+                // The uri is the pixel hash, so an entry that bakes to an
+                // image we already hold is the same texture under another
+                // name: share the object rather than duplicating its payload
+                // through the scene list and the cook.
+                for (const auto& existing : bp.images) {
+                    if (existing && existing->uri == img->uri) {
+                        img = existing;
+                        break;
+                    }
+                }
+                if (std::find(bp.images.begin(), bp.images.end(), img) == bp.images.end())
+                    bp.images.push_back(img);
+                generatedTextures.emplace(name, std::move(img));
+            }
+        }
+    }
     if (root.contains("materials")) {
         for (const auto& m : root.at("materials"))
-            parseMaterial(m, bp);
+            parseMaterial(m, bp, generatedTextures);
     }
     if (root.contains("entities")) {
         for (const auto& e : root.at("entities"))
@@ -360,6 +770,10 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
     const int entityBase = static_cast<int>(dst.entities.size());
     const int meshBase = static_cast<int>(dst.meshes.size());
     const int lightBase = static_cast<int>(dst.lights.size());
+    // sub.materials is concatenated onto dst.materials below, so primitive
+    // material indices need rebasing exactly like meshes and lights — without
+    // it a spliced prefab's primitives silently adopt the host's materials.
+    const int materialBase = static_cast<int>(dst.materials.size());
 
     for (auto& e : sub.entities) {
         e.parent = e.parent < 0 ? parentIndex : e.parent + entityBase;
@@ -367,6 +781,9 @@ void appendBlueprint(SceneBlueprint& dst, SceneBlueprint&& sub, int parentIndex)
             m += meshBase;
         for (int& l : e.lights)
             l += lightBase;
+        if (e.primitive.material >= 0) e.primitive.material += materialBase;
+        for (auto& bm : e.procMesh.bucketMaterials)
+            if (bm.second >= 0) bm.second += materialBase;
         dst.entities.push_back(std::move(e));
     }
     std::move(sub.meshes.begin(), sub.meshes.end(), std::back_inserter(dst.meshes));
@@ -402,6 +819,16 @@ namespace {
     uint64_t computeSourceHash(const std::string& jsonText, const std::vector<std::string>& sources) {
         uint64_t h = fnv1a64(jsonText.data(), jsonText.size(), 14695981039346656037ull);
         h = fnv1a64(&kCookVersion, sizeof(kCookVersion), h);
+        // Generated textures are baked into the cook as pixels and never
+        // re-run on a cache hit, so the registry has to participate in the
+        // key: without this, editing a generator (or bumping its version)
+        // would leave every already-cooked scene serving the old image. The
+        // params themselves need no special handling — they live in jsonText.
+        for (const auto& name : TextureGenerators::instance().names()) {
+            h = fnv1a64(name.data(), name.size(), h);
+            const int v = TextureGenerators::instance().version(name);
+            h = fnv1a64(&v, sizeof(v), h);
+        }
         for (const auto& src : sources) {
             h = fnv1a64(src.data(), src.size(), h);
             auto resolved = FileSystem::instance().resolvePath(src);
@@ -621,6 +1048,14 @@ entt::entity instantiate(
     // is always available by the time a child is created.
     std::vector<entt::entity> created(blueprint.entities.size());
     std::vector<glm::quat> worldRot(blueprint.entities.size());
+    // Entities a mesh generator asked for, held back so their components go
+    // through the same deferred pass as the blueprint's own — a generated lamp
+    // must be able to name-reference an authored entity and vice versa.
+    struct DeferredChild {
+        entt::entity entity;
+        std::string components;
+    };
+    std::vector<DeferredChild> generatedChildren;
     for (size_t i = 0; i < blueprint.entities.size(); ++i) {
         const EntityBlueprint& e = blueprint.entities[i];
         const entt::entity ent = registry.create();
@@ -665,6 +1100,118 @@ entt::entity instantiate(
                 scene.stagedMeshes.push_back(mesh);
                 scene.stagedMeshTransforms.push_back(glm::mat4(1.0f));
                 registry.get_or_emplace<MeshRendererComponent>(ent).meshes.push_back(std::move(mesh));
+            }
+        }
+
+        // Procedural mesh: run the registered generator and hand each bucket
+        // to the renderer as its own mesh, so one entity can carry several
+        // materials (tiles + grout) without inventing child entities.
+        if (!e.procMesh.empty()) {
+            json params = json::object();
+            if (!e.procMesh.paramsJson.empty()) {
+                params = json::parse(e.procMesh.paramsJson, nullptr, /*allow_exceptions=*/false);
+                if (params.is_discarded()) params = json::object();
+            }
+            if (!MeshGenerators::instance().has(e.procMesh.generator)) {
+                std::string known;
+                for (const auto& n : MeshGenerators::instance().names())
+                    known += (known.empty() ? "" : ", ") + n;
+                fmt::print(stderr, "instantiate: unknown mesh generator '{}'; registered: {}\n",
+                           e.procMesh.generator, known);
+            } else {
+                GeneratedContent content =
+                    MeshGenerators::instance().generate(e.procMesh.generator, params);
+                for (auto& [bucketName, data] : content.buckets) {
+                    std::shared_ptr<Material> mat;
+                    for (const auto& [name, index] : e.procMesh.bucketMaterials) {
+                        if (name != bucketName) continue;
+                        if (index >= 0 && size_t(index) < blueprint.materials.size())
+                            mat = blueprint.materials[static_cast<size_t>(index)];
+                        break;
+                    }
+                    std::vector<VertexData> verts(data.positions.size());
+                    for (size_t vi = 0; vi < data.positions.size(); ++vi) {
+                        verts[vi].position = data.positions[vi];
+                        verts[vi].uv = data.uvs[vi];
+                        verts[vi].normal = data.normals[vi];
+                        // MikkTSpace overwrites this during initialize().
+                        verts[vi].tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                    }
+                    auto procMesh = std::make_shared<Mesh>();
+                    procMesh->hasPosition = true;
+                    procMesh->hasUV0 = true;
+                    procMesh->hasNormal = true;
+                    procMesh->hasTangent = true;
+                    procMesh->primitiveMode = PrimitiveMode::TRIANGLES;
+                    procMesh->initialize(verts, data.indices);
+                    procMesh->material = std::move(mat);
+                    scene.stagedMeshes.push_back(procMesh);
+                    scene.stagedMeshTransforms.push_back(glm::mat4(1.0f));
+                    registry.get_or_emplace<MeshRendererComponent>(ent).meshes.push_back(
+                        std::move(procMesh));
+                }
+
+                // Colliders the generator emitted alongside the geometry become
+                // child entities carrying the same data-only physics triple a
+                // hand-authored "boxCollider" produces, so PhysicsBodySystem
+                // realizes them exactly like any other collider — instantiate
+                // stays free of a live physics world, which is what keeps the
+                // blueprint layer testable without one.
+                //
+                // Children rather than components on `ent`: a generator emits
+                // many boxes, an entity holds one BoxColliderComponent, and as
+                // children they inherit the entity's transform and die with it.
+                for (size_t ci = 0; ci < content.colliders.size(); ++ci) {
+                    const procgen::CollisionBox& box = content.colliders[ci];
+                    const entt::entity colliderEnt = registry.create();
+                    registry.emplace<NameComponent>(
+                        colliderEnt,
+                        NameComponent{ fmt::format("{}_collider_{}",
+                                                   e.name.empty() ? e.procMesh.generator : e.name, ci) });
+                    auto& ct = registry.emplace<TransformComponent>(colliderEnt);
+                    ct.position = box.center;
+                    ct.parent = ent;
+                    ct.isDirty = true;
+                    registry.emplace<BoxColliderComponent>(colliderEnt,
+                                                           BoxColliderComponent{ box.halfExtents });
+                    // Generated geometry is level structure: static unless an
+                    // app decides otherwise, and never synced back from physics
+                    // (a static body would fight the authored transform).
+                    RigidbodyComponent rb;
+                    rb.motionType = BodyMotionType::Static;
+                    rb.syncToPhysics = false;
+                    rb.syncFromPhysics = false;
+                    registry.emplace<RigidbodyComponent>(colliderEnt, rb);
+                    // Reported like any other entity this call created: entt
+                    // does not cascade destruction, so a caller tearing the
+                    // scene down by outEntities would otherwise leak these.
+                    if (outEntities) outEntities->push_back(colliderEnt);
+                }
+
+                // Entities the generator wants placed with its geometry — a
+                // lamp, a trigger, the water surface of a pool. Their component
+                // blobs go through the ordinary applier registry in the
+                // deferred pass below, so a generator can attach anything the
+                // registry knows without the engine learning what it is
+                // building, and so name references resolve either way.
+                for (size_t chi = 0; chi < content.children.size(); ++chi) {
+                    GeneratedChild& child = content.children[chi];
+                    const entt::entity childEnt = registry.create();
+                    registry.emplace<NameComponent>(
+                        childEnt,
+                        NameComponent{ child.name.empty()
+                                           ? fmt::format("{}_child_{}", e.procMesh.generator, chi)
+                                           : child.name });
+                    auto& childTransform = registry.emplace<TransformComponent>(childEnt);
+                    childTransform.position = child.position;
+                    childTransform.rotation = child.rotation;
+                    childTransform.scale = child.scale;
+                    childTransform.parent = ent;
+                    childTransform.isDirty = true;
+                    if (outEntities) outEntities->push_back(childEnt);
+                    if (!child.components.empty())
+                        generatedChildren.push_back({ childEnt, std::move(child.components) });
+                }
             }
         }
 
@@ -720,21 +1267,34 @@ entt::entity instantiate(
     // through the scope regardless of declaration order.
     {
         std::unordered_map<std::string, entt::entity> nameScope;
-        nameScope.reserve(blueprint.entities.size());
+        nameScope.reserve(blueprint.entities.size() + generatedChildren.size());
         for (size_t i = 0; i < blueprint.entities.size(); ++i)
             if (!blueprint.entities[i].name.empty()) nameScope.emplace(blueprint.entities[i].name, created[i]);
+        // Generated children are in scope too, so an authored entity can point
+        // at a lamp its generator produced. emplace() keeps the authored name
+        // when both claim one — the scene the user wrote wins.
+        for (const DeferredChild& child : generatedChildren)
+            if (const auto* childName = registry.try_get<NameComponent>(child.entity))
+                if (!childName->name.empty()) nameScope.emplace(childName->name, child.entity);
         const detail::EntityNameScopeGuard scopeGuard(&nameScope);
 
-        for (size_t i = 0; i < blueprint.entities.size(); ++i) {
-            const EntityBlueprint& e = blueprint.entities[i];
-            if (e.componentsJson.empty()) continue;
-            const json components = json::parse(e.componentsJson, /*cb=*/nullptr, /*allow_exceptions=*/false);
-            if (!components.is_object()) continue;
+        auto applyComponents = [&](entt::entity target, const std::string& text,
+                                   const std::string& who) {
+            if (text.empty()) return;
+            const json components = json::parse(text, /*cb=*/nullptr, /*allow_exceptions=*/false);
+            if (!components.is_object()) return;
             for (const auto& [key, value] : components.items()) {
-                if (!BlueprintComponents::instance().apply(key, registry, created[i], value))
+                if (!BlueprintComponents::instance().apply(key, registry, target, value))
                     fmt::print(stderr, "instantiate: no applier registered for component '{}' (entity '{}')\n",
-                               key, e.name);
+                               key, who);
             }
+        };
+
+        for (size_t i = 0; i < blueprint.entities.size(); ++i)
+            applyComponents(created[i], blueprint.entities[i].componentsJson, blueprint.entities[i].name);
+        for (const DeferredChild& child : generatedChildren) {
+            const auto* childName = registry.try_get<NameComponent>(child.entity);
+            applyComponents(child.entity, child.components, childName ? childName->name : std::string{});
         }
     }
 

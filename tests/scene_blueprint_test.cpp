@@ -9,6 +9,8 @@
 #include "Vapor/fsm.hpp"
 #include "Vapor/render_scene.hpp"
 #include "Vapor/scene_blueprint.hpp"
+#include <algorithm>  // std::find
+#include <cmath>
 
 using Catch::Approx;
 using namespace Vapor;
@@ -132,6 +134,33 @@ TEST_CASE("appendBlueprint rebases entity, mesh and light indices", "[scene_blue
     REQUIRE(dst.lights.size() == 2);
     CHECK(dst.lights[1].type == LightBlueprint::Type::Spot);
     REQUIRE(dst.sources.size() == 1);
+}
+
+TEST_CASE("appendBlueprint rebases primitive material indices", "[scene_blueprint]") {
+    // The host already owns a material, so the spliced prefab's material lands
+    // at index 1; its primitive must follow it rather than keep pointing at 0.
+    SceneBlueprint dst = parseSceneBlueprint(R"({
+        "materials": [ { "name": "hostMat" } ],
+        "entities": [ { "name": "Mount" } ]
+    })");
+    REQUIRE(dst.materials.size() == 1);
+
+    SceneBlueprint sub = parseSceneBlueprint(R"({
+        "materials": [ { "name": "prefabMat" } ],
+        "entities": [
+            { "name": "Prop", "primitive": { "shape": "cube", "material": "prefabMat" } }
+        ]
+    })");
+    REQUIRE(sub.ok);
+    REQUIRE(sub.entities.size() == 1);
+    REQUIRE(sub.entities[0].primitive.material == 0);
+
+    appendBlueprint(dst, std::move(sub), 0);
+
+    REQUIRE(dst.entities.size() == 2);
+    REQUIRE(dst.materials.size() == 2);
+    CHECK(dst.entities[1].primitive.material == 1);
+    CHECK(dst.materials[static_cast<size_t>(dst.entities[1].primitive.material)]->name == "prefabMat");
 }
 
 // ── decomposeTransform ──────────────────────────────────────────────────────
@@ -525,4 +554,567 @@ TEST_CASE("blueprint cook round-trips primitives (format v3)", "[scene_blueprint
     CHECK(back.entities[0].primitive.size == Catch::Approx(0.4f));
     CHECK(back.entities[0].primitive.height == Catch::Approx(1.8f));
     CHECK(back.entities[0].primitive.material == 0);
+}
+
+// ── Procedural textures ("textures" block) ──────────────────────────────────
+// (Vapor::proctex arrives via scene_blueprint.hpp.)
+
+TEST_CASE("parse bakes declared textures and resolves @refs in material slots",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "deckAlbedo", "generator": "tileAlbedo",
+              "params": { "base": [0.78, 0.76, 0.73], "rimTint": 0.86, "seed": 11 } },
+            { "name": "deckNormal", "generator": "tileNormal",
+              "params": { "pillow": 0.35, "waviness": 0.1, "seed": 12, "size": 64 } }
+        ],
+        "materials": [
+            { "name": "deckTile",
+              "albedoMap": "@deckAlbedo",
+              "normalMap": "@deckNormal",
+              "roughnessMap": "textures/deck_r.png" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.materials.size() == 1);
+
+    // Two generated images plus one uri stub for the file-path slot.
+    REQUIRE(bp.images.size() == 3);
+
+    const auto& mat = bp.materials[0];
+    REQUIRE(mat->albedoMap);
+    REQUIRE(mat->normalMap);
+    REQUIRE(mat->roughnessMap);
+
+    // Generated slots arrive with pixels already baked, so the disk-loading
+    // pass in loadSceneBlueprint skips them and never opens their uri.
+    CHECK(mat->albedoMap->byteArray.size() == 256u * 256u * 4u);
+    CHECK(mat->albedoMap->width == 256);
+    CHECK(mat->albedoMap->channelCount == 4);
+    CHECK(mat->normalMap->byteArray.size() == 64u * 64u * 4u);  // "size" honoured
+    CHECK(mat->normalMap->width == 64);
+
+    // The file-path slot stays an empty stub keyed by its path.
+    CHECK(mat->roughnessMap->uri == "textures/deck_r.png");
+    CHECK(mat->roughnessMap->byteArray.empty());
+
+    // Generated uris are synthetic and content-addressed, never file paths.
+    CHECK(mat->albedoMap->uri.rfind("proc://tileAlbedo#v", 0) == 0);
+    CHECK(mat->normalMap->uri.rfind("proc://tileNormal#v", 0) == 0);
+    CHECK(mat->albedoMap->uri != mat->normalMap->uri);
+}
+
+TEST_CASE("identical texture params share a uri so the texture cache dedupes",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "a", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "b", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "c", "generator": "noisyAlbedo", "params": { "seed": 5, "size": 32 } }
+        ],
+        "materials": [
+            { "name": "m", "albedoMap": "@a", "normalMap": "@b", "roughnessMap": "@c" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.materials.size() == 1);
+    const auto& mat = bp.materials[0];
+    REQUIRE(mat->albedoMap);
+    REQUIRE(mat->normalMap);
+    REQUIRE(mat->roughnessMap);
+
+    // Identical params collapse to one Image, so assert the sharing itself —
+    // comparing the two slots' uris would compare an object with itself.
+    CHECK(mat->albedoMap == mat->normalMap);
+    CHECK(bp.images.size() == 2);
+    // Different params stay distinct in both identity and content, and the
+    // renderer keys its texture cache on the uri.
+    CHECK(mat->albedoMap != mat->roughnessMap);
+    CHECK(mat->albedoMap->uri != mat->roughnessMap->uri);
+    CHECK(mat->albedoMap->byteArray != mat->roughnessMap->byteArray);
+}
+
+TEST_CASE("an unknown generator or @ref leaves the slot empty instead of black",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "good", "generator": "noisyAlbedo", "params": { "seed": 1, "size": 32 } },
+            { "name": "bad", "generator": "noSuchGenerator" },
+            { "generator": "noisyAlbedo" }
+        ],
+        "materials": [
+            { "name": "m", "albedoMap": "@good", "normalMap": "@bad", "emissiveMap": "@neverDeclared" }
+        ]
+    })");
+    REQUIRE(bp.ok);           // malformed entries are reported, not fatal
+    REQUIRE(bp.images.size() == 1);   // only the good one baked
+    REQUIRE(bp.materials.size() == 1);
+
+    const auto& mat = bp.materials[0];
+    REQUIRE(mat->albedoMap);
+    CHECK(mat->albedoMap->byteArray.size() == 32u * 32u * 4u);
+    // Unresolvable references clear the slot so the renderer falls back to its
+    // defaults — shipping an empty Image would upload a black texture.
+    CHECK(mat->normalMap == nullptr);
+    CHECK(mat->emissiveMap == nullptr);
+}
+
+TEST_CASE("texture generators are registered with versions and bake real pixels",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+    for (const char* name : { "tileAlbedo", "tileNormal", "tileRoughness", "noisyAlbedo",
+                              "noisyNormal", "brushedMetalAlbedo", "brushedMetalRoughness" }) {
+        INFO("generator " << name);
+        CHECK(gens.has(name));
+        CHECK(gens.version(name) >= 1);
+    }
+    CHECK_FALSE(gens.has("noSuchGenerator"));
+    CHECK(gens.version("noSuchGenerator") == -1);
+    CHECK(gens.generate("noSuchGenerator", nlohmann::json::object()) == nullptr);
+
+    // The registry must hand back exactly what proctex produces — no rescaling
+    // or channel juggling in between.
+    auto img = gens.generate("brushedMetalRoughness",
+                             nlohmann::json{ { "base", 0.28 }, { "seed", 103 }, { "size", 32 } });
+    REQUIRE(img);
+    const auto direct = proctex::brushedMetalRoughness(0.28f, 103u, 32u);
+    CHECK(img->byteArray == direct.pixels);
+}
+
+TEST_CASE("texture params tolerate wrong types and accept a scalar as a grey triple",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+
+    // A scalar rimTint is the same authoring shorthand as [v, v, v].
+    auto scalar = gens.generate("tileAlbedo",
+                                nlohmann::json{ { "rimTint", 0.5 }, { "seed", 6 }, { "size", 32 } });
+    auto triple = gens.generate("tileAlbedo",
+                                nlohmann::json{ { "rimTint", { 0.5, 0.5, 0.5 } }, { "seed", 6 },
+                                                { "size", 32 } });
+    REQUIRE(scalar);
+    REQUIRE(triple);
+    CHECK(scalar->byteArray == triple->byteArray);
+
+    // Hand-authored JSON gets types wrong; a bad field falls back to the
+    // generator's default rather than throwing mid-parse.
+    auto bad = gens.generate("noisyAlbedo",
+                             nlohmann::json{ { "period", "eight" }, { "seed", 7 }, { "size", 32 } });
+    auto def = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 7 }, { "size", 32 } });
+    REQUIRE(bad);
+    REQUIRE(def);
+    CHECK(bad->byteArray == def->byteArray);
+
+    // Missing "params" entirely is legal — every generator has defaults.
+    CHECK(gens.generate("tileNormal", nlohmann::json()) != nullptr);
+}
+
+TEST_CASE("textures that bake the same image share one Image object",
+          "[scene_blueprint][textures]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            { "name": "a", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "b", "generator": "noisyAlbedo", "params": { "seed": 4, "size": 32 } },
+            { "name": "c", "generator": "noisyAlbedo", "params": { "seed": 5, "size": 32 } }
+        ],
+        "materials": [
+            { "name": "m", "albedoMap": "@a", "normalMap": "@b", "roughnessMap": "@c" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    // The uri is the pixel hash, so "a" and "b" are the same texture under two
+    // names — carrying two copies would duplicate the payload through the
+    // scene image list and the cook.
+    CHECK(bp.images.size() == 2);
+    REQUIRE(bp.materials.size() == 1);
+    CHECK(bp.materials[0]->albedoMap == bp.materials[0]->normalMap);
+    CHECK(bp.materials[0]->albedoMap != bp.materials[0]->roughnessMap);
+}
+
+TEST_CASE("texture params survive hostile values from a data file",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+
+    // period 0 reaches a modulo inside the noise lattice; it must be clamped,
+    // not divide by zero and take the process down.
+    CHECK(gens.generate("noisyAlbedo",
+                        nlohmann::json{ { "period", 0 }, { "seed", 1 }, { "size", 16 } }) != nullptr);
+    CHECK(gens.generate("noisyNormal",
+                        nlohmann::json{ { "period", -8 }, { "seed", 1 }, { "size", 16 } }) != nullptr);
+
+    // An oversized edge would otherwise ask for a multi-gigabyte allocation.
+    auto huge = gens.generate("tileAlbedo", nlohmann::json{ { "size", 100000 }, { "seed", 1 } });
+    REQUIRE(huge);
+    CHECK(huge->width == proctex::kMaxTextureSize);
+    CHECK(huge->byteArray.size() == size_t(huge->width) * huge->height * 4);
+
+    // Seeds are uint32: the upper half of the range must be honoured rather
+    // than silently falling back to the generator default.
+    auto lo = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 7 }, { "size", 16 } });
+    auto hi = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 3000000000u }, { "size", 16 } });
+    REQUIRE(lo);
+    REQUIRE(hi);
+    CHECK(hi->byteArray != lo->byteArray);
+}
+
+TEST_CASE("malformed texture entries are reported and never throw",
+          "[scene_blueprint][textures]") {
+    // parseSceneBlueprint parses with allow_exceptions=false and promises
+    // ok == false rather than a throw, so every reachable param shape has to
+    // be type-checked before it is read.
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "textures": [
+            "not an object",
+            { "name": "noGenerator" },
+            { "generator": "noisyAlbedo" },
+            { "name": "dup", "generator": "noisyAlbedo", "params": { "seed": 1, "size": 16 } },
+            { "name": "dup", "generator": "noisyAlbedo", "params": { "seed": 2, "size": 16 } },
+            { "name": "badVec", "generator": "tileAlbedo",
+              "params": { "base": ["a", "b", "c"], "size": 16 } },
+            { "name": "badArity", "generator": "tileAlbedo", "params": { "base": [1, 2], "size": 16 } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    // "dup" bakes once (the second is rejected by name), plus the two entries
+    // whose bad "base" falls back to the default colour — which are identical
+    // to each other and therefore share one Image.
+    CHECK(bp.images.size() == 2);
+}
+
+TEST_CASE("integer texture params accept the float spelling of an integer",
+          "[scene_blueprint][textures]") {
+    const auto& gens = TextureGenerators::instance();
+    // JSON does not distinguish 4 from 4.0, so both must mean the same seed.
+    // Rejecting the float spelling would silently substitute the generator's
+    // default — and a mistyped "size": 32.0 would bake a 256px image.
+    auto asInt = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4 }, { "size", 32 } });
+    auto asFloat = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 4.0 }, { "size", 32 } });
+    auto asDefault = gens.generate("noisyAlbedo", nlohmann::json{ { "size", 32 } });
+    REQUIRE(asInt);
+    REQUIRE(asFloat);
+    REQUIRE(asDefault);
+    CHECK(asFloat->byteArray == asInt->byteArray);
+    CHECK(asFloat->uri == asInt->uri);
+    CHECK(asFloat->byteArray != asDefault->byteArray);
+
+    auto sizeFloat = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 1 }, { "size", 32.0 } });
+    REQUIRE(sizeFloat);
+    CHECK(sizeFloat->width == 32);
+
+    // A non-numeric value still falls back, and an out-of-range float must not
+    // reach an undefined int64 conversion on the way there.
+    auto asString = gens.generate("noisyAlbedo",
+                                  nlohmann::json{ { "period", "eight" }, { "seed", 7 }, { "size", 16 } });
+    auto periodDefault = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", 7 }, { "size", 16 } });
+    REQUIRE(asString);
+    REQUIRE(periodDefault);
+    CHECK(asString->byteArray == periodDefault->byteArray);
+    for (double hostile : { 1e300, -1e300, -3.5 }) {
+        auto img = gens.generate("noisyAlbedo", nlohmann::json{ { "seed", hostile }, { "size", 16 } });
+        REQUIRE(img);
+        CHECK(img->byteArray == gens.generate("noisyAlbedo", nlohmann::json{ { "size", 16 } })->byteArray);
+    }
+}
+
+// ── Procedural meshes ("procMesh" block) ────────────────────────────────────
+
+TEST_CASE("parse records a procMesh generator, params and bucket materials",
+          "[scene_blueprint][procmesh]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [ { "name": "wallTile" }, { "name": "groutMat" } ],
+        "entities": [
+            { "name": "WestWall",
+              "procMesh": {
+                  "generator": "tilePanel",
+                  "params": { "width": 24, "height": 4.6, "tileW": 0.2 },
+                  "materials": { "tiles": "wallTile", "grout": "groutMat" }
+              } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+    REQUIRE(bp.entities.size() == 1);
+    const auto& pm = bp.entities[0].procMesh;
+    CHECK_FALSE(pm.empty());
+    CHECK(pm.generator == "tilePanel");
+    // Params are kept as text so the blueprint stays independent of any one
+    // generator's parameter struct.
+    CHECK(pm.paramsJson.find("\"width\"") != std::string::npos);
+    REQUIRE(pm.bucketMaterials.size() == 2);
+    for (const auto& [bucket, index] : pm.bucketMaterials) {
+        INFO("bucket " << bucket);
+        REQUIRE(index >= 0);
+        const std::string want = (bucket == "tiles") ? "wallTile" : "groutMat";
+        CHECK(bp.materials[static_cast<size_t>(index)]->name == want);
+    }
+}
+
+TEST_CASE("appendBlueprint rebases procMesh bucket materials", "[scene_blueprint][procmesh]") {
+    SceneBlueprint dst = parseSceneBlueprint(R"({
+        "materials": [ { "name": "hostMat" } ],
+        "entities": [ { "name": "Mount" } ]
+    })");
+    SceneBlueprint sub = parseSceneBlueprint(R"({
+        "materials": [ { "name": "prefabMat" } ],
+        "entities": [
+            { "name": "Panel",
+              "procMesh": { "generator": "tilePanel", "materials": { "tiles": "prefabMat" } } }
+        ]
+    })");
+    REQUIRE(dst.ok);
+    REQUIRE(sub.ok);
+    REQUIRE(sub.entities.size() == 1);
+    REQUIRE(sub.entities[0].procMesh.bucketMaterials.size() == 1);
+    REQUIRE(sub.entities[0].procMesh.bucketMaterials[0].second == 0);
+
+    appendBlueprint(dst, std::move(sub), 0);
+
+    REQUIRE(dst.entities.size() == 2);
+    REQUIRE(dst.materials.size() == 2);
+    const auto& bm = dst.entities[1].procMesh.bucketMaterials;
+    REQUIRE(bm.size() == 1);
+    CHECK(bm[0].second == 1);
+    CHECK(dst.materials[static_cast<size_t>(bm[0].second)]->name == "prefabMat");
+}
+
+TEST_CASE("mesh generators emit valid geometry and drop what they cannot",
+          "[scene_blueprint][procmesh]") {
+    const auto& gens = MeshGenerators::instance();
+    for (const char* name : { "tilePanel", "lathe", "tube", "extrude", "boxes" }) {
+        INFO("generator " << name);
+        CHECK(gens.has(name));
+        CHECK(gens.version(name) >= 1);
+        // Empty params must fall back to defaults, never throw or emit
+        // geometry that Mesh::initialize()'s MikkTSpace pass would reject.
+        for (const auto& [bucket, data] : gens.generate(name, nlohmann::json::object()).buckets) {
+            INFO("bucket " << bucket);
+            CHECK(procgen::validate(data).ok());
+        }
+    }
+    CHECK_FALSE(gens.has("noSuchGenerator"));
+    CHECK(gens.version("noSuchGenerator") == -1);
+    CHECK(gens.generate("noSuchGenerator", nlohmann::json::object()).buckets.empty());
+
+    // A tiled panel splits into its two material buckets.
+    auto panel = gens.generate("tilePanel",
+                               nlohmann::json{ { "width", 2.0 }, { "height", 1.2 } });
+    CHECK(panel.buckets.count("tiles") == 1);
+    CHECK(panel.buckets.count("grout") == 1);
+    CHECK(panel.triangleCount() > 100);
+
+    // Box CSG hands back colliders alongside the render geometry, so the
+    // physics shape never has to be re-derived from the mesh.
+    auto blockout = gens.generate("boxes", nlohmann::json{
+        { "add", { { { "min", { -12, -0.5, -5 } }, { "max", { 12, 0, 5 } } } } },
+        { "subtract", { { { "min", { -7, -1, -3 } }, { "max", { 7, 1, 3 } } } } } });
+    CHECK(blockout.colliders.size() == 4);
+    CHECK(procgen::validate(blockout.buckets["surface"]).ok());
+}
+
+TEST_CASE("procMesh colliders become child entities the physics layer can realize",
+          "[scene_blueprint][procmesh]") {
+    // A generator knows where its walls are, so it emits colliders alongside
+    // the geometry. instantiate() turns those into the same data-only physics
+    // triple a hand-authored "boxCollider" produces — it must NOT need a live
+    // physics world, which is what keeps this layer testable without one.
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Deck",
+              "position": [2, 0, 0],
+              "procMesh": {
+                  "generator": "boxes",
+                  "params": {
+                      "add": [ { "min": [-12, -0.5, -5], "max": [12, 0, 5] } ],
+                      "subtract": [ { "min": [-7, -1, -3], "max": [7, 1, 3] } ]
+                  }
+              } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene;
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+
+    // The CSG leaves four slabs around the cut-out.
+    auto colliders = registry.view<BoxColliderComponent, RigidbodyComponent>();
+    REQUIRE(colliders.size_hint() == 4);
+
+    entt::entity deck = entt::null;
+    for (auto e : registry.view<NameComponent>())
+        if (registry.get<NameComponent>(e).name == "Deck") deck = e;
+    // Extra parens: Catch2's expression decomposition cannot pick between
+    // entt's comparison overloads for entity vs null_t (see line 210).
+    REQUIRE((deck != entt::null));
+
+    float totalVolume = 0.0f;
+    for (auto e : colliders) {
+        INFO("collider " << registry.get<NameComponent>(e).name);
+        const auto& rb = colliders.get<RigidbodyComponent>(e);
+        // Level structure: static, and never synced back — a static body would
+        // otherwise fight the authored transform.
+        CHECK(rb.motionType == BodyMotionType::Static);
+        CHECK_FALSE(rb.syncFromPhysics);
+        // Data only. Realizing the body is PhysicsBodySystem's job, and it
+        // keys off exactly this invalid handle.
+        CHECK_FALSE(rb.body.valid());
+
+        // Parented to the mesh entity, so the colliders move and die with it.
+        const auto& t = registry.get<TransformComponent>(e);
+        CHECK(t.parent == deck);
+
+        const glm::vec3 half = colliders.get<BoxColliderComponent>(e).halfSize;
+        CHECK(half.x > 0.0f);
+        CHECK(half.y > 0.0f);
+        CHECK(half.z > 0.0f);
+        totalVolume += 8.0f * half.x * half.y * half.z;
+        // Offsets are the generator's local coordinates; the parent supplies
+        // the world placement, so they must NOT already include position.x = 2.
+        CHECK(std::abs(t.position.x) <= 12.0f);
+    }
+    // 24 x 0.5 x 10 slab minus the 14 x 0.5 x 6 cut-out.
+    CHECK(totalVolume == Approx(24.0f * 0.5f * 10.0f - 14.0f * 0.5f * 6.0f));
+
+    // Reported to the caller: entt does not cascade destruction, so a scene
+    // torn down through `created` would otherwise leak every collider.
+    for (auto e : colliders) {
+        INFO("collider " << registry.get<NameComponent>(e).name);
+        const bool reported = std::find(created.begin(), created.end(), e) != created.end();
+        CHECK(reported);
+    }
+}
+
+TEST_CASE("a generator can emit entities alongside its geometry", "[scene_blueprint][procmesh]") {
+    // The channel a composite generator needs: a room knows where its lamps
+    // go, and saying so should not require the engine to know what a lamp is.
+    // Components ride as JSON through the ordinary applier registry, so this
+    // registers a generator exactly the way an app would.
+    MeshGenerators::instance().add("testFixture", 1, [](const nlohmann::json& p) {
+        GeneratedContent out;
+        const auto z = p.find("z");
+        const float lampZ = (z != p.end() && z->is_number()) ? z->get<float>() : 0.0f;
+        out.children.push_back({ "FixtureLamp",
+                                 glm::vec3(0.0f, 2.5f, lampZ),
+                                 glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                                 glm::vec3(1.0f),
+                                 R"({"pointLight":{"color":[1,0.5,0.2],"intensity":4.5,"radius":3}})" });
+        // A child with no components is still an entity — a spawn marker the
+        // app looks up by name.
+        out.children.push_back({ "FixtureSpawn", glm::vec3(1.0f, 0.5f, -2.0f),
+                                 glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f), "" });
+        return out;
+    });
+
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Room",
+              "position": [10, 0, 0],
+              "procMesh": { "generator": "testFixture", "params": { "z": 3.0 } } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene;
+    std::vector<entt::entity> created;
+    instantiate(registry, scene, bp, entt::null, "", &created);
+
+    entt::entity room = entt::null, lamp = entt::null, spawn = entt::null;
+    for (auto e : registry.view<NameComponent>()) {
+        const std::string& n = registry.get<NameComponent>(e).name;
+        if (n == "Room") room = e;
+        if (n == "FixtureLamp") lamp = e;
+        if (n == "FixtureSpawn") spawn = e;
+    }
+    REQUIRE((room != entt::null));
+    REQUIRE((lamp != entt::null));
+    REQUIRE((spawn != entt::null));
+
+    // Parented to the generating entity, positioned in ITS local space — the
+    // room's own position must not be baked in twice.
+    const auto& lampTransform = registry.get<TransformComponent>(lamp);
+    CHECK((lampTransform.parent == room));
+    CHECK(lampTransform.position == glm::vec3(0.0f, 2.5f, 3.0f));
+
+    // The component blob went through the ordinary applier registry.
+    REQUIRE(registry.all_of<PointLightComponent>(lamp));
+    const auto& light = registry.get<PointLightComponent>(lamp);
+    CHECK(light.intensity == Approx(4.5f));
+    CHECK(light.radius == Approx(3.0f));
+    CHECK(light.color == glm::vec3(1.0f, 0.5f, 0.2f));
+
+    // A componentless child is still a placed, named, reported entity.
+    CHECK_FALSE(registry.all_of<PointLightComponent>(spawn));
+    CHECK(registry.get<TransformComponent>(spawn).position == glm::vec3(1.0f, 0.5f, -2.0f));
+    for (entt::entity e : { lamp, spawn }) {
+        const bool reported = std::find(created.begin(), created.end(), e) != created.end();
+        CHECK(reported);
+    }
+}
+
+TEST_CASE("a procMesh generator that emits no colliders creates no child entities",
+          "[scene_blueprint][procmesh]") {
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "entities": [
+            { "name": "Wall",
+              "procMesh": { "generator": "tilePanel", "params": { "width": 2, "height": 1.2 } } }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    entt::registry registry;
+    RenderScene scene;
+    instantiate(registry, scene, bp);
+
+    CHECK(registry.view<BoxColliderComponent>().size() == 0);
+    CHECK(registry.view<RigidbodyComponent>().size() == 0);
+    // ...but the geometry still arrived.
+    auto meshes = registry.view<MeshRendererComponent>();
+    REQUIRE(meshes.size() == 1);
+    CHECK(meshes.get<MeshRendererComponent>(meshes.front()).meshes.size() == 2);
+}
+
+TEST_CASE("blueprint cook round-trips procMesh (format v5)", "[scene_blueprint][procmesh][cook]") {
+    // The cook is a cache hit away from being the only copy of the scene, and
+    // it stores entities field by field. A procMesh that didn't survive the
+    // round trip would leave a cooked scene silently missing its geometry —
+    // and since the entity record grew, a stale v4 cook has to be rejected
+    // rather than read with every later field shifted.
+    SceneBlueprint bp = parseSceneBlueprint(R"({
+        "materials": [ { "name": "wallTile" }, { "name": "groutMat" } ],
+        "entities": [
+            { "name": "WestWall",
+              "procMesh": {
+                  "generator": "tilePanel",
+                  "params": { "width": 24, "height": 4.6 },
+                  "materials": { "tiles": "wallTile", "grout": "groutMat" }
+              } },
+            { "name": "Plain" }
+        ]
+    })");
+    REQUIRE(bp.ok);
+
+    std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
+    {
+        cereal::BinaryOutputArchive out(stream);
+        AssetSerializer::serializeBlueprint(out, bp);
+    }
+    stream.seekg(0);
+    SceneBlueprint back;
+    {
+        cereal::BinaryInputArchive in(stream);
+        back = AssetSerializer::deserializeBlueprint(in);
+    }
+
+    REQUIRE(back.ok);
+    REQUIRE(back.entities.size() == 2);
+    const auto& pm = back.entities[0].procMesh;
+    CHECK(pm.generator == "tilePanel");
+    CHECK(pm.paramsJson == bp.entities[0].procMesh.paramsJson);
+    CHECK(pm.bucketMaterials == bp.entities[0].procMesh.bucketMaterials);
+    // The generator has to be runnable straight off the cook, params and all.
+    const nlohmann::json params = nlohmann::json::parse(pm.paramsJson, nullptr, false);
+    REQUIRE_FALSE(params.is_discarded());
+    CHECK(MeshGenerators::instance().generate(pm.generator, params).triangleCount() > 100);
+    // An entity with no procMesh stays empty rather than inheriting a neighbour's.
+    CHECK(back.entities[1].procMesh.empty());
 }

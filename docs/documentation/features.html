@@ -40,7 +40,7 @@
         <tr><td>Volumetric Clouds</td><td>Procedural volumetric cloud rendering.</td></tr>
         <tr><td>Atmosphere Rendering</td><td>Rayleigh + Mie scattering atmosphere model.</td></tr>
         <tr><td>Sun / Lens Flare</td><td>Sun lens flare effect.</td></tr>
-        <tr><td>Water Rendering</td><td>Normal-map water surface with foam. <span class="warn-note">Currently disabled (pass commented out).</span></td></tr>
+        <tr><td>Water Rendering</td><td>RHI water stack (both backends): FFT spectral simulation (GPU inverse FFT, finite-depth capillary-gravity dispersion, choppy displacement + Jacobian foam), planar reflections from a mirrored-camera pass with waterline clipping, snapshot refraction, projected caustics, fresnel shading. Off by default; opt in either through the IRenderer water API directly or by declaring a <code>water</code> component and running <code>WaterSystem</code> (see Examples/Poolrooms). The legacy Metal-native pass remains disabled.</td></tr>
         <tr><td>2D Batch Rendering</td><td>Screen-space quads, lines, rectangles, circles, triangles — batched.</td></tr>
         <tr><td>3D Batch Rendering</td><td>World-space batch rendering with depth testing.</td></tr>
         <tr><td>Sprite / Texture Quad</td><td>Textured quad rendering with rotation and tint.</td></tr>
@@ -56,6 +56,8 @@
       <thead><tr><th>Feature</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td>Rigid Body Creation</td><td>Sphere, box, capsule, cylinder, mesh, convex hull shapes.</td></tr>
+        <tr><td>ECS Body Creation</td><td><code>PhysicsBodySystem</code> realizes authored colliders: the blueprint layer emplaces <code>{Rigidbody, Collider, Transform}</code> as pure data with an invalid handle — which is what keeps <code>parseSceneBlueprint</code> free of a live physics world — and this creates the body on the first update after the entity appears. Idempotent, so it runs every frame and picks up whatever spawned since. Parented colliders (a <code>procMesh</code> emits its own as children) are placed from the world transform, so run it after <code>TransformSystem</code>.</td></tr>
+        <tr><td>Thin Box Colliders</td><td>Jolt refuses a box whose smallest half-extent is under the shape's convex radius. <code>createBoxBody</code> shrinks the convex radius to fit instead of inflating the box, so a 4&nbsp;cm handrail collider keeps its authored size rather than throwing.</td></tr>
         <tr><td>Body Lifecycle</td><td><code>addBody</code> / <code>removeBody</code> / <code>destroyBody</code>.</td></tr>
         <tr><td>Motion Types</td><td>Static, Dynamic, Kinematic.</td></tr>
         <tr><td>Force &amp; Impulse</td><td><code>applyForce</code>, <code>applyImpulse</code>, <code>applyTorque</code>.</td></tr>
@@ -137,6 +139,38 @@
         <tr><td>Node Search</td><td><code>findNode(name)</code>, <code>findNodeInHierarchy(name, node)</code>.</td></tr>
         <tr><td>Physics Callbacks</td><td><code>onTriggerEnter/Exit</code>, <code>onCollisionEnter/Exit</code> as virtual methods.</td></tr>
         <tr><td>Dirty Transform Flag</td><td>World matrix computed lazily.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Procedural Meshing (Vapor::procgen)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Immediate-Mode Emission</td><td>Header-only bake-time toolkit (glm + std only): <code>MeshData</code> streams, quad emitter, panel frames (origin, U, V) with CCW front faces. Feeds straight into <code>Mesh::initialize</code>.</td></tr>
+        <tr><td>Sweeps &amp; Lathe</td><td><code>sweepProfile</code> along open/closed paths (coping, cove trim), parallel-transport <code>sweepTube</code> (rails, slides, torus rims), <code>lathe</code> surfaces of revolution with pole fans.</td></tr>
+        <tr><td>Caps &amp; Extrusion</td><td><code>triangulatePolygon</code> — scanline trapezoid decomposition that survives touching/collinear hole layouts, crack-free (no T-junctions); <code>polygonCap</code> and <code>extrudePolygon</code> build on it.</td></tr>
+        <tr><td>Instancing &amp; Box CSG</td><td><code>appendTransformed</code> (inverse-transpose normals, mirroring flips winding), <code>frameTransform</code>, axis-aligned <code>subtractBox</code>/<code>emitBoxes</code> blockouts with covered-face culling and collider co-emission.</td></tr>
+        <tr><td>Pattern Generators</td><td><code>buildTilePanel</code>: beveled ceramic tiles with recessed grout channels as real geometry; bullnose/cove trim profiles (<code>procgen_patterns.hpp</code>).</td></tr>
+        <tr><td>Bake Validation</td><td><code>validate()</code> reports OOB indices, non-finite values, degenerate geometry/UV triangles (the MikkTSpace gate) and winding/normal disagreement. Covered by <code>tests/procgen_test.cpp</code>.</td></tr>
+        <tr><td>Scene-JSON <code>procMesh</code> block</td><td>An entity can name a mesh generator and its params instead of pointing at a model file: <code>{ "generator": "tilePanel", "params": {…}, "materials": { "tiles": "wallTile" } }</code>. Geometry comes back as named <em>buckets</em>, one per material, so a single entity carries tiles and grout without inventing children. A generator also emits the colliders its geometry implies in the same pass, so the physics shape is never re-derived from the render mesh: <code>instantiate</code> turns them into child entities carrying the ordinary data-only collider components, which <code>PhysicsBodySystem</code> then realizes as bodies. A generator can emit whole <em>entities</em> the same way — <code>GeneratedContent::children</code> carries a name, a local transform and a component JSON blob, applied through the ordinary applier registry, so a composite generator places its own lamps, triggers and water surface without the engine learning what it is building. No vertices are stored: the mesh is rebuilt per load, keeping the cook small and letting a generator improvement reach already-cooked scenes.</td></tr>
+        <tr><td>Mesh Generator Registry</td><td><code>MeshGenerators</code> — the mesh-side sibling of <code>TextureGenerators</code>. Built-ins wrap the procgen primitives (<code>tilePanel</code>, <code>lathe</code>, <code>tube</code>, <code>extrude</code>, <code>boxes</code>); an app registers composite generators for whole structures with <code>add(name, version, fn)</code>. Generators must be pure functions of their params. A bucket failing <code>validate()</code> is dropped with a diagnostic rather than handed to MikkTSpace, so one bad generator costs its own geometry and not the scene load.</td></tr>
+        <tr><td>Scene-JSON <code>water</code> component</td><td>The FFT surface as data instead of a wall of renderer calls: <code>WaterComponent</code> groups its fields by update cost — <code>grid</code>, <code>look</code>, <code>caustics</code>, <code>spectrum</code> — and <code>WaterSystem</code> pushes them accordingly. The look goes out every frame so it stays live-tunable; the grid and the spectrum only on change, because <code>setWaterGrid</code> reallocates GPU buffers and <code>setWaterSimParams</code> forces a spectrum rebake. The surface follows the entity transform, and caustics bounds are authored relative to it so one authored volume works wherever the water is placed. Covered by <code>tests/water_system_test.cpp</code>.</td></tr>
+        <tr><td>Composite Generators</td><td>An app registers whole structures the same way the engine registers primitives. <code>Examples/Poolrooms</code> is the worked example: the entire hall — 296k triangles across 13 material buckets, plus its static colliders, water surface, porthole lamps and spawn / ladder / skylight markers — is one <code>poolroom</code> generator named from <code>assets/scenes/poolrooms.json</code>. What stays in C++ is what is not scene data: the character controller, camera, input and debug panel.</td></tr>
+      </tbody>
+    </table>
+
+    <hr>
+
+    <h2>Procedural Textures (Vapor::proctex)</h2>
+    <table>
+      <thead><tr><th>Feature</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td>Surface &amp; Tile Generators</td><td>Header-only RGBA8 bakers on a wrapped value-noise lattice. <em>Surface</em> generators (plaster/grout/stone, brushed metal) tile seamlessly on both axes — <code>fbm</code> takes per-axis periods for anisotropic cases like brushed streaks. <em>Tile face</em> generators (albedo / normal / roughness) instead author one tile face into the UV cell <code>[0,1]²</code>, where the borders are real tile edges and <code>procgen::buildTilePanel</code> supplies the grout.</td></tr>
+        <tr><td>Scene-JSON <code>textures</code> block</td><td>Declare textures by generator name and params; reference them from any material map slot as <code>"@name"</code>. A slot takes either a generated reference or an ordinary file path, so swapping a placeholder for a real photograph is a one-token edit with no code change.</td></tr>
+        <tr><td>Generator Registry</td><td><code>TextureGenerators</code> — the texture-side sibling of <code>BlueprintComponents</code>. The engine registers its built-ins; an app adds its own with <code>add(name, version, fn)</code> before loading a scene that names them.</td></tr>
+        <tr><td>Content Addressing</td><td>Generators are pure functions of their params (seeded hashes, no global RNG), so each bake is hashed into a synthetic <code>proc://</code> uri — the key the renderer's texture cache dedupes on, and identical bakes share one <code>Image</code>. Pixels are produced at parse time, so the disk loader skips them entirely. They are also stored in the scene cook, so the generator registry's names and versions are folded into the cook hash: bump a generator's version when its output changes.</td></tr>
       </tbody>
     </table>
 

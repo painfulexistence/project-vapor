@@ -346,6 +346,11 @@ private:
     struct TextureBinding {
         VkImageView view = VK_NULL_HANDLE;
         VkSampler sampler = VK_NULL_HANDLE;
+        // The source texture id, so updateDescriptors can consult its tracked
+        // layout — a depth image sampled while it is a read-only depth
+        // attachment (the water pass) needs the descriptor to declare
+        // DEPTH_STENCIL_READ_ONLY_OPTIMAL, not SHADER_READ_ONLY.
+        Uint32 textureId = 0;
     };
 
     VkDescriptorSetLayout vertexBufferSetLayout = VK_NULL_HANDLE;   // set 0

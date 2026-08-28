@@ -1,0 +1,156 @@
+{
+  "name": "poolrooms",
+
+  "_comment": [
+    "The whole environment, as data. Geometry comes from the app-registered",
+    "'poolroom' composite generator (poolroom_generator.hpp), which also emits",
+    "the water surface, the porthole lamps, the player spawn and the ladder /",
+    "skylight markers as child entities. Textures are baked by Vapor::proctex",
+    "at parse time and referenced from material slots as '@name'.",
+    "",
+    "To use a real photograph instead of a placeholder, replace the '@name'",
+    "with a path: \"albedoMap\": \"textures/poolrooms/deck_tile_albedo.png\".",
+    "Geometry and UVs are authored so a single-tile texture maps one tile per",
+    "cell."
+  ],
+
+  "textures": [
+    { "name": "deckAlbedo",    "generator": "tileAlbedo",    "params": { "base": [0.78, 0.76, 0.73], "rimTint": [0.86, 0.86, 0.86], "seed": 11 } },
+    { "name": "deckNormal",    "generator": "tileNormal",    "params": { "pillow": 0.35, "waviness": 0.10, "seed": 12 } },
+    { "name": "deckRough",     "generator": "tileRoughness", "params": { "centerRoughness": 0.10, "rimRoughness": 0.32, "seed": 13 } },
+
+    { "name": "wallAlbedo",    "generator": "tileAlbedo",    "params": { "base": [0.77, 0.78, 0.77], "rimTint": [0.88, 0.88, 0.88], "seed": 21 } },
+    { "name": "wallNormal",    "generator": "tileNormal",    "params": { "pillow": 0.30, "waviness": 0.08, "seed": 22 } },
+    { "name": "wallRough",     "generator": "tileRoughness", "params": { "centerRoughness": 0.08, "rimRoughness": 0.28, "seed": 23 } },
+
+    { "name": "poolWallAlbedo", "generator": "tileAlbedo",    "params": { "base": [0.72, 0.78, 0.80], "rimTint": [0.85, 0.85, 0.85], "seed": 31 } },
+    { "name": "poolWallNormal", "generator": "tileNormal",    "params": { "pillow": 0.30, "waviness": 0.08, "seed": 32 } },
+    { "name": "poolWallRough",  "generator": "tileRoughness", "params": { "centerRoughness": 0.07, "rimRoughness": 0.26, "seed": 33 } },
+
+    { "name": "poolFloorAlbedo", "generator": "tileAlbedo",    "params": { "base": [0.70, 0.77, 0.79], "rimTint": [0.84, 0.84, 0.84], "seed": 41 } },
+    { "name": "poolFloorNormal", "generator": "tileNormal",    "params": { "pillow": 0.30, "waviness": 0.08, "seed": 42 } },
+    { "name": "poolFloorRough",  "generator": "tileRoughness", "params": { "centerRoughness": 0.07, "rimRoughness": 0.26, "seed": 43 } },
+
+    { "name": "accentAlbedo",  "generator": "tileAlbedo",    "params": { "base": [0.10, 0.32, 0.55], "rimTint": [0.75, 0.75, 0.75], "seed": 51 } },
+    { "name": "accentNormal",  "generator": "tileNormal",    "params": { "pillow": 0.40, "waviness": 0.10, "seed": 52 } },
+    { "name": "accentRough",   "generator": "tileRoughness", "params": { "centerRoughness": 0.09, "rimRoughness": 0.30, "seed": 53 } },
+
+    { "name": "groutAlbedo",   "generator": "noisyAlbedo",   "params": { "base": [0.70, 0.69, 0.66], "variation": 0.10, "period": 8, "seed": 61 } },
+    { "name": "groutNormal",   "generator": "noisyNormal",   "params": { "strength": 0.35, "period": 12, "seed": 62 } },
+    { "name": "groutRough",    "generator": "noisyAlbedo",   "params": { "base": [0.85, 0.85, 0.85], "variation": 0.10, "period": 8, "seed": 63 } },
+
+    { "name": "copingAlbedo",  "generator": "noisyAlbedo",   "params": { "base": [0.80, 0.77, 0.72], "variation": 0.08, "period": 6, "seed": 71 } },
+    { "name": "copingNormal",  "generator": "noisyNormal",   "params": { "strength": 0.5, "period": 10, "seed": 72 } },
+    { "name": "copingRough",   "generator": "noisyAlbedo",   "params": { "base": [0.45, 0.45, 0.45], "variation": 0.15, "period": 6, "seed": 73 } },
+
+    { "name": "plasterAlbedo", "generator": "noisyAlbedo",   "params": { "base": [0.78, 0.78, 0.76], "variation": 0.05, "period": 5, "seed": 81 } },
+    { "name": "plasterNormal", "generator": "noisyNormal",   "params": { "strength": 0.25, "period": 8, "seed": 82 } },
+    { "name": "plasterRough",  "generator": "noisyAlbedo",   "params": { "base": [0.85, 0.85, 0.85], "variation": 0.08, "period": 5, "seed": 83 } },
+
+    { "name": "darkAlbedo",    "generator": "noisyAlbedo",   "params": { "base": [0.09, 0.10, 0.10], "variation": 0.20, "period": 6, "seed": 91 } },
+    { "name": "darkNormal",    "generator": "noisyNormal",   "params": { "strength": 0.3, "period": 8, "seed": 92 } },
+    { "name": "darkRough",     "generator": "noisyAlbedo",   "params": { "base": [0.95, 0.95, 0.95], "variation": 0.05, "period": 6, "seed": 93 } },
+
+    { "name": "metalAlbedo",   "generator": "brushedMetalAlbedo",    "params": { "base": [0.75, 0.77, 0.80], "seed": 101 } },
+    { "name": "metalNormal",   "generator": "noisyNormal",           "params": { "strength": 0.10, "period": 24, "seed": 102 } },
+    { "name": "metalRough",    "generator": "brushedMetalRoughness", "params": { "base": 0.28, "seed": 103 } },
+
+    { "name": "lampAlbedo",    "generator": "noisyAlbedo",   "params": { "base": [0.95, 0.88, 0.75], "variation": 0.03, "period": 4, "seed": 111 } },
+    { "name": "lampNormal",    "generator": "noisyNormal",   "params": { "strength": 0.05, "period": 8, "seed": 112 } },
+    { "name": "lampRough",     "generator": "noisyAlbedo",   "params": { "base": [0.6, 0.6, 0.6], "variation": 0.05, "period": 4, "seed": 113 } },
+    { "name": "lampEmissive",  "generator": "noisyAlbedo",   "params": { "base": [1.0, 0.92, 0.78], "variation": 0.04, "period": 4, "seed": 114 } },
+
+    { "name": "slideAlbedo",   "generator": "noisyAlbedo",   "params": { "base": [0.92, 0.92, 0.92], "variation": 0.03, "period": 4, "seed": 121 } },
+    { "name": "slideNormal",   "generator": "noisyNormal",   "params": { "strength": 0.05, "period": 8, "seed": 122 } },
+    { "name": "slideRough",    "generator": "noisyAlbedo",   "params": { "base": [0.18, 0.18, 0.18], "variation": 0.05, "period": 4, "seed": 123 } },
+
+    { "name": "slide2Albedo",  "generator": "noisyAlbedo",   "params": { "base": [0.92, 0.92, 0.92], "variation": 0.03, "period": 4, "seed": 131 } },
+    { "name": "slide2Normal",  "generator": "noisyNormal",   "params": { "strength": 0.05, "period": 8, "seed": 132 } },
+    { "name": "slide2Rough",   "generator": "noisyAlbedo",   "params": { "base": [0.18, 0.18, 0.18], "variation": 0.05, "period": 4, "seed": 133 } }
+  ],
+
+  "materials": [
+    { "name": "deckTile",       "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@deckAlbedo", "normalMap": "@deckNormal", "roughnessMap": "@deckRough" },
+    { "name": "wallTile",       "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@wallAlbedo", "normalMap": "@wallNormal", "roughnessMap": "@wallRough" },
+    { "name": "poolWallTile",   "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@poolWallAlbedo", "normalMap": "@poolWallNormal", "roughnessMap": "@poolWallRough" },
+    { "name": "poolFloorTile",  "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@poolFloorAlbedo", "normalMap": "@poolFloorNormal", "roughnessMap": "@poolFloorRough" },
+    { "name": "accentTile",     "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@accentAlbedo", "normalMap": "@accentNormal", "roughnessMap": "@accentRough" },
+    { "name": "groutMat",       "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@groutAlbedo", "normalMap": "@groutNormal", "roughnessMap": "@groutRough" },
+    { "name": "copingMat",      "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@copingAlbedo", "normalMap": "@copingNormal", "roughnessMap": "@copingRough" },
+    { "name": "ceilingPlaster", "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@plasterAlbedo", "normalMap": "@plasterNormal", "roughnessMap": "@plasterRough" },
+    { "name": "darkPlaster",    "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@darkAlbedo", "normalMap": "@darkNormal", "roughnessMap": "@darkRough" },
+    { "name": "metalMat",       "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 1.0, "useIBL": true,
+      "albedoMap": "@metalAlbedo", "normalMap": "@metalNormal", "roughnessMap": "@metalRough" },
+
+    { "_comment": "The glow discs are emissive geometry, so the lamps show up in the water's planar reflection (the mirror pass shades emissive) rather than only as point lights.",
+      "name": "lampGlow",       "baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "emissiveFactor": [1.0, 0.82, 0.55], "emissiveStrength": 3.5,
+      "albedoMap": "@lampAlbedo", "normalMap": "@lampNormal", "roughnessMap": "@lampRough", "emissiveMap": "@lampEmissive" },
+
+    { "_comment": "Slide shells: hue from the base colour, gloss from the roughness MAP (factor stays 1).",
+      "name": "slideBlue",      "baseColorFactor": [0.16, 0.38, 0.88, 1.0], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@slideAlbedo", "normalMap": "@slideNormal", "roughnessMap": "@slideRough" },
+    { "name": "slideViolet",    "baseColorFactor": [0.48, 0.26, 0.85, 1.0], "roughnessFactor": 1.0, "metallicFactor": 0.0, "useIBL": true,
+      "albedoMap": "@slide2Albedo", "normalMap": "@slide2Normal", "roughnessMap": "@slide2Rough" }
+  ],
+
+  "entities": [
+    {
+      "_comment": "One entity for the whole hall. The generator returns a bucket per material slot, the static colliders its CSG implies, and the water / lamps / spawn / markers as children.",
+      "name": "Hall",
+      "procMesh": {
+        "generator": "poolroom",
+        "params": { "flooded": false },
+        "materials": {
+          "deck_tile": "deckTile",
+          "wall_tile": "wallTile",
+          "pool_wall_tile": "poolWallTile",
+          "pool_floor_tile": "poolFloorTile",
+          "accent_tile": "accentTile",
+          "grout": "groutMat",
+          "coping": "copingMat",
+          "ceiling_plaster": "ceilingPlaster",
+          "dark_plaster": "darkPlaster",
+          "metal": "metalMat",
+          "lamp_glow": "lampGlow",
+          "slide_blue": "slideBlue",
+          "slide_violet": "slideViolet"
+        }
+      }
+    },
+    {
+      "_comment": "Steep late-morning sun, so the shafts from the skylight wells land on the water and the north deck.",
+      "name": "Sun",
+      "components": {
+        "directionalLight": { "direction": [0.263776, -0.942056, 0.207252], "color": [1.0, 0.97, 0.90], "intensity": 8.0 },
+        "sun": {}
+      }
+    },
+    { "name": "Environment", "components": { "sky": {} } },
+    {
+      "_comment": "Humid haze over the water: a bounded fog bank hugging the hall.",
+      "name": "Pool Haze",
+      "position": [0.0, 1.6, 0.0],
+      "components": {
+        "volumetricFog": {
+          "bounded": true,
+          "halfExtent": [12.2, 3.2, 5.2],
+          "edgeFalloff": 1.5,
+          "density": 0.016,
+          "albedo": [0.92, 0.96, 1.0],
+          "anisotropy": 0.62,
+          "ambientIntensity": 0.35
+        }
+      }
+    }
+  ]
+}

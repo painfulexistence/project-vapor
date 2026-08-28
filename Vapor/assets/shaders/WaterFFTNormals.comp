@@ -1,0 +1,67 @@
+#version 450
+// FFT water — derive the normal/foam map from the finished displacement map.
+// GLSL twin of the waterFFTNormals kernel in 3d_water_fft_rhi.metal.
+//
+// Central differences over the DISPLACED surface positions give the true
+// normal (slopes steepen where choppy displacement compresses crests), and
+// the horizontal-displacement Jacobian gives the folding measure used for
+// whitecap foam: J < 1 means the surface is being pinched.
+//
+// Output: RGB = world-space normal (y-up), A = foam factor [0,1].
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SimParams {
+    uint resolution;
+    float patchSize;
+    float windSpeedMps;
+    float windDirRad;
+    float amplitude;
+    float choppiness;
+    float depthMeters;
+    float smallWaveCutoff;
+    float directionalSpread;
+    float gravity;
+    float surfaceTension;
+    float timeScale;
+    float time;
+    uint seed;
+    float _padA;
+    float _padB;
+} sim;
+
+layout(set = 1, binding = 0, rgba16f) uniform readonly image2D dispTex;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D normalTex;
+
+vec3 dispAt(ivec2 id, int n) {
+    ivec2 wrapped = ivec2((id.x % n + n) % n, (id.y % n + n) % n);
+    return imageLoad(dispTex, wrapped).xyz;  // (dx, h, dz)
+}
+
+void main() {
+    uvec2 id = uvec2(gl_GlobalInvocationID.xy);
+    int n = int(sim.resolution);
+    if (id.x >= uint(n) || id.y >= uint(n)) return;
+
+    float texel = sim.patchSize / float(n);
+
+    vec3 xp = dispAt(ivec2(id) + ivec2(1, 0), n);
+    vec3 xm = dispAt(ivec2(id) - ivec2(1, 0), n);
+    vec3 zp = dispAt(ivec2(id) + ivec2(0, 1), n);
+    vec3 zm = dispAt(ivec2(id) - ivec2(0, 1), n);
+
+    // Tangent vectors of the displaced surface (x: lattice X, z: lattice Z).
+    vec3 tx = vec3(2.0 * texel + xp.x - xm.x, xp.y - xm.y, xp.z - xm.z);
+    vec3 tz = vec3(zp.x - zm.x, zp.y - zm.y, 2.0 * texel + zp.z - zm.z);
+    vec3 nrm = normalize(cross(tz, tx));  // y-up for a +Y-facing surface
+    if (nrm.y < 0.0) nrm = -nrm;
+
+    // Jacobian of the horizontal displacement: folding -> foam.
+    float jxx = 1.0 + (xp.x - xm.x) / (2.0 * texel);
+    float jzz = 1.0 + (zp.z - zm.z) / (2.0 * texel);
+    float jxz = (zp.x - zm.x) / (2.0 * texel);
+    float jacobian = jxx * jzz - jxz * jxz;
+    float foam = clamp(-(jacobian - 1.0) * 3.0, 0.0, 1.0);
+
+    imageStore(normalTex, ivec2(id), vec4(nrm, foam));
+}

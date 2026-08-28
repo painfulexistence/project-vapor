@@ -25,6 +25,7 @@
 
 #include "rhi.hpp"            // TextureHandle, PixelFormat
 #include "render_data.hpp"    // CameraRenderData
+#include "graphics_effects.hpp"  // WaterData/WaterTransform (water surface API)
 #include "camera.hpp"
 #include "graphics.hpp"       // Image, FontHandle via font_manager
 #include "font_manager.hpp"   // FontHandle
@@ -249,6 +250,27 @@ public:
     // per emitter (per-material draws: blend mode + texture per packet). Backends
     // without per-material particle draws (legacy Metal) ignore this.
     virtual void setParticleDrawList(const std::vector<ParticleDrawPacket>& draws) {}
+
+    // ---- Water surface --------------------------------------------------
+    // FFT water surface with planar reflections, refraction and caustics.
+    // Implemented by the RHI renderer (waterSimPass/waterReflectionPass/
+    // waterCausticsPass/waterPass); no-ops on renderers without the passes. Off by default — an app configures the grid,
+    // transform and settings, then enables it. See Renderer for the semantics
+    // of each call.
+    virtual void setWaterEnabled(bool enabled) {}
+    virtual bool isWaterEnabled() const { return false; }
+    virtual void setWaterGrid(Uint32 tilesX, Uint32 tilesZ, float tileSize,
+                              float texTileX, float texTileZ) {}
+    virtual void setWaterTransform(const WaterTransform& transform) {}
+    virtual void setWaterSettings(const WaterData& settings) {}
+    // FFT simulation parameters (spectrum shape, wind, choppiness, depth).
+    virtual void setWaterSimParams(const WaterSimParams& params) {}
+    // Replace the built-in procedural water textures (normal x2, foam, noise).
+    // Null pointers keep the current texture for that slot.
+    virtual void setWaterTextures(const std::shared_ptr<Vapor::Image>& normalMap1,
+                                  const std::shared_ptr<Vapor::Image>& normalMap2,
+                                  const std::shared_ptr<Vapor::Image>& foamMap,
+                                  const std::shared_ptr<Vapor::Image>& noiseMap) {}
 
     // Sky/atmosphere description resolved from the ECS SkyComponent by SkySystem.
     // Pushed only when the component changes. The sun is not included here — it

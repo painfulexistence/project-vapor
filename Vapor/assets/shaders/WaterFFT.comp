@@ -1,0 +1,64 @@
+#version 450
+// FFT water — one inverse-FFT pass over one axis of a 256x256 complex
+// texture. GLSL twin of the waterFFT kernel in 3d_water_fft_rhi.metal.
+//
+// Radix-2 Cooley-Tukey in shared memory: each workgroup owns one row (or
+// column — direction comes from a tiny UBO so the same pipeline serves both
+// axes), loads it bit-reversed, runs the 8 butterfly stages with barriers,
+// and writes back in place. RG and BA carry two independent complex fields,
+// so the height + displacement spectra ride through in two textures total.
+//
+// Convention: inverse transform (e^{+i...}), NO 1/N^2 normalization — the
+// ocean sum h(x) = sum h~(k) e^{ikx} is unnormalized, and the centered-k
+// storage is fixed up by the (-1)^(x+y) factor in the assemble kernel.
+
+layout(local_size_x = 256) in;
+
+const uint N = 256u;
+const float PI = 3.14159265359;
+
+// 0 = transform rows (x axis), 1 = transform columns (y axis). Two prebaked
+// single-uint buffers on the CPU side — not per-dispatch writes, which would
+// race (host-visible updates land immediately, the GPU reads later).
+layout(std430, set = 0, binding = 0) readonly buffer DirBuf { uint direction; };
+
+layout(set = 1, binding = 0, rgba32f) uniform image2D spec;
+
+shared vec4 s[N];
+
+vec2 cmul(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint line = gl_WorkGroupID.x;
+
+    ivec2 coord = (direction == 0u) ? ivec2(int(t), int(line)) : ivec2(int(line), int(t));
+
+    // Bit-reversed load (8 bits for N = 256).
+    uint rev = bitfieldReverse(t) >> 24;
+    s[rev] = imageLoad(spec, coord);
+    barrier();
+
+    // Butterfly stages: len = 2, 4, ..., 256. Threads 0..N/2-1 each own one
+    // butterfly per stage.
+    for (uint len = 2u; len <= N; len <<= 1u) {
+        uint half_ = len >> 1u;
+        if (t < N / 2u) {
+            uint m = t % half_;
+            uint i = (t / half_) * len + m;
+            uint j = i + half_;
+            float ang = 2.0 * PI * float(m) / float(len);  // inverse: +i
+            vec2 w = vec2(cos(ang), sin(ang));
+            vec4 a = s[i];
+            vec4 b = s[j];
+            vec4 bw = vec4(cmul(b.xy, w), cmul(b.zw, w));
+            s[i] = a + bw;
+            s[j] = a - bw;
+        }
+        barrier();
+    }
+
+    imageStore(spec, coord, s[t]);
+}

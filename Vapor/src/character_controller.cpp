@@ -162,7 +162,13 @@ void CharacterController::update(float deltaTime, const glm::vec3& gravity) {
 
     JPH::Vec3 newVelocity;
 
-    if (character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround) {
+    // Grounded characters get their vertical velocity zeroed so they don't
+    // accumulate gravity while standing. A jump applied earlier this frame is
+    // the exception: the ground state is only recomputed inside
+    // ExtendedUpdate() below, so the character still reads as OnGround and
+    // zeroing here would discard the jump impulse before it is ever
+    // integrated — the jump would silently do nothing.
+    if (character->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround && !isJumping) {
         newVelocity = JPH::Vec3(desiredHorizontalVelocity.x, 0.0f, desiredHorizontalVelocity.z);
     } else {
         // In air: manually apply gravity to vertical component

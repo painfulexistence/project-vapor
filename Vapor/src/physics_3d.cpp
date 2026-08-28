@@ -644,11 +644,23 @@ auto Physics3D::createSphereBody(
 auto Physics3D::createBoxBody(
     const glm::vec3& halfSize, const glm::vec3& position, const glm::quat& rotation, BodyMotionType motionType
 ) -> BodyHandle {
-    JPH::BoxShapeSettings shapeSettings(JPH::Vec3(halfSize.x, halfSize.y, halfSize.z));
+    // Jolt rejects any box whose smallest half-extent is under the shape's
+    // convex radius (0.05 m by default), which surfaced as a hard throw on thin
+    // procedural colliders — a 4 cm handrail took the whole app down. Shrink the
+    // convex radius to fit rather than inflating the box, so the collider keeps
+    // the size it was authored with.
+    const glm::vec3 half = glm::max(halfSize, glm::vec3(1e-4f));
+    JPH::BoxShapeSettings shapeSettings(JPH::Vec3(half.x, half.y, half.z));
+    // Read the default off the settings rather than naming Jolt's constant, so
+    // this keeps working if the default moves.
+    shapeSettings.mConvexRadius = std::min({ shapeSettings.mConvexRadius, half.x, half.y, half.z });
     shapeSettings.SetEmbedded();
     JPH::ShapeSettings::ShapeResult shapeResult = shapeSettings.Create();
     if (shapeResult.HasError()) {
-        throw std::runtime_error("Failed to create box shape");
+        throw std::runtime_error(
+            fmt::format("Failed to create box shape (half extents {} {} {}, convex radius {}): {}",
+                        half.x, half.y, half.z, shapeSettings.mConvexRadius,
+                        shapeResult.GetError().c_str()));
     }
     JPH::ShapeRefC shape = shapeResult.Get();
 

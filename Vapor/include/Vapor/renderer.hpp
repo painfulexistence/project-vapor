@@ -2,6 +2,7 @@
 #include "irenderer.hpp"
 #include "rhi.hpp"
 #include "render_data.hpp"
+#include "graphics_effects.hpp"  // WaterData/WaterTransform (water pass)
 #include "render_graph.hpp"
 #include "camera.hpp"
 #include "graphics.hpp"
@@ -338,6 +339,39 @@ public:
     bool& getMicroVoxelGICrossVolume() { return microVoxelGICrossVolume; }
 
     // ========================================================================
+    // Water Surface API (RHI port of the legacy Metal water pass)
+    // ========================================================================
+    // FFT spectral surface with planar reflections, snapshot refraction and
+    // projected caustics (waterSimPass / waterReflectionPass /
+    // waterCausticsPass / waterPass). Off by default; an app calls
+    // setWaterGrid + setWaterTransform + setWaterSettings (+ setWaterSimParams
+    // to tune the spectrum), then enables it. The pass overwrites modelMatrix, time, the sun mirror and
+    // the water level (causticsParams.w) in the settings every frame; every
+    // other WaterData field belongs to the app.
+
+    void setWaterEnabled(bool enabled) override { waterEnabled = enabled; }
+    bool isWaterEnabled() const override { return waterEnabled; }
+    // Rebuild the surface grid (MeshBuilder::buildWaterGrid): tilesX*tilesZ
+    // quads of tileSize meters, centered on the origin; texTile* = normal-map
+    // UV repeats across the whole grid.
+    void setWaterGrid(Uint32 tilesX, Uint32 tilesZ, float tileSize,
+                      float texTileX, float texTileZ) override;
+    void setWaterTransform(const WaterTransform& transform) override;
+    void setWaterSettings(const WaterData& settings) override;
+    // FFT simulation parameters. Spectrum-shaping changes trigger a rebake on
+    // the next frame; resolution is pinned to 256 (the FFT kernels bake N).
+    void setWaterSimParams(const WaterSimParams& params) override;
+    WaterData& getWaterSettings() { return waterSettings; }
+    WaterSimParams& getWaterSimParams() { return waterSimParams; }
+    const WaterTransform& getWaterTransform() const { return waterTransform; }
+    // Replace the built-in procedural water textures. Null pointers keep the
+    // current texture for that slot.
+    void setWaterTextures(const std::shared_ptr<Vapor::Image>& normalMap1,
+                          const std::shared_ptr<Vapor::Image>& normalMap2,
+                          const std::shared_ptr<Vapor::Image>& foamMap,
+                          const std::shared_ptr<Vapor::Image>& noiseMap) override;
+
+    // ========================================================================
     // Texture Creation (for sprites/batch rendering)
     // ========================================================================
 
@@ -429,6 +463,14 @@ private:
     void bloomUpsamplePass();
     void skyAtmospherePass();
     void lightScatteringPass();
+    // Water: the FFT sim computes the surface fields, the mirrored-camera
+    // planar reflection renders, caustics light submerged geometry (fullscreen,
+    // colorRT swap), then the surface draws over a snapshot of that scene.
+    void waterSimPass();
+    void waterReflectionPass();
+    void waterCausticsPass();
+    void waterPass();
+    void updateWaterDataBuffer();  // per-frame WaterData refresh, shared by all
     void heightFogPass();
     void volumetricFogPass();
     void volumeRaymarchPass();
@@ -756,6 +798,13 @@ private:
         // Edge view: replace the image with its gradient magnitude (outline
         // look). Distinct from Sobel, which overlays edges on the image.
         float enableEdges = 0.0f;
+        // Bloom composite strength on the Vulkan path (Metal composites bloom
+        // in its own BloomComposite pass and reads Renderer::bloomStrength
+        // directly). Defaults to the value Vulkan used to hardcode, so the
+        // default frame is unchanged; postProcessPass mirrors the live
+        // Renderer::bloomStrength here each frame so the slider drives both
+        // backends identically.
+        float bloomStrength = 0.8f;
     };
     PostProcessParams postProcessParams;
     BufferHandle postProcessParamsBuffer;  // Vulkan PostProcess.frag set1 b0
@@ -800,6 +849,61 @@ private:
     BufferHandle heightFogDataBuffer;
     HeightFogRenderData heightFogSettings;
     bool heightFogEnabled = true;
+
+    // Water surface + caustics (see the Water Surface API section above).
+    // The grid lives in a storage buffer pulled by vertex_id / gl_VertexIndex
+    // (WaterVertexData is 28 tightly packed bytes — std430 would misalign it
+    // as a vertex attribute struct, so both backends pull manually).
+    PipelineHandle waterPipeline;
+    ShaderHandle waterVertexShader;
+    ShaderHandle waterFragmentShader;
+    PipelineHandle waterCausticsPipeline;
+    ShaderHandle waterCausticsShader;
+    BufferHandle waterDataBuffer;
+    BufferHandle waterVertexBuffer;
+    BufferHandle waterIndexBuffer;
+    Uint32 waterIndexCount = 0;
+    TextureHandle waterNormalTex1;
+    TextureHandle waterNormalTex2;
+    TextureHandle waterFoamTex;
+    TextureHandle waterNoiseTex;
+    WaterData waterSettings{};  // zero-init; real defaults set in initialize()
+    WaterTransform waterTransform;
+    bool waterEnabled = false;
+    void createWaterDefaultTextures();
+
+    // FFT simulation (WaterSim pass): spectrum + inverse-FFT chain producing
+    // the displacement field (texture + vertex-stage buffer mirror) and the
+    // normal/whitecap map the surface shader consumes.
+    WaterSimParams waterSimParams;
+    bool waterSpectrumDirty = true;
+    BufferHandle waterSimParamsBuffer;
+    BufferHandle waterFFTDirBuffer[2];  // prebaked {0}=rows {1}=cols (no per-frame writes)
+    BufferHandle waterDispBuffer;       // float4[N^2] displacement, read by Water.vert
+    TextureHandle waterH0Tex;
+    TextureHandle waterSpecATex;
+    TextureHandle waterSpecBTex;
+    TextureHandle waterDispTex;
+    TextureHandle waterSimNormalTex;
+    ShaderHandle waterSpectrumInitShader;
+    ShaderHandle waterSpectrumEvolveShader;
+    ShaderHandle waterFFTShader;
+    ShaderHandle waterFFTAssembleShader;
+    ShaderHandle waterFFTNormalsShader;
+    ComputePipelineHandle waterSpectrumInitPipeline;
+    ComputePipelineHandle waterSpectrumEvolvePipeline;
+    ComputePipelineHandle waterFFTPipeline;
+    ComputePipelineHandle waterFFTAssemblePipeline;
+    ComputePipelineHandle waterFFTNormalsPipeline;
+
+    // Planar reflection (WaterReflection pass): the scene re-rendered through
+    // the mirrored camera into a half-res HDR target, sampled projectively by
+    // the surface shader.
+    TextureHandle waterReflColorRT;
+    TextureHandle waterReflDepthRT;
+    ShaderHandle waterReflVertexShader;
+    ShaderHandle waterReflFragmentShader;
+    PipelineHandle waterReflPipeline;
     // Heterogeneous volume raymarch (EmberGen density grids; rendering only —
     // import/parsing lives in a separate PR). One AABB volume per scene; a
     // procedural 64^3 test grid stands in until setVolumeDensity() gets real

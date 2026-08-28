@@ -61,6 +61,10 @@ struct PostProcessParams {
 
     // Edge view (gradient magnitude replaces the image)
     float enableEdges;
+    // Bloom composite strength. Unused on Metal (bloom is composited in the
+    // prior BloomComposite pass), present only to keep this struct's layout
+    // identical to Vapor::PostProcessParams / PostProcess.frag.
+    float bloomStrength;
 };
 
 vertex RasterizerData vertexMain(uint vertexID [[vertex_id]]) {

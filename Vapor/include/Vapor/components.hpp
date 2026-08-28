@@ -532,6 +532,115 @@ namespace Vapor {
         float windSpeed = 1.0f;
     };
 
+    // ── Water surface ──────────────────────────────────────────────────────
+    // The FFT water surface, declared as data instead of a wall of renderer
+    // calls. There is one surface in the renderer, so WaterSystem takes the
+    // first enabled component and pushes it; a second one is ignored (with a
+    // diagnostic) rather than fighting over the same surface.
+    //
+    // Split by update cost, because the three renderer entry points are not
+    // equally cheap: `look` is pushed every frame (an assignment, so it stays
+    // live-tunable), while the grid and the spectrum are pushed only when they
+    // actually change — setWaterGrid reallocates GPU buffers and
+    // setWaterSimParams dirties the spectrum for a rebake.
+
+    // The surface grid: tilesX * tilesZ quads of tileSize meters, centered on
+    // the entity. Pushed on change — setWaterGrid runs buildWaterGrid and
+    // reallocates two GPU buffers.
+    struct WaterGridDesc {
+        Uint32 tilesX = 64;
+        Uint32 tilesZ = 64;
+        float tileSize = 0.25f;
+        glm::vec2 texTile = glm::vec2(1.0f);  // detail normal-map repeats across the grid
+
+        bool operator==(const WaterGridDesc&) const = default;
+    };
+
+    // How the surface looks. Pushed every frame, so it stays live-tunable. The
+    // water pass writes modelMatrix, time, the sun mirror and the water level
+    // itself, which is why none of those appear here.
+    struct WaterLookDesc {
+        glm::vec4 surfaceColor = glm::vec4(0.82f, 0.90f, 0.94f, 1.0f);
+        glm::vec4 refractionColor = glm::vec4(0.42f, 0.68f, 0.72f, 1.0f);
+        glm::vec4 normalMapScroll = glm::vec4(1.0f, 0.35f, -0.45f, 1.0f);
+        glm::vec2 normalMapScrollSpeed = glm::vec2(0.011f, 0.008f);
+        float refractionDistortionFactor = 0.03f;
+        float refractionHeightFactor = 2.2f;
+        float refractionDistanceFactor = 1.0f;
+        float depthSofteningDistance = 0.30f;
+        float foamHeightStart = 0.8f;
+        float foamFadeDistance = 0.4f;
+        float foamTiling = 2.0f;
+        float foamAngleExponent = 8.0f;
+        float foamBrightness = 1.1f;
+        float roughness = 0.045f;
+        float reflectance = 0.38f;   // F0 ~ 0.023 at 0.38 — real water
+        float specIntensity = 6.0f;
+        float dampeningFactor = 4.0f;
+        // x=patch size (m) y=detail normal tiling z=detail normal strength
+        // w=displacement scale.
+        glm::vec4 fftParams = glm::vec4(16.0f, 6.0f, 0.30f, 1.0f);
+        // x=planar strength (0=env cube only) y=surface distortion
+        // z=foam whitecap scale w=unused.
+        glm::vec4 reflectionParams = glm::vec4(0.85f, 0.05f, 0.5f, 256.0f);
+    };
+
+    // Projected caustics. The bounds are authored RELATIVE to the entity (like
+    // a fog bank's halfExtent) so one authored volume works wherever the water
+    // is placed; the system bakes them to world space.
+    struct WaterCausticsDesc {
+        float intensity = 1.15f;  // 0 = off
+        float worldScale = 1.7f;
+        float speed = 0.6f;
+        glm::vec3 boundsMin = glm::vec3(-8.0f, -2.0f, -8.0f);
+        glm::vec3 boundsMax = glm::vec3(8.0f, 0.0f, 8.0f);
+        float fadeDepth = 9.0f;
+        float envReflectionIntensity = 1.0f;
+    };
+
+    // The FFT spectrum. Pushed on change: every push dirties the spectrum for a
+    // rebake, so driving it per frame would be pure waste. `amplitude` is the
+    // Phillips constant A, NOT a wave height — the variance sums every lattice
+    // mode, so useful values are around 1e-4..1e-2 and 1.0 gives metre-scale
+    // surf. See WaterSimParams and Examples/Poolrooms for calibrated numbers.
+    struct WaterSpectrumDesc {
+        float patchSize = 16.0f;
+        float windSpeedMps = 1.7f;
+        float windDirRad = 0.9f;
+        float amplitude = 2.0e-4f;
+        float choppiness = 1.05f;
+        float depthMeters = 2.0f;
+        float smallWaveCutoff = 0.012f;
+        float directionalSpread = 2.5f;
+        float gravity = 9.81f;
+        float surfaceTension = 0.074f;
+        float timeScale = 1.0f;
+        Uint32 seed = 1337u;
+
+        bool operator==(const WaterSpectrumDesc&) const = default;
+    };
+
+    struct WaterComponent {
+        bool enabled = true;
+        WaterGridDesc grid;
+        WaterLookDesc look;
+        WaterCausticsDesc caustics;
+        WaterSpectrumDesc spectrum;
+
+        // Last-pushed grid/transform/spectrum, so the system can tell an edit
+        // from a frame. Hidden: internal state, neither authorable nor
+        // inspectable — the same idiom as WeatherComponent::_lastState.
+        Hidden<bool> _pushed{ false };
+        Hidden<WaterGridDesc> _lastGrid{};
+        Hidden<WaterSpectrumDesc> _lastSpectrum{};
+        Hidden<glm::vec3> _lastPosition{ glm::vec3(0.0f) };
+        Hidden<glm::vec3> _lastScale{ glm::vec3(0.0f) };
+        // How many surfaces competed last frame, so the "more than one water
+        // surface" complaint is made once per change and not sixty times a
+        // second for as long as the scene is loaded.
+        Hidden<int> _lastRivalCount{ 0 };
+    };
+
     // Per-emitter configuration.
     struct ParticleEmitterComponent {
         uint32_t maxParticles = 128;
