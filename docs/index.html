@@ -3,7 +3,24 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Project Vapor</title>
+  <title>Project Vapor — Current-gen 3D Game Engine in C++ (Metal / Vulkan)</title>
+  <meta name="description" content="Project Vapor is a current-gen 3D game engine built solo in C++20, targeting Metal and Vulkan — GPU-driven rendering, meshlets, hybrid ray tracing, ECS, and a working demo game.">
+  <link rel="canonical" href="https://verse.lucidum.dev/vapor/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Project Vapor">
+  <meta property="og:title" content="Project Vapor — Current-gen 3D Game Engine in C++ (Metal / Vulkan)">
+  <meta property="og:description" content="Project Vapor is a current-gen 3D game engine built solo in C++20, targeting Metal and Vulkan — GPU-driven rendering, meshlets, hybrid ray tracing, ECS, and a working demo game.">
+  <meta property="og:url" content="https://verse.lucidum.dev/vapor/">
+  <meta property="og:image" content="https://verse.lucidum.dev/vapor/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Project Vapor — current-gen 3D game engine built solo in C++20. Metal · Vulkan · hardware RT; GPU-driven, meshlets, ReSTIR.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:site" content="@DevLucidum">
+  <meta name="twitter:creator" content="@DevLucidum">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"Project Vapor","description":"Project Vapor is a current-gen 3D game engine built solo in C++20, targeting Metal and Vulkan — GPU-driven rendering, meshlets, hybrid ray tracing, ECS, and a working demo game.","url":"https://verse.lucidum.dev/vapor/","image":"https://verse.lucidum.dev/vapor/og-image.png","codeRepository":"https://github.com/painfulexistence/project-vapor","programmingLanguage":"C++","license":"https://opensource.org/license/mit/","author":{"@type":"Person","name":"Loïc Chen","alternateName":"Lucidum","url":"https://lucidum.dev/"}}
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -30,6 +47,35 @@
       line-height: 1.6;
       margin-bottom: 0;
     }
+
+    /* Showcase reel — single hero video, double-bezel to match the cards */
+    .showcase-reel {
+      background: rgba(9,9,11,0.6);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 5px;
+      margin-bottom: 14px;
+      transition: border-color var(--t-normal);
+    }
+    .showcase-reel:hover { border-color: var(--line-hover); }
+    .showcase-media {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      border-radius: 2px;
+      background: var(--surface-2);
+      border: 1px solid rgba(255,255,255,0.03);
+    }
+    .showcase-caption {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      margin-bottom: 48px;
+      padding: 0 2px;
+    }
+    .showcase-caption b { color: var(--text); font-weight: 700; }
   </style>
 </head>
 <body>
@@ -37,7 +83,6 @@
     <div class="nav-inner">
       <a class="nav-logo" href="index.html">Project Vapor</a>
       <a href="documentation/index.html">Documentation</a>
-      <a href="demo/index.html">Demo</a>
       <a href="devlog/index.html">Devlog</a>
       <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub ↗</a>
     </div>
@@ -49,20 +94,22 @@
       <p>A modern 3D game engine built from scratch in C++, targeting Metal and Vulkan. Solo project — GPU-driven rendering, ECS, physics integration, and a working demo game as the proving ground.</p>
     </div>
 
-    <p class="section-label">// 01 · Explore</p>
+    <p class="section-label">// 01 · Showcase</p>
+    <div class="showcase-reel">
+      <!-- TODO: drop in a 15–30s muted demo reel (RT soft shadows → volumetric sky → tessellated terrain → meshlets). `poster` shows the first frame before the clip loads. Swap paths for your CDN (e.g. https://verse.lucidum.dev/videos/…) if you host video there. -->
+      <video class="showcase-media" data-hero autoplay muted loop playsinline preload="metadata" poster="media/vapor-reel.jpg">
+        <source src="media/vapor-reel.mp4" type="video/mp4" />
+      </video>
+    </div>
+    <p class="showcase-caption">// <b>real-time capture</b> — Metal backend, Apple Silicon</p>
+
+    <p class="section-label">// 02 · Explore</p>
     <div class="card-grid">
       <a class="card-outer" href="documentation/index.html">
         <div class="card-inner">
           <div class="card-tag">// reference</div>
           <h2>Documentation</h2>
           <p>Architecture, features, tech stack, and roadmap for the Vapor engine.</p>
-        </div>
-      </a>
-      <a class="card-outer" href="demo/index.html">
-        <div class="card-inner">
-          <div class="card-tag">// demo</div>
-          <h2>Demo</h2>
-          <p>Interactive demo of the engine in action. Native Metal/Vulkan — no WASM build yet.</p>
         </div>
       </a>
       <a class="card-outer" href="devlog/index.html">
@@ -78,5 +125,21 @@
   <footer>
     <p>Project Vapor &mdash; MIT License &mdash; <a href="https://github.com/painfulexistence/project-vapor" target="_blank">GitHub</a></p>
   </footer>
+
+  <script>
+    // Respect reduced-motion for the autoplaying reel; grid cells (if any) play on hover only.
+    (function () {
+      var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      document.querySelectorAll('video[data-hero]').forEach(function (v) {
+        if (reduce) { v.removeAttribute('autoplay'); v.pause(); }
+      });
+      document.querySelectorAll('.shot video[data-hover]').forEach(function (v) {
+        var cell = v.closest('.shot');
+        if (!cell) return;
+        cell.addEventListener('mouseenter', function () { if (!reduce) { var p = v.play(); if (p) p.catch(function () {}); } });
+        cell.addEventListener('mouseleave', function () { v.pause(); try { v.currentTime = 0; } catch (e) {} });
+      });
+    })();
+  </script>
 </body>
 </html>
